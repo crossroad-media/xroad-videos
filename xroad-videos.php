@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -158,7 +158,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.0' );
+	update_option( 'xrv_version', '1.0.1' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -1142,6 +1142,78 @@ function xrv_save_meta( $post_id, $post ) {
 		}
 		// On WP_Error the editor's manually uploaded featured image (if any) remains the poster fallback.
 	}
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * 9a. EDITOR AUTO-TITLE  (so pasting a URL is enough to save)
+ *     The block editor refuses to save a post with an empty title AND empty body, which would leave a
+ *     URL-only video as an unsaveable auto-draft and prevent the server-side oEmbed title/thumbnail step
+ *     from ever running. This admin script watches the Video URL field and, while the title is still
+ *     empty, fetches the same-origin WordPress oEmbed proxy and fills the title — making the post
+ *     saveable and giving the editor instant feedback. It NEVER overwrites a title the editor has typed,
+ *     and works in both the block editor (wp.data) and the classic editor (#title input).
+ * ------------------------------------------------------------------------------------------------- */
+add_action( 'admin_enqueue_scripts', 'xrv_admin_autotitle_assets' );
+function xrv_admin_autotitle_assets( $hook ) {
+	if ( 'post.php' !== $hook && 'post-new.php' !== $hook ) {
+		return;
+	}
+	$screen = get_current_screen();
+	if ( ! $screen || 'xroad_video' !== $screen->post_type ) {
+		return;
+	}
+	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.1', true );
+	wp_enqueue_script( 'xrv-admin' );
+	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
+}
+
+function xrv_admin_autotitle_js() {
+	return <<<'JS'
+(function(){
+	function ready(fn){ if(document.readyState!=='loading'){ fn(); } else { document.addEventListener('DOMContentLoaded', fn); } }
+	ready(function(){
+		var input = document.getElementById('_xrv_source_url');
+		if(!input) return;
+		var busy = false, lastUrl = '';
+
+		function titleIsEmpty(){
+			if(window.wp && wp.data && wp.data.select('core/editor')){
+				var t = wp.data.select('core/editor').getEditedPostAttribute('title');
+				return !t || !t.trim();
+			}
+			var el = document.getElementById('title');
+			return el ? !el.value.trim() : true;
+		}
+		function setTitle(title){
+			if(window.wp && wp.data && wp.data.dispatch('core/editor')){
+				wp.data.dispatch('core/editor').editPost({ title: title });
+			} else {
+				var el = document.getElementById('title');
+				if(el){
+					el.value = title;
+					var wrap = document.getElementById('titlewrap'); if(wrap){ wrap.className = wrap.className.replace('hidden',''); }
+					var prompt = document.getElementById('title-prompt-text'); if(prompt){ prompt.style.display = 'none'; }
+				}
+			}
+		}
+		function maybeFill(){
+			var url = (input.value || '').trim();
+			if(!url || url === lastUrl || busy) return;
+			if(!titleIsEmpty()) return;                 // never overwrite an editor-entered title
+			if(!(window.wp && wp.apiFetch)) return;
+			busy = true; lastUrl = url;
+			wp.apiFetch({ path: '/oembed/1.0/proxy?url=' + encodeURIComponent(url) + '&format=json' })
+				.then(function(o){ if(o && o.title && titleIsEmpty()) setTitle(o.title); })
+				.catch(function(){})
+				.then(function(){ busy = false; });
+		}
+		input.addEventListener('change', maybeFill);
+		input.addEventListener('blur', maybeFill);
+		input.addEventListener('paste', function(){ setTimeout(maybeFill, 60); });
+	});
+})();
+JS;
 }
 
 /* =================================================================================================
