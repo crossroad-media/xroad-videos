@@ -1,0 +1,11 @@
+# Build artifact — regenerate from source, attach to releases
+xroad-videos.zip
+/_pkg/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
