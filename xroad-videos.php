@@ -1,16 +1,17 @@
 <?php
 /**
- * Plugin Name:       the project Videos
+ * Plugin Name:       Crossroad Videos
  * Plugin URI:        https://crossroad.us
- * Description:        Privacy-by-design, click-to-load video gallery for a foundation. A
- *                     curated custom-post-type model (editors add and order each video) that renders a
- *                     server-side masonry grid of LOCALLY stored thumbnails and makes ZERO network calls
- *                     to YouTube or Google until a visitor clicks play, so no consent manager has anything
- *                     to block and no banner, warning overlay, or black player can ever appear. On click it
- *                     injects a youtube-nocookie.com iframe and pushes a video_play event to dataLayer.
- *                     Self-generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with
- *                     the site's Organization node. Exposes a shortcode [xroad-videos] and a block
- *                     (xroad/videos). Built by Crossroad Media for a foundation.
+ * Description:        Privacy-first, click-to-load video gallery. A curated custom-post-type model
+ *                     (editors add and order each video) that renders a server-side masonry grid of
+ *                     LOCALLY stored thumbnails and makes ZERO network calls to YouTube or Google until a
+ *                     visitor clicks play, so no consent manager has anything to block and no banner,
+ *                     warning overlay, or black player can ever appear. A drop-in alternative to Smash
+ *                     Balloon YouTube Feed for sites running a cookie/consent manager. On click it injects
+ *                     a youtube-nocookie.com iframe and pushes a video_play event to dataLayer. Self-
+ *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
+ *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
+ *                     By Crossroad Media.
  * Version:           1.0.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
@@ -21,12 +22,12 @@
  *
  * ARCHITECTURE (read this first)
  * ------------------------------------------------------------------------------------------------
- * THE PROBLEM THIS REPLACES. The Video Library previously ran a third-party social-feed plugin plus a
- * consent manager. The feed fired requests to youtube.com / i.ytimg.com / google.com on PAGE LOAD,
- * before consent. The CMP tried to intercept those requests, and that interception is what produced the
- * warning overlay, the black player, and the cascade JS failure. Page-refresh workarounds then corrupted
- * GA4 attribution. Every documented failure had the same root cause: third-party requests before a
- * deliberate user action.
+ * THE PROBLEM THIS REPLACES. Smash Balloon YouTube Feed (and standard YouTube embeds) fire requests to
+ * youtube.com / i.ytimg.com / google.com on PAGE LOAD, before consent. When a cookie/consent manager
+ * (CookieYes, Osano, Cookiebot, etc.) is present it tries to intercept those requests, and that
+ * interception is what produces the warning overlay, the black/blank player, and cascade JS failures.
+ * Page-refresh "fixes" that force the player to load then corrupt GA4 attribution. Every one of those
+ * failures has the same root cause: third-party requests before a deliberate user action.
  *
  * THE FIX (a facade). The initial state of every card is a LOCAL poster image plus a play button: pure
  * first-party HTML and CSS, zero requests to any Google domain, zero cookies, zero localStorage. Because
@@ -35,17 +36,16 @@
  * youtube-nocookie.com (privacy-enhanced mode). This is the web.dev "facade" pattern. Storing thumbnails
  * locally hardens the guarantee: even the poster image makes no call to i.ytimg.com.
  *
- * THE RENDER MODEL (ported from the Publications plugin). EVERY video is printed into the initial HTML
- * server-side. No AJAX, no client templating, no spinner; the performance optimization layer caches
- * finished HTML and first paint already contains every card. Filtering and sorting are pure client-side
- * display toggles on nodes already in the DOM, so interaction is instantaneous. The keyword index is
- * GENERATED server-side from each record's taxonomy terms plus a central synonym map; editors never hand
- * write a keyword blob, they just pick terms.
+ * THE RENDER MODEL. EVERY video is printed into the initial HTML server-side. No AJAX, no client
+ * templating, no spinner; a page cache (or performance-optimization plugin) caches finished HTML and
+ * first paint already contains every card. Filtering and sorting are pure client-side display toggles on
+ * nodes already in the DOM, so interaction is instantaneous. The keyword index is GENERATED server-side
+ * from each record's taxonomy terms plus an (optionally filtered) synonym map; editors never hand-write a
+ * keyword blob, they just pick terms.
  *
  * ZERO FRAMEWORK DEPENDENCY. This plugin owns the entire stack: the data model, the markup, the inline
- * CSS, the vanilla JS, and the schema. No Divi, no ACF, no jQuery, no build step. It drops into a Divi
- * Text module, a core Shortcode block, or the xroad/videos block, and renders identically. When the project
- * migrates off Divi to Gutenberg, this tool moves with it unchanged.
+ * CSS, the vanilla JS, and the schema. No page builder, no ACF, no jQuery, no build step. It drops into a
+ * page-builder Text module, a core Shortcode block, or the xroad/videos block, and renders identically.
  *
  * PROVIDER ROUTING. A scalar _xrv_provider meta (youtube default; vimeo reserved for 2.0) routes all
  * provider-specific logic (ID parser, thumbnail candidates, embed URL) through a switch(), so a second
@@ -58,11 +58,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /* =================================================================================================
- * 1. DATA MODEL  (this plugin owns the post type; nothing pre-exists to layer on)
- *    Unlike the Publications plugin (which layers on ACF's existing `publication` type), the video
- *    library has no incumbent CPT, so we register `xroad_video` ourselves as the curated source for the
- *    grid. has_archive is false on purpose: the canonical dedicated pages already live at
- *    /ontarget/videos/{slug}/; this CPT only feeds the gallery and links out to those pages.
+ * 1. DATA MODEL  (this plugin owns the post type)
+ *    We register `xroad_video` as the curated source for the grid. has_archive is false by default: a
+ *    card can link out to a dedicated page per video via the _xrv_dedicated_url meta, so the CPT itself
+ *    only needs to feed the gallery rather than expose its own archive.
  * ================================================================================================= */
 
 add_action( 'init', 'xrv_register_data_model' );
@@ -80,22 +79,21 @@ function xrv_register_data_model() {
 			'not_found'          => 'No videos found',
 			'not_found_in_trash' => 'No videos found in Trash',
 			'all_items'          => 'All Videos',
-			'menu_name'          => 'Videos',
+			'menu_name'          => 'Crossroad Videos',
 		),
 		'public'        => true,
-		'has_archive'   => false,                 // canonical pages live at /ontarget/videos/; this is the curated source for the grid
+		'has_archive'   => false,                 // the curated source for the grid; cards link out via _xrv_dedicated_url
 		'show_in_rest'  => true,
 		'menu_icon'     => 'dashicons-video-alt3',
-		'rewrite'       => array( 'slug' => 'video' ),
+		'rewrite'       => array( 'slug' => 'xroad-video' ),
 		'supports'      => array( 'title', 'editor', 'thumbnail', 'page-attributes' ), // page-attributes => menu_order for manual drag-ordering
 	) );
 
-	// Four controlled-vocabulary taxonomies, mirroring the Publications plugin's four-facet pattern.
-	// Each maps to one filter group: series, condition, audience, topic. All non-hierarchical and
-	// REST-exposed so the block editor and future tooling can read them.
+	// Three controlled-vocabulary taxonomies, each mapping to one filter group: series, audience, topic.
+	// All non-hierarchical and REST-exposed so the block editor and future tooling can read them. Sites
+	// add their own terms; nothing is pre-seeded.
 	$taxonomies = array(
 		'xrv_series'    => 'Series',
-		'xrv_condition' => 'Condition',
 		'xrv_audience'  => 'Audience',
 		'xrv_topic'     => 'Topic',
 	);
@@ -120,7 +118,7 @@ function xrv_register_meta() {
 		'_xrv_provider'      => 'string',  // youtube (default) | vimeo (reserved for 2.0)
 		'_xrv_video_id'      => 'string',  // the platform video ID (11 chars for YouTube)
 		'_xrv_source_url'    => 'string',  // canonical watch URL
-		'_xrv_dedicated_url' => 'string',  // the /ontarget/videos/{slug}/ page this card links to
+		'_xrv_dedicated_url' => 'string',  // optional: a dedicated page for this video the card links to
 		'_xrv_duration_iso'  => 'string',  // ISO 8601, e.g. PT12M30S
 		'_xrv_upload_date'   => 'string',  // YYYY-MM-DD
 		'_xrv_description'    => 'string', // plain-language summary
@@ -137,48 +135,25 @@ function xrv_register_meta() {
 }
 
 /* -------------------------------------------------------------------------------------------------
- * 1b. Seed the controlled vocabularies on activation (idempotent: term_exists guards every insert, so
- *     re-activation never duplicates a term). Mirrors the Publications plugin's guarded-seed pattern.
- *     Seed with Kim Sheridan (content owner) so these match the project's editorial taxonomy.
+ * 1b. Activation. Register the CPT + taxonomies so rewrite rules are correct, then flush once. The
+ *     plugin ships with NO preset terms — every site defines its own Series / Audience / Topic vocabulary
+ *     in the taxonomy editor. A site can pre-seed terms via the `xrv_seed_terms` filter (returning a
+ *     [ taxonomy => [ slug => name ] ] map); each insert is guarded by term_exists so it is idempotent.
  * ------------------------------------------------------------------------------------------------- */
 register_activation_hook( __FILE__, 'xrv_activate' );
 function xrv_activate() {
-	xrv_register_data_model(); // Ensure CPT + taxonomies exist before inserting terms.
+	xrv_register_data_model(); // Ensure CPT + taxonomies exist before inserting any terms.
 
-	$terms = array(
-		'xrv_series' => array(
-			'lunch-and-learn'        => 'Lunch & Learn',
-			'think-tank'             => 'Think Tank',
-			'track-tumor-board'      => 'TRACK Tumor Board',
-			'patient-stories'        => 'Patient Stories',
-			'organizational-history' => 'Organizational History',
-		),
-		'xrv_condition' => array(
-			'cholangiocarcinoma' => 'Cholangiocarcinoma',
-			'biliary-tract'      => 'Biliary tract cancer',
-			'hcc'                => 'Hepatocellular carcinoma',
-			'esophageal'         => 'Esophageal adenocarcinoma',
-			'cross-cancer'       => 'Tissue-agnostic / cross-cancer',
-		),
-		'xrv_audience' => array(
-			'patients-caregivers'    => 'Patients & Caregivers',
-			'researchers-clinicians' => 'Researchers & Clinicians',
-			'advocates'              => 'Advocates',
-		),
-		'xrv_topic' => array(
-			'precision-medicine'   => 'Precision medicine',
-			'advocacy'             => 'Advocacy',
-			'genetic-counseling'   => 'Genetic counseling',
-			'clinical-trials'      => 'Clinical trials',
-			'research-funding'     => 'Research funding',
-			'molecular-profiling'  => 'Molecular profiling',
-		),
-	);
-
-	foreach ( $terms as $tax => $set ) {
-		foreach ( $set as $slug => $name ) {
-			if ( ! term_exists( $slug, $tax ) ) {
-				wp_insert_term( $name, $tax, array( 'slug' => $slug ) );
+	$terms = apply_filters( 'xrv_seed_terms', array() );
+	if ( is_array( $terms ) ) {
+		foreach ( $terms as $tax => $set ) {
+			if ( ! taxonomy_exists( $tax ) || ! is_array( $set ) ) {
+				continue;
+			}
+			foreach ( $set as $slug => $name ) {
+				if ( ! term_exists( $slug, $tax ) ) {
+					wp_insert_term( $name, $tax, array( 'slug' => $slug ) );
+				}
 			}
 		}
 	}
@@ -348,32 +323,20 @@ function xrv_sideload_thumbnail( $post_id, $id, $provider = 'youtube' ) {
 
 /* =================================================================================================
  * 3. THE SEARCH INDEX GENERATOR
- *    For each video we build one lowercase keyword string from the title, description, every selected
- *    taxonomy term name AND slug, and a SYNONYM MAP that expands clinical and lay phrasing. Written into
- *    data-search on the card; the front-end keyword search matches against it. Editors never hand-write
- *    a keyword blob — tagging a video builds its index automatically.
+ *    For each video we build one lowercase keyword string from the title, description, and every selected
+ *    taxonomy term name AND slug, optionally expanded by a SYNONYM MAP. Written into data-search on the
+ *    card; the front-end keyword search matches against it. Editors never hand-write a keyword blob —
+ *    tagging a video builds its index automatically.
  * ================================================================================================= */
 
+/**
+ * Optional synonym map: term slug => extra search aliases appended whenever a record carries that term,
+ * so a search for a lay phrasing resolves to a video tagged with the formal term (and vice versa). Empty
+ * by default; sites extend it via the `xrv_synonym_map` filter, e.g.
+ *   add_filter( 'xrv_synonym_map', fn( $m ) => $m + array( 'webinars' => 'webinar online talk session' ) );
+ */
 function xrv_synonym_map() {
-	// term slug => extra aliases appended whenever a record carries that term.
-	return array(
-		'lunch-and-learn'        => 'webinar education educational session online talk',
-		'think-tank'             => 'researcher presentation symposium scientific meeting',
-		'track-tumor-board'      => 'example-001 molecular tumor board case study mtb genomic',
-		'patient-stories'        => 'patient story survivor caregiver testimonial lived experience',
-		'organizational-history' => 'about the foundation history mission origin story',
-		'cholangiocarcinoma'     => 'bile duct cancer cca biliary cancer bile duct carcinoma',
-		'biliary-tract'          => 'btc gallbladder cancer biliary cancer extrahepatic',
-		'hcc'                    => 'hepatocellular liver cancer',
-		'esophageal'             => 'oesophageal esophagus gastroesophageal gej',
-		'cross-cancer'           => 'tumor agnostic tumour agnostic tissue agnostic pan-cancer rare cancer solid tumors',
-		'precision-medicine'     => 'precision oncology targeted therapy molecularly targeted personalized medicine',
-		'advocacy'               => 'patient advocacy rare disease advocacy community',
-		'genetic-counseling'     => 'genetic counselling genetic testing hereditary germline',
-		'clinical-trials'        => 'clinical trial study enrollment trial design',
-		'research-funding'       => 'grant funding research grant funded research',
-		'molecular-profiling'    => 'genomic profiling ngs next-generation sequencing biomarker comprehensive genomic profiling',
-	);
+	return (array) apply_filters( 'xrv_synonym_map', array() );
 }
 
 /**
@@ -507,11 +470,6 @@ function xrv_render( $atts = array() ) {
 				$facet[ $group ][ $s ] = ( $facet[ $group ][ $s ] ?? 0 ) + 1;
 			}
 		}
-		// Condition is not a front-end filter group but feeds the search index and the schema.
-		$cond = wp_get_post_terms( $id, 'xrv_condition', array( 'fields' => 'slugs' ) );
-		$cond = is_wp_error( $cond ) ? array() : $cond;
-		$term_map['xrv_condition'] = $cond;
-
 		$provider  = (string) get_post_meta( $id, '_xrv_provider', true );
 		$provider  = $provider !== '' ? $provider : 'youtube';
 		$vid       = (string) get_post_meta( $id, '_xrv_video_id', true );
@@ -536,7 +494,6 @@ function xrv_render( $atts = array() ) {
 			'series'     => $groups['series'],
 			'audience'   => $groups['audience'],
 			'topic'      => $groups['topic'],
-			'cond'       => $cond,
 			'date_key'   => $upload !== '' ? (int) preg_replace( '/\D/', '', $upload ) : 0,
 			'search'     => xrv_build_search_index( $id, $term_map, $desc ),
 		);
@@ -560,7 +517,7 @@ function xrv_render( $atts = array() ) {
 		<div class="xrv-bar">
 			<div class="xrv-search">
 				<svg class="xrv-ic"><use href="#xrv-i-search"/></svg>
-				<input type="text" id="xrv-q" placeholder="precision medicine, FGFR, patient story&hellip;" aria-label="Search videos by keyword">
+				<input type="text" id="xrv-q" placeholder="Search videos&hellip;" aria-label="Search videos by keyword">
 			</div>
 			<div class="xrv-sortwrap">
 				<label for="xrv-sort">Sort</label>
@@ -695,28 +652,17 @@ function xrv_render_filter_group( $group, $heading, $taxonomy, $counts ) {
  *    the schema with no manual JSON editing. Each VideoObject carries the required and recommended Google
  *    fields (name, description, thumbnailUrl, uploadDate, duration, contentUrl, embedUrl, publisher). The
  *    publisher @id is host-derived and exposed via apply_filters('xrv_org_id', ...) so it can be pinned
- *    to be IDENTICAL to the Organization @id the SEO plugin already emits — the two then MERGE into one
+ *    to be IDENTICAL to the Organization @id your SEO plugin already emits — the two then MERGE into one
  *    entity instead of competing.
  *
- *    LAUNCH NOTE: confirm via view-source which SEO plugin emits the Organization node (the live head is
- *    ambiguous between Rank Math and Yoast) and pin xrv_org_id to that exact @id string. The filter makes
- *    this a one-line config in the theme/functions, not a code change here.
+ *    LAUNCH NOTE: if an SEO plugin (Yoast, Rank Math, etc.) emits an Organization node in the page head,
+ *    view-source to find its exact @id and pin xrv_org_id to that string. The filter makes this a one-
+ *    line config in the theme's functions.php, not a code change here. With no SEO plugin, the default
+ *    host-derived @id and the minimal Organization node below stand on their own.
  * ================================================================================================= */
 
 function xrv_org_id() {
 	return apply_filters( 'xrv_org_id', untrailingslashit( home_url() ) . '/#organization' );
-}
-
-/** Map a condition slug to a schema.org MedicalCondition name. '' for categories that are not diseases. */
-function xrv_condition_schema_name( $slug ) {
-	$map = apply_filters( 'xrv_condition_schema_names', array(
-		'cholangiocarcinoma' => 'Cholangiocarcinoma',
-		'biliary-tract'      => 'Biliary tract cancer',
-		'hcc'                => 'Hepatocellular carcinoma',
-		'esophageal'         => 'Esophageal adenocarcinoma',
-		// 'cross-cancer' is intentionally absent: it is a category, not a disease.
-	) );
-	return isset( $map[ $slug ] ) ? $map[ $slug ] : '';
 }
 
 function xrv_schema_jsonld( $records, $page_url = '' ) {
@@ -728,9 +674,8 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 	}
 	$org_ref = array( '@id' => $org_id ); // lean reference; the full node is defined once, below.
 
-	$items      = array();
-	$page_about = array(); // de-duplicated conditions across the whole library, for the page entity.
-	$pos        = 1;
+	$items = array();
+	$pos   = 1;
 
 	foreach ( $records as $r ) {
 		if ( $r['vid'] === '' ) {
@@ -764,52 +709,39 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 		$node['embedUrl']   = xrv_embed_url( $r['vid'], $r['provider'] );
 		$node['publisher']  = $org_ref;
 
-		// about: one MedicalCondition per tagged disease. Categories (cross-cancer) are skipped.
-		$about = array();
-		foreach ( (array) $r['cond'] as $slug ) {
-			$cn = xrv_condition_schema_name( $slug );
-			if ( $cn !== '' ) {
-				$about[]           = array( '@type' => 'MedicalCondition', 'name' => $cn );
-				$page_about[ $cn ] = true;
-			}
-		}
-		if ( $about ) {
-			$node['about'] = $about;
-		}
+		// Let sites extend a single VideoObject node (e.g. add `about`, `transcript`, `regionsAllowed`).
+		$node = apply_filters( 'xrv_video_schema', $node, $r );
 
 		$items[] = array( '@type' => 'ListItem', 'position' => $pos, 'item' => $node );
 		$pos++;
 	}
 
-	// The Organization, defined once. Same @id as the SEO plugin's head node, so the two merge.
+	// A minimal Organization node, defined once. Its @id matches xrv_org_id(), so when an SEO plugin emits
+	// its own Organization node under the same @id the two MERGE into one entity instead of competing.
 	$org_node = array(
-		'@type' => 'NGO',
+		'@type' => 'Organization',
 		'@id'   => $org_id,
-		'name'  => 'a foundation',
+		'name'  => get_bloginfo( 'name' ),
 		'url'   => home_url( '/' ),
 	);
+
+	$list_name = apply_filters( 'xrv_list_name', get_bloginfo( 'name' ) . ' video library' );
 
 	$collection = array(
 		'@type'      => 'CollectionPage',
 		'@id'        => $page_url . '#videos',
-		'name'       => 'Rare cancer videos: education & support',
+		'name'       => $list_name,
 		'isPartOf'   => array( '@id' => $website_id ),
 		'publisher'  => $org_ref,
 		'mainEntity' => array(
 			'@type'           => 'ItemList',
-			'name'            => 'a foundation rare cancer video library',
+			'name'            => $list_name,
 			'numberOfItems'   => count( $items ),
 			'itemListElement' => $items,
 		),
 	);
 	if ( ! empty( $page_url ) ) {
 		$collection['mainEntityOfPage'] = $page_url;
-	}
-	if ( $page_about ) {
-		$collection['about'] = array_map(
-			function ( $name ) { return array( '@type' => 'MedicalCondition', 'name' => $name ); },
-			array_keys( $page_about )
-		);
 	}
 
 	$graph = array(
@@ -823,8 +755,8 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 /* =================================================================================================
  * 7. INLINE ASSETS  (SVG sprite, scoped critical CSS, vanilla JS)
  *    Emitted inline inside the rendered block, namespaced under .xrv- and #xroad-videos-app. Inlining is
- *    deliberate: first paint is self-sufficient, the styles survive the performance optimization layer's
- *    unused-CSS pass (inline styles are not removal candidates), and the tool stays theme-independent.
+ *    deliberate: first paint is self-sufficient, the styles survive a performance plugin's unused-CSS
+ *    pass (inline styles are not removal candidates), and the tool stays theme-independent.
  *    WCAG AA: 4.5:1 text contrast, 3:1 non-text/focus ring.
  * ================================================================================================= */
 
@@ -987,7 +919,7 @@ function xrv_inline_js() {
 
 		// THE FACADE. One delegated click listener for the whole grid. Until this fires, the page has
 		// made ZERO requests to any Google domain. On click we inject the youtube-nocookie iframe (the
-		// user's click is the consent) and push video_play to the dataLayer for GTM-5Q39VQG9 / GA4.
+		// user's click is the consent) and push a video_play event to the dataLayer for GTM / GA4.
 		grid.addEventListener('click', function(e){
 			var btn = e.target && e.target.closest ? e.target.closest('.xrv-facade') : null;
 			if(!btn) return;
@@ -1058,7 +990,7 @@ JS;
  * 8. SHORTCODE + BLOCK REGISTRATION  (collision-proof xroad namespace)
  *    [xroad-videos] never clashes with the prior social-feed plugin's shortcodes. The block points at the
  *    same render callback (PHP-only dynamic block, no JS build step), so editor preview and front end
- *    share one code path. Mirrors the Publications plugin's [xroad-pubs] / xroad/pubs.
+ *    share one code path.
  * ================================================================================================= */
 
 add_shortcode( 'xroad-videos', 'xrv_render' );
@@ -1129,12 +1061,12 @@ function xrv_render_meta_box( $post ) {
 		. '<textarea id="_xrv_description" name="_xrv_description" rows="3" class="widefat" placeholder="A short, plain-language summary of the video.">'
 		. esc_textarea( $desc ) . '</textarea></p>';
 
-	$row( 'Dedicated page URL (the /ontarget/videos/{slug}/ page this card links to)', '_xrv_dedicated_url', $dedicated, 'e.g. https://example.com/videos/example/', 'url' );
+	$row( 'Dedicated page URL (optional — a page this card links out to)', '_xrv_dedicated_url', $dedicated, 'e.g. https://example.com/videos/example/', 'url' );
 	$row( 'Duration (ISO 8601, optional — auto where available)', '_xrv_duration_iso', $dur, 'e.g. PT12M30S' );
 	$row( 'Upload date (YYYY-MM-DD, optional — auto where available)', '_xrv_upload_date', $upload, 'e.g. 2025-09-15' );
 
 	echo '</div>';
-	echo '<p style="margin-top:6px;color:#666;font-size:12px">Series, Condition, Audience, and Topic are set in the taxonomy boxes in the sidebar. Drag videos in <strong>All Videos</strong> (or set the Order field under Page Attributes) to control the grid sequence. The keyword search index is built automatically.</p>';
+	echo '<p style="margin-top:6px;color:#666;font-size:12px">Series, Audience, and Topic are set in the taxonomy boxes in the sidebar. Drag videos in <strong>All Videos</strong> (or set the Order field under Page Attributes) to control the grid sequence. The keyword search index is built automatically.</p>';
 }
 
 add_action( 'save_post_xroad_video', 'xrv_save_meta', 10, 2 );
@@ -1220,7 +1152,6 @@ add_filter( 'plugin_row_meta', 'xrv_plugin_row_meta', 10, 2 );
 function xrv_plugin_row_meta( $links, $file ) {
 	if ( $file === plugin_basename( __FILE__ ) ) {
 		$links[] = '<a href="https://crossroad.us" target="_blank" rel="noopener">Crossroad Media</a>';
-		$links[] = 'Built for a foundation';
 	}
 	return $links;
 }
@@ -1229,7 +1160,7 @@ add_action( 'after_plugin_row_' . plugin_basename( __FILE__ ), 'xrv_plugin_brand
 function xrv_plugin_branding_row() {
 	echo '<tr class="plugin-update-tr"><td colspan="4" class="plugin-update colspanchange" style="box-shadow:none;padding:0">'
 		. '<div style="margin:0;border-left:4px solid #342669;background:#f7f6fb;padding:8px 12px;font-size:12px;color:#414042">'
-		. '<strong style="color:#342669">Crossroad Media</strong> &nbsp;·&nbsp; Privacy-by-design video gallery for a foundation &nbsp;·&nbsp; '
+		. '<strong style="color:#342669">Crossroad Media</strong> &nbsp;·&nbsp; Privacy-first, click-to-load video gallery &nbsp;·&nbsp; '
 		. '<a href="https://crossroad.us" target="_blank" rel="noopener" style="color:#6873B7;text-decoration:none">crossroad.us</a>'
 		. '</div></td></tr>';
 }
@@ -1239,7 +1170,7 @@ function xrv_plugin_branding_row() {
  *     A static helper guarded by an option, so reinstalling never destroys curated content unexpectedly.
  *     By default uninstall removes only the plugin's bookkeeping options; it leaves the videos, terms, and
  *     sideloaded thumbnails in place. Set the 'xrv_delete_data_on_uninstall' option to a truthy value to
- *     opt into full removal (CPT posts, seeded terms, and — only if also opted in — the thumbnails).
+ *     opt into full removal (CPT posts, taxonomy terms, and — only if also opted in — the thumbnails).
  * ================================================================================================= */
 
 register_uninstall_hook( __FILE__, 'xrv_uninstall_cleanup' );
@@ -1258,7 +1189,7 @@ function xrv_uninstall_cleanup() {
 			}
 			wp_delete_post( $pid, true );
 		}
-		foreach ( array( 'xrv_series', 'xrv_condition', 'xrv_audience', 'xrv_topic' ) as $tax ) {
+		foreach ( array( 'xrv_series', 'xrv_audience', 'xrv_topic' ) as $tax ) {
 			$terms = get_terms( array( 'taxonomy' => $tax, 'hide_empty' => false, 'fields' => 'ids' ) );
 			if ( ! is_wp_error( $terms ) ) {
 				foreach ( $terms as $tid ) {
