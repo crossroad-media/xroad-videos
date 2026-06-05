@@ -77,6 +77,7 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Roadmap
 
+- **1.0.3** — Fix: the click-to-load handler now binds by `.xrv-grid` class instead of `#xrv-grid` id, so the facade works on the single-video page (1.0.2) as well as the shortcode grid.
 - **1.0.2** — Single-video pages are never empty. Because the CPT is public, each video has a single-post URL; the facade only renders via the shortcode, so that URL used to show a blank body. Now: if a video has a Dedicated Page URL it redirects there (default 301, filter `xrv_dedicated_redirect_status`); otherwise the single page renders the facade + VideoObject schema itself.
 - **1.0.1** — Editor auto-title: pasting a URL fetches the title from the WordPress oEmbed proxy and fills it, so a URL-only video is immediately saveable (the block editor won't persist a post with an empty title and body). Never overwrites a title you've typed.
 - **1.0** — YouTube facade, local thumbnails, masonry, self-generating VideoObject schema, `video_play` event, shortcode + block.
