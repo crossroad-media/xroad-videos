@@ -77,6 +77,7 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Roadmap
 
+- **1.0.5** — Layouts. New `layout="library"` renders a **Featured Videos** carousel (3-up, arrows + dots, responsive) above a **Browse our Library** grid in one shortcode; `layout="carousel"` for the carousel alone. Fixed `columns` now produce an aligned CSS grid (rows line up) instead of masonry. `controls="false"` hides the search/sort/filter bar. `featured_limit` sets how many videos feed the carousel. Multiple galleries per page are now supported (JS inits every `.xrv` root). Example: `[xroad-videos layout="library" columns="3" controls="false"]`.
 - **1.0.4** — Lightbox playback: clicking a card in the grid now opens the video in a centered overlay over a dimmed backdrop ("pops out"), closeable via the × button, click-outside, or Esc (which stops playback). Default for the grid; single-video pages still play inline. Choose per instance with the `playback="lightbox|inline"` shortcode attribute.
 - **1.0.3** — Fix: the click-to-load handler now binds by `.xrv-grid` class instead of `#xrv-grid` id, so the facade works on the single-video page (1.0.2) as well as the shortcode grid.
 - **1.0.2** — Single-video pages are never empty. Because the CPT is public, each video has a single-post URL; the facade only renders via the shortcode, so that URL used to show a blank body. Now: if a video has a Dedicated Page URL it redirects there (default 301, filter `xrv_dedicated_redirect_status`); otherwise the single page renders the facade + VideoObject schema itself.
