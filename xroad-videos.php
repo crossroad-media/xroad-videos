@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.3
+ * Version:           1.0.4
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -158,7 +158,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.3' );
+	update_option( 'xrv_version', '1.0.4' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -424,7 +424,10 @@ function xrv_render( $atts = array() ) {
 		'topic'    => '',   // comma-separated xrv_topic slugs
 		'limit'    => -1,   // max videos (default: all)
 		'columns'  => '',   // force a fixed column count; blank = responsive column-width
+		'playback' => 'lightbox', // 'lightbox' (pops out into a centered overlay) | 'inline' (plays in the card)
 	), $atts, 'xroad-videos' );
+
+	$playback = ( 'inline' === $atts['playback'] ) ? 'inline' : 'lightbox';
 
 	$tax_query = array();
 	foreach ( array( 'xrv_series' => 'series', 'xrv_audience' => 'audience', 'xrv_topic' => 'topic' ) as $tax => $key ) {
@@ -509,7 +512,7 @@ function xrv_render( $atts = array() ) {
 
 	ob_start();
 	?>
-<div id="xroad-videos-app" class="xrv">
+<div id="xroad-videos-app" class="xrv" data-playback="<?php echo esc_attr( $playback ); ?>">
 	<?php echo xrv_icon_sprite(); ?>
 	<?php echo xrv_inline_css(); ?>
 
@@ -837,6 +840,18 @@ function xrv_inline_css() {
 .xrv-grid{column-count:1 !important}
 .xrv-bar{flex-direction:column;align-items:stretch}
 }
+/* Lightbox modal. UNSCOPED on purpose: the overlay is appended to <body>, outside #xroad-videos-app. */
+.xrv-modal{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:24px;font-family:'Gotham',Helvetica,Arial,sans-serif}
+.xrv-modal[hidden]{display:none}
+.xrv-modal__backdrop{position:absolute;inset:0;background:rgba(8,16,28,.85)}
+.xrv-modal__dialog{position:relative;width:100%;max-width:1100px}
+.xrv-modal__frame{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.xrv-modal__frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.xrv-modal__close{position:absolute;top:-46px;right:0;width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.55);color:#fff;border-radius:50%;cursor:pointer;font-size:18px;line-height:1;padding:0}
+.xrv-modal__close:hover{background:rgba(255,255,255,.28)}
+.xrv-modal__close:focus-visible{outline:3px solid #019AB3;outline-offset:2px}
+body.xrv-modal-open{overflow:hidden}
+@media (max-width:600px){.xrv-modal{padding:14px}.xrv-modal__close{top:-42px}}
 </style>
 CSS;
 }
@@ -918,9 +933,62 @@ function xrv_inline_js() {
 			apply();
 		});
 
+		// Lightbox modal: a single overlay appended to <body> (so it sits above any container, immune to
+		// ancestor overflow/transform). Created lazily on first play. Closing empties the frame, which
+		// stops playback.
+		function xrvGetModal(){
+			var m = document.getElementById('xrv-modal');
+			if(m) return m;
+			m = document.createElement('div');
+			m.id = 'xrv-modal';
+			m.className = 'xrv-modal';
+			m.setAttribute('hidden', '');
+			m.setAttribute('role', 'dialog');
+			m.setAttribute('aria-modal', 'true');
+			m.setAttribute('aria-label', 'Video player');
+			m.innerHTML = '<div class="xrv-modal__backdrop" data-xrv-close></div>'
+				+ '<div class="xrv-modal__dialog"><button type="button" class="xrv-modal__close" data-xrv-close aria-label="Close video">✕</button>'
+				+ '<div class="xrv-modal__frame"></div></div>';
+			document.body.appendChild(m);
+			m.addEventListener('click', function(e){ if(e.target && e.target.hasAttribute && e.target.hasAttribute('data-xrv-close')) xrvCloseModal(); });
+			return m;
+		}
+		var xrvLastFocus = null;
+		function xrvOpenModal(src, title){
+			var m = xrvGetModal();
+			var frame = m.querySelector('.xrv-modal__frame');
+			var iframe = document.createElement('iframe');
+			iframe.setAttribute('allowfullscreen', '');
+			iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
+			iframe.title = title || 'Video player';
+			iframe.src = src;
+			frame.innerHTML = '';
+			frame.appendChild(iframe);
+			m.setAttribute('aria-label', title || 'Video player');
+			xrvLastFocus = document.activeElement;
+			m.removeAttribute('hidden');
+			document.body.classList.add('xrv-modal-open');
+			var c = m.querySelector('.xrv-modal__close'); if(c) c.focus();
+		}
+		function xrvCloseModal(){
+			var m = document.getElementById('xrv-modal');
+			if(!m || m.hasAttribute('hidden')) return;
+			m.setAttribute('hidden', '');
+			document.body.classList.remove('xrv-modal-open');
+			var frame = m.querySelector('.xrv-modal__frame'); if(frame) frame.innerHTML = ''; // stop playback
+			if(xrvLastFocus && xrvLastFocus.focus){ xrvLastFocus.focus(); }
+		}
+		if(!window.__xrvEsc){
+			window.__xrvEsc = 1;
+			document.addEventListener('keydown', function(e){ if(e.key === 'Escape' || e.keyCode === 27) xrvCloseModal(); });
+		}
+
 		// THE FACADE. One delegated click listener for the whole grid. Until this fires, the page has
-		// made ZERO requests to any Google domain. On click we inject the youtube-nocookie iframe (the
+		// made ZERO requests to any Google domain. On click we load the youtube-nocookie iframe (the
 		// user's click is the consent) and push a video_play event to the dataLayer for GTM / GA4.
+		// Playback mode: 'lightbox' (default — pops out into a centered overlay, like a feed lightbox) or
+		// 'inline' (replaces the poster in place). Set per-instance via data-playback on the app root.
+		var playbackMode = ROOT.getAttribute('data-playback') || 'lightbox';
 		grid.addEventListener('click', function(e){
 			var btn = e.target && e.target.closest ? e.target.closest('.xrv-facade') : null;
 			if(!btn) return;
@@ -929,30 +997,33 @@ function xrv_inline_js() {
 			var id = card.getAttribute('data-vid');
 			if(!id) return;
 			var provider = card.getAttribute('data-provider') || 'youtube';
+			var titleEl = card.querySelector('.xrv-title');
+			var title = titleEl ? titleEl.textContent.trim() : 'Video player';
 
 			var src = (provider === 'vimeo')
 				? 'https://player.vimeo.com/video/' + id + '?autoplay=1&dnt=1'
 				: 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&modestbranding=1';
 
-			var iframe = document.createElement('iframe');
-			iframe.className = 'xrv-iframe';
-			iframe.setAttribute('allowfullscreen', '');
-			iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
-			iframe.title = (card.querySelector('.xrv-title') || {}).textContent || 'Video player';
-			iframe.src = src;
+			if(playbackMode === 'inline'){
+				var iframe = document.createElement('iframe');
+				iframe.className = 'xrv-iframe';
+				iframe.setAttribute('allowfullscreen', '');
+				iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
+				iframe.title = title;
+				iframe.src = src;
+				var frame = btn.closest('.xrv-frame') || btn.parentNode;
+				btn.replaceWith(iframe);
+				if(frame && frame.style){ frame.style.lineHeight = '0'; } // iframe owns the aspect ratio now
+			} else {
+				xrvOpenModal(src, title);
+			}
 
-			var frame = btn.closest('.xrv-frame') || btn.parentNode;
-			btn.replaceWith(iframe);
-			// Let the iframe own the aspect ratio now that the facade button is gone.
-			if(frame && frame.style){ frame.style.lineHeight = '0'; }
-
-			var titleEl = card.querySelector('.xrv-title');
 			window.dataLayer = window.dataLayer || [];
 			window.dataLayer.push({
 				event: 'video_play',
 				video_provider: provider,
 				video_id: id,
-				video_title: titleEl ? titleEl.textContent.trim() : '',
+				video_title: title,
 				video_series: (card.getAttribute('data-series') || '').split(' ')[0]
 			});
 		});
@@ -1077,7 +1148,7 @@ function xrv_render_single( $post_id ) {
 
 	ob_start();
 	?>
-<div id="xroad-videos-app" class="xrv xrv--single">
+<div id="xroad-videos-app" class="xrv xrv--single" data-playback="inline">
 	<?php echo xrv_icon_sprite(); ?>
 	<?php echo xrv_inline_css(); ?>
 	<div class="xrv-grid" style="column-count:1">
@@ -1248,7 +1319,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 		return;
 	}
 	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.3', true );
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.4', true );
 	wp_enqueue_script( 'xrv-admin' );
 	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 }
