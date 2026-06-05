@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.2
+ * Version:           1.0.3
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -158,7 +158,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.2' );
+	update_option( 'xrv_version', '1.0.3' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -850,8 +850,9 @@ function xrv_inline_js() {
 		if(!ROOT || ROOT.dataset.xrvReady) return;
 		ROOT.dataset.xrvReady = '1';
 
-		var grid    = ROOT.querySelector('#xrv-grid');
+		var grid    = ROOT.querySelector('.xrv-grid'); // class, not id: works for both the grid and the single-video render
 		var cards   = Array.prototype.slice.call(ROOT.querySelectorAll('.xrv-card'));
+		if(!grid) return;
 		var shownEl = ROOT.querySelector('#xrv-shown');
 		var emptyEl = ROOT.querySelector('#xrv-empty');
 		var qEl     = ROOT.querySelector('#xrv-q');
@@ -1247,7 +1248,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 		return;
 	}
 	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.2', true );
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.3', true );
 	wp_enqueue_script( 'xrv-admin' );
 	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 }
