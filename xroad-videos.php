@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.1
+ * Version:           1.0.2
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -158,7 +158,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.1' );
+	update_option( 'xrv_version', '1.0.2' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -1006,6 +1006,90 @@ function xrv_register_block() {
 }
 
 /* =================================================================================================
+ * 8a. SINGLE-VIDEO FRONT-END  (so a single xroad_video URL is never an empty page)
+ *     The CPT is public, so WordPress serves a single-post URL per video. The facade only renders via
+ *     the shortcode/block, so without this the single view would show just the (empty) post body. Two
+ *     behaviours, in priority order:
+ *       1. If the video has a Dedicated Page URL (_xrv_dedicated_url), redirect the single to it. This is
+ *          for sites whose canonical per-video pages live elsewhere; the curated entry points there
+ *          instead of creating a thin or competing page. Status is filterable (default 301).
+ *       2. Otherwise render a self-contained single-video facade (poster + click-to-load) plus the
+ *          VideoObject JSON-LD, prepended to the post content, so the page actually shows the video.
+ * ================================================================================================= */
+
+add_action( 'template_redirect', 'xrv_single_redirect' );
+function xrv_single_redirect() {
+	if ( ! is_singular( 'xroad_video' ) ) {
+		return;
+	}
+	$dest = (string) get_post_meta( get_queried_object_id(), '_xrv_dedicated_url', true );
+	if ( $dest !== '' ) {
+		$status = (int) apply_filters( 'xrv_dedicated_redirect_status', 301 );
+		wp_redirect( esc_url_raw( $dest ), $status );
+		exit;
+	}
+}
+
+add_filter( 'the_content', 'xrv_single_content' );
+function xrv_single_content( $content ) {
+	if ( ! is_singular( 'xroad_video' ) || ! in_the_loop() || ! is_main_query() ) {
+		return $content;
+	}
+	return xrv_render_single( get_the_ID() ) . $content;
+}
+
+/** Render one video as a self-contained facade block (reusing the grid's assets, card, and schema). */
+function xrv_render_single( $post_id ) {
+	$provider = (string) get_post_meta( $post_id, '_xrv_provider', true );
+	$provider = $provider !== '' ? $provider : 'youtube';
+	$vid      = (string) get_post_meta( $post_id, '_xrv_video_id', true );
+	if ( $vid === '' ) {
+		return ''; // nothing to render; leave the post body as-is.
+	}
+
+	$dur_iso  = (string) get_post_meta( $post_id, '_xrv_duration_iso', true );
+	$upload   = (string) get_post_meta( $post_id, '_xrv_upload_date', true );
+	$thumb_id = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
+
+	$series   = wp_get_post_terms( $post_id, 'xrv_series', array( 'fields' => 'slugs' ) );
+	$audience = wp_get_post_terms( $post_id, 'xrv_audience', array( 'fields' => 'slugs' ) );
+	$topic    = wp_get_post_terms( $post_id, 'xrv_topic', array( 'fields' => 'slugs' ) );
+
+	$r = array(
+		'id'         => $post_id,
+		'title'      => get_the_title( $post_id ),
+		'provider'   => $provider,
+		'vid'        => $vid,
+		'source_url' => (string) get_post_meta( $post_id, '_xrv_source_url', true ),
+		'desc'       => (string) get_post_meta( $post_id, '_xrv_description', true ),
+		'dedicated'  => '', // on its own page there is nowhere else to link out to.
+		'dur_iso'    => $dur_iso,
+		'dur_clock'  => xrv_iso_to_clock( $dur_iso ),
+		'upload'     => $upload,
+		'poster'     => xrv_local_poster_url( $post_id, $thumb_id ),
+		'series'     => is_wp_error( $series ) ? array() : $series,
+		'audience'   => is_wp_error( $audience ) ? array() : $audience,
+		'topic'      => is_wp_error( $topic ) ? array() : $topic,
+		'date_key'   => $upload !== '' ? (int) preg_replace( '/\D/', '', $upload ) : 0,
+		'search'     => '',
+	);
+
+	ob_start();
+	?>
+<div id="xroad-videos-app" class="xrv xrv--single">
+	<?php echo xrv_icon_sprite(); ?>
+	<?php echo xrv_inline_css(); ?>
+	<div class="xrv-grid" style="column-count:1">
+		<?php echo xrv_render_card( $r ); ?>
+	</div>
+	<?php echo xrv_inline_js(); ?>
+</div>
+	<?php
+	echo xrv_schema_jsonld( array( $r ), get_permalink( $post_id ) );
+	return ob_get_clean();
+}
+
+/* =================================================================================================
  * 9. META BOX  ("Video Details") + SAVE  (paste a URL; the ID, thumbnail, and metadata derive themselves)
  *    A single native meta box. The editor pastes a YouTube URL; on save the routine extracts the 11-char
  *    ID, sideloads a LOCAL thumbnail (the no-Google-call hardening), and prefills the title/description
@@ -1163,7 +1247,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 		return;
 	}
 	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.1', true );
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.2', true );
 	wp_enqueue_script( 'xrv-admin' );
 	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 }
