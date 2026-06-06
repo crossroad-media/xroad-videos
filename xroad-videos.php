@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.5
+ * Version:           1.0.6
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -123,6 +123,8 @@ function xrv_register_meta() {
 		'_xrv_upload_date'   => 'string',  // YYYY-MM-DD
 		'_xrv_description'    => 'string', // plain-language summary
 		'_xrv_local_thumb_id' => 'integer', // media-library attachment ID for the locally stored poster
+		'_xrv_transcript'    => 'string',  // full transcript -> VideoObject.transcript (rich results + AI citation)
+		'_xrv_chapters'      => 'string',  // "M:SS Label" per line -> hasPart Clip[] (key-moments rich result)
 	);
 	foreach ( $fields as $key => $type ) {
 		register_post_meta( 'xroad_video', $key, array(
@@ -158,7 +160,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.5' );
+	update_option( 'xrv_version', '1.0.6' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -820,6 +822,128 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . '</script>' . "\n";
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * 6a. Parse a "key moments" textarea ("M:SS Label" per line, or "H:MM:SS Label") into schema.org Clip
+ *     nodes with startOffset / endOffset / a deep-linked url. Drives Google's key-moments rich result.
+ * ------------------------------------------------------------------------------------------------- */
+function xrv_parse_chapters( $text, $content_url ) {
+	$starts = array();
+	foreach ( preg_split( '/\r\n|\r|\n/', (string) $text ) as $line ) {
+		$line = trim( $line );
+		if ( $line === '' ) {
+			continue;
+		}
+		if ( preg_match( '/^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\s+(.+)$/', $line, $m ) ) {
+			$h = $m[1] !== '' ? (int) $m[1] : 0;
+			$start = ( $h * 3600 ) + ( (int) $m[2] * 60 ) + (int) $m[3];
+			$starts[] = array( 'start' => $start, 'name' => trim( $m[4] ) );
+		}
+	}
+	$clips = array();
+	$n = count( $starts );
+	for ( $i = 0; $i < $n; $i++ ) {
+		$clip = array( '@type' => 'Clip', 'name' => $starts[ $i ]['name'], 'startOffset' => $starts[ $i ]['start'] );
+		if ( $i + 1 < $n ) {
+			$clip['endOffset'] = $starts[ $i + 1 ]['start'];
+		}
+		if ( $content_url !== '' ) {
+			$sep = ( strpos( $content_url, '?' ) !== false ) ? '&' : '?';
+			$clip['url'] = $content_url . $sep . 't=' . $starts[ $i ]['start'] . 's';
+		}
+		$clips[] = $clip;
+	}
+	return $clips;
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * 6b. STANDALONE rich VideoObject for a single video's own page. Emitted instead of the CollectionPage
+ *     wrapper so the page's main entity is the video itself, with every field Google and AI answer
+ *     engines reward: name, description, thumbnailUrl[], uploadDate (REQUIRED — falls back to the post
+ *     date), duration, contentUrl, embedUrl, publisher (merged org @id), inLanguage, isFamilyFriendly,
+ *     transcript, key-moment Clips, and keywords. Validated against the Video rich-results requirements.
+ * ------------------------------------------------------------------------------------------------- */
+function xrv_single_video_schema( $post_id ) {
+	$provider = (string) get_post_meta( $post_id, '_xrv_provider', true );
+	$provider = $provider !== '' ? $provider : 'youtube';
+	$vid      = (string) get_post_meta( $post_id, '_xrv_video_id', true );
+	if ( $vid === '' ) {
+		return '';
+	}
+
+	$title  = get_the_title( $post_id );
+	$desc   = (string) get_post_meta( $post_id, '_xrv_description', true );
+	$desc   = $desc !== '' ? $desc : $title;
+	$upload = (string) get_post_meta( $post_id, '_xrv_upload_date', true );
+	$upload = $upload !== '' ? $upload : get_the_date( 'Y-m-d', $post_id ); // uploadDate is required
+	$dur    = (string) get_post_meta( $post_id, '_xrv_duration_iso', true );
+	$thumb  = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
+	$source = (string) get_post_meta( $post_id, '_xrv_source_url', true );
+	$transcript = (string) get_post_meta( $post_id, '_xrv_transcript', true );
+	$chapters   = (string) get_post_meta( $post_id, '_xrv_chapters', true );
+
+	$content_url = $source !== '' ? $source : xrv_watch_url( $vid, $provider );
+	$page        = get_permalink( $post_id );
+
+	$thumbs = array();
+	$poster = xrv_local_poster_url( $post_id, $thumb );
+	if ( $poster !== '' ) {
+		$thumbs[] = $poster;
+	}
+	$thumbs[] = xrv_remote_thumb_url( $vid, $provider );
+
+	$node = array(
+		'@type'            => 'VideoObject',
+		'@id'              => $page . '#video',
+		'name'             => $title,
+		'description'      => $desc,
+		'thumbnailUrl'     => $thumbs,
+		'uploadDate'       => $upload,
+		'contentUrl'       => $content_url,
+		'embedUrl'         => xrv_embed_url( $vid, $provider ),
+		'publisher'        => array( '@id' => xrv_org_id() ),
+		'inLanguage'       => apply_filters( 'xrv_video_language', 'en', $post_id ),
+		'isFamilyFriendly' => true,
+		'mainEntityOfPage' => $page,
+	);
+	if ( $dur !== '' ) {
+		$node['duration'] = $dur;
+	}
+	if ( $transcript !== '' ) {
+		$node['transcript'] = $transcript;
+	}
+	$clips = xrv_parse_chapters( $chapters, $content_url );
+	if ( $clips ) {
+		$node['hasPart'] = $clips;
+	}
+
+	// keywords: every taxonomy term name assigned to the video (series + audience + topic + condition).
+	$kw = array();
+	foreach ( array( 'xrv_series', 'xrv_audience', 'xrv_topic', 'xrv_condition' ) as $tax ) {
+		if ( ! taxonomy_exists( $tax ) ) {
+			continue;
+		}
+		$terms = wp_get_post_terms( $post_id, $tax, array( 'fields' => 'names' ) );
+		if ( ! is_wp_error( $terms ) ) {
+			$kw = array_merge( $kw, $terms );
+		}
+	}
+	$kw = array_values( array_unique( array_filter( $kw ) ) );
+	if ( $kw ) {
+		$node['keywords'] = implode( ', ', $kw );
+	}
+
+	$node = apply_filters( 'xrv_video_schema', $node, array( 'id' => $post_id, 'vid' => $vid, 'provider' => $provider ) );
+
+	$graph = array(
+		'@context' => 'https://schema.org',
+		'@graph'   => array(
+			array( '@type' => 'Organization', '@id' => xrv_org_id(), 'name' => get_bloginfo( 'name' ), 'url' => home_url( '/' ) ),
+			$node,
+		),
+	);
+	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . '</script>' . "\n";
+}
+
 /* =================================================================================================
  * 7. INLINE ASSETS  (SVG sprite, scoped critical CSS, vanilla JS)
  *    Emitted inline inside the rendered block, namespaced under .xrv- and #xroad-videos-app. Inlining is
@@ -1244,8 +1368,24 @@ function xrv_render_single( $post_id ) {
 	<?php echo xrv_inline_js(); ?>
 </div>
 	<?php
-	echo xrv_schema_jsonld( array( $r ), get_permalink( $post_id ) );
+	echo xrv_single_video_schema( $post_id ); // standalone rich VideoObject (not the CollectionPage wrapper)
 	return ob_get_clean();
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * 8b. Single-page chrome cleanup. On a single xroad_video page the theme renders its own byline and a
+ *     featured image above our facade. We never want either on these curated video pages, so hide them
+ *     with a small scoped style (only on single xroad_video; harmless everywhere else). Filterable.
+ * ------------------------------------------------------------------------------------------------- */
+add_action( 'wp_head', 'xrv_single_chrome_css' );
+function xrv_single_chrome_css() {
+	if ( ! is_singular( 'xroad_video' ) ) {
+		return;
+	}
+	$css = 'body.single-xroad_video .post-meta{display:none!important}'
+		. 'body.single-xroad_video .et_post_meta_wrapper img,body.single-xroad_video .entry-content > .wp-post-image,body.single-xroad_video .post-thumbnail{display:none!important}';
+	$css = apply_filters( 'xrv_single_chrome_css', $css );
+	echo '<style id="xrv-single-chrome">' . $css . '</style>'; // phpcs:ignore -- static, controlled CSS
 }
 
 /* =================================================================================================
@@ -1273,6 +1413,8 @@ function xrv_render_meta_box( $post ) {
 	$upload    = (string) get_post_meta( $post->ID, '_xrv_upload_date', true );
 	$desc      = (string) get_post_meta( $post->ID, '_xrv_description', true );
 	$thumb_id  = (int) get_post_meta( $post->ID, '_xrv_local_thumb_id', true );
+	$transcript = (string) get_post_meta( $post->ID, '_xrv_transcript', true );
+	$chapters   = (string) get_post_meta( $post->ID, '_xrv_chapters', true );
 
 	$row = function( $label, $name, $value, $placeholder = '', $type = 'text' ) {
 		printf(
@@ -1308,6 +1450,17 @@ function xrv_render_meta_box( $post ) {
 	$row( 'Duration (ISO 8601, optional — auto where available)', '_xrv_duration_iso', $dur, 'e.g. PT12M30S' );
 	$row( 'Upload date (YYYY-MM-DD, optional — auto where available)', '_xrv_upload_date', $upload, 'e.g. 2025-09-15' );
 
+	echo '<hr style="margin:18px 0;border:none;border-top:1px solid #e2e6eb"><p style="margin:0 0 10px;font-weight:600">Rich video schema <span style="font-weight:400;color:#666">(optional — fills out the VideoObject on the video\'s own page for richer Google results and AI citations)</span></p>';
+
+	echo '<p style="margin:0 0 14px"><label for="_xrv_transcript" style="display:block;font-weight:600;margin-bottom:4px">Transcript</label>'
+		. '<textarea id="_xrv_transcript" name="_xrv_transcript" rows="6" class="widefat" placeholder="Paste the full transcript. Powers VideoObject.transcript — strong signal for accessibility, Google, and AI answer engines.">'
+		. esc_textarea( $transcript ) . '</textarea></p>';
+
+	echo '<p style="margin:0 0 6px"><label for="_xrv_chapters" style="display:block;font-weight:600;margin-bottom:4px">Key moments / chapters</label>'
+		. '<textarea id="_xrv_chapters" name="_xrv_chapters" rows="5" class="widefat" placeholder="One per line:&#10;0:00 Introduction&#10;2:15 The diagnosis&#10;9:40 Treatment options">'
+		. esc_textarea( $chapters ) . '</textarea></p>';
+	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">One per line as <code>M:SS Label</code> (or <code>H:MM:SS Label</code>). Emits <code>Clip</code> markup so the video can show "key moments" in Google search.</p>';
+
 	echo '</div>';
 	echo '<p style="margin-top:6px;color:#666;font-size:12px">Series, Audience, and Topic are set in the taxonomy boxes in the sidebar. Drag videos in <strong>All Videos</strong> (or set the Order field under Page Attributes) to control the grid sequence. The keyword search index is built automatically.</p>';
 }
@@ -1340,6 +1493,12 @@ function xrv_save_meta( $post_id, $post ) {
 	// Description + manual metadata.
 	if ( isset( $_POST['_xrv_description'] ) ) {
 		update_post_meta( $post_id, '_xrv_description', sanitize_textarea_field( wp_unslash( $_POST['_xrv_description'] ) ) );
+	}
+	if ( isset( $_POST['_xrv_transcript'] ) ) {
+		update_post_meta( $post_id, '_xrv_transcript', sanitize_textarea_field( wp_unslash( $_POST['_xrv_transcript'] ) ) );
+	}
+	if ( isset( $_POST['_xrv_chapters'] ) ) {
+		update_post_meta( $post_id, '_xrv_chapters', sanitize_textarea_field( wp_unslash( $_POST['_xrv_chapters'] ) ) );
 	}
 	$dur    = isset( $_POST['_xrv_duration_iso'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_duration_iso'] ) ) : '';
 	$upload = isset( $_POST['_xrv_upload_date'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_upload_date'] ) ) : '';
@@ -1406,7 +1565,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 		return;
 	}
 	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.5', true );
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.6', true );
 	wp_enqueue_script( 'xrv-admin' );
 	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 }
