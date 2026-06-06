@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.6
+ * Version:           1.0.7
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -160,7 +160,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.6' );
+	update_option( 'xrv_version', '1.0.7' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -431,11 +431,18 @@ function xrv_render( $atts = array() ) {
 		'controls' => 'true',      // show the search / sort / filter / count bar on the grid
 		'featured_limit' => 6,     // how many videos feed the featured carousel (library/carousel layout)
 		'heading'  => '',          // optional centered section heading (grid/carousel layout)
+		'per_page' => 9,           // browse grid: how many cards show before "Load more"
+		'load_more' => 3,          // how many more cards each "Load more" click reveals
+		'subscribe_url'   => '',   // YouTube channel URL; when set, a "Subscribe" button shows under the grid
+		'subscribe_label' => 'Subscribe to our YouTube channel',
 	), $atts, 'xroad-videos' );
 
 	$playback = ( 'inline' === $atts['playback'] ) ? 'inline' : 'lightbox';
 	$layout   = in_array( $atts['layout'], array( 'grid', 'carousel', 'library' ), true ) ? $atts['layout'] : 'grid';
 	$controls = ! in_array( strtolower( (string) $atts['controls'] ), array( 'false', '0', 'no', 'off' ), true );
+	$per_page  = max( 1, (int) $atts['per_page'] );
+	$load_step = max( 1, (int) $atts['load_more'] );
+	$subscribe_url = esc_url( $atts['subscribe_url'] );
 
 	$tax_query = array();
 	foreach ( array( 'xrv_series' => 'series', 'xrv_audience' => 'audience', 'xrv_topic' => 'topic' ) as $tax => $key ) {
@@ -576,18 +583,25 @@ function xrv_render( $atts = array() ) {
 			?>
 
 			<div class="xrv-statusbar">
-				<div class="xrv-count">Showing <strong id="xrv-shown"><?php echo (int) $total; ?></strong> of <strong><?php echo (int) $total; ?></strong> videos</div>
+				<div class="xrv-count">Showing <strong id="xrv-shown"><?php echo (int) min( $per_page, $total ); ?></strong> of <strong id="xrv-total"><?php echo (int) $total; ?></strong> videos</div>
 				<button type="button" class="xrv-reset" id="xrv-reset"><svg class="xrv-ic"><use href="#xrv-i-reset"/></svg> Reset</button>
 			</div>
 			<?php endif; ?>
 
-			<div class="<?php echo esc_attr( $grid_class ); ?>" id="xrv-grid" style="<?php echo esc_attr( $grid_style ); ?>">
+			<div class="<?php echo esc_attr( $grid_class ); ?>" id="xrv-grid" style="<?php echo esc_attr( $grid_style ); ?>" data-perpage="<?php echo (int) $per_page; ?>" data-loadstep="<?php echo (int) $load_step; ?>">
 				<?php foreach ( $records as $r ) { echo xrv_render_card( $r ); } ?>
 			</div>
 
 			<div class="xrv-empty" id="xrv-empty" style="display:none">
 				<h3>No videos match your filters</h3>
 				<p>Try removing a filter or clearing the keyword search.</p>
+			</div>
+
+			<div class="xrv-more">
+				<button type="button" class="xrv-loadmore" id="xrv-loadmore" style="display:none">Load More&hellip;</button>
+				<?php if ( $subscribe_url !== '' ) : ?>
+					<a class="xrv-subscribe" href="<?php echo esc_url( $subscribe_url ); ?>" target="_blank" rel="noopener"><svg class="xrv-yt" viewBox="0 0 24 24" aria-hidden="true"><use href="#xrv-i-yt"/></svg> <?php echo esc_html( $atts['subscribe_label'] ); ?></a>
+				<?php endif; ?>
 			</div>
 		</section>
 	<?php endif; ?>
@@ -958,6 +972,7 @@ function xrv_icon_sprite() {
 <symbol id="xrv-i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
 <symbol id="xrv-i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
 <symbol id="xrv-i-arrow" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+<symbol id="xrv-i-yt" viewBox="0 0 24 24"><path fill="#FF0000" d="M23 7.5a3 3 0 0 0-2.1-2.1C19 4.9 12 4.9 12 4.9s-7 0-8.9.5A3 3 0 0 0 1 7.5 31 31 0 0 0 .5 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1c1.9.5 8.9.5 8.9.5s7 0 8.9-.5a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.5 12 31 31 0 0 0 23 7.5z"/><path fill="#fff" d="M9.75 15.5l6-3.5-6-3.5z"/></symbol>
 </defs></svg>
 SVG;
 }
@@ -1056,6 +1071,15 @@ function xrv_inline_css() {
 .xrv-caro-dot:focus-visible{outline:2px solid #019AB3;outline-offset:2px}
 @media (max-width:880px){.xrv-caro-track .xrv-card{flex-basis:50%;max-width:50%}}
 @media (max-width:560px){.xrv-caro-track .xrv-card{flex-basis:100%;max-width:100%}.xrv-caro-prev{left:-4px}.xrv-caro-next{right:-4px}.xrv-section-title{font-size:26px !important}}
+/* Load more + subscribe row (under the browse grid) */
+.xrv-more{display:flex;justify-content:center;align-items:center;gap:14px;flex-wrap:wrap;margin-top:36px}
+.xrv-loadmore{background:#1a2332;color:#fff;border:none;font-family:inherit;font-size:14px;font-weight:600;letter-spacing:.01em;padding:13px 28px;border-radius:5px;cursor:pointer;transition:background .15s ease}
+.xrv-loadmore:hover{background:#013C60}
+.xrv-loadmore:focus-visible{outline:3px solid rgba(1,154,179,.5);outline-offset:2px}
+.xrv-subscribe{display:inline-flex;align-items:center;gap:9px;background:#00AA77;color:#fff !important;text-decoration:none !important;font-family:inherit;font-size:14px;font-weight:600;padding:12px 22px;border-radius:5px;transition:background .15s ease}
+.xrv-subscribe:hover{background:#007A53;text-decoration:none !important}
+.xrv-subscribe:focus-visible{outline:3px solid rgba(1,154,179,.5);outline-offset:2px}
+.xrv-yt{width:22px;height:22px;flex:0 0 auto;vertical-align:-5px}
 /* Lightbox modal. UNSCOPED on purpose: the overlay is appended to <body>, outside #xroad-videos-app. */
 .xrv-modal{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:24px;font-family:'Gotham',Helvetica,Arial,sans-serif}
 .xrv-modal[hidden]{display:none}
@@ -1216,9 +1240,14 @@ function xrv_inline_js() {
 		if(grid){
 			var cards = Array.prototype.slice.call(grid.querySelectorAll('.xrv-card'));
 			var shownEl = ROOT.querySelector('#xrv-shown');
+			var totalEl = ROOT.querySelector('#xrv-total');
 			var emptyEl = ROOT.querySelector('#xrv-empty');
 			var qEl = ROOT.querySelector('#xrv-q');
 			var sortEl = ROOT.querySelector('#xrv-sort');
+			var loadMoreBtn = ROOT.querySelector('#xrv-loadmore');
+			var pageSize = parseInt(grid.getAttribute('data-perpage'), 10) || 9;
+			var loadStep = parseInt(grid.getAttribute('data-loadstep'), 10) || 3;
+			var visibleLimit = pageSize;
 			var origOrder = cards.slice();
 			var state = { q:'', series:[], audience:[], topic:[], sort:'curated' };
 
@@ -1229,33 +1258,42 @@ function xrv_inline_js() {
 			var apply = function(){
 				var ordered = (state.sort === 'curated') ? origOrder.slice() : cards.slice().sort(cmp);
 				ordered.forEach(function(c){ grid.appendChild(c); });
-				var shown = 0;
+				var matched = 0, visible = 0;
 				ordered.forEach(function(c){
 					var ok = matchGroup('series', c) && matchGroup('audience', c) && matchGroup('topic', c) && matchSearch(c);
-					c.style.display = ok ? '' : 'none';
-					if(ok) shown++;
+					if(ok){
+						matched++;
+						if(matched <= visibleLimit){ c.style.display = ''; visible++; }
+						else { c.style.display = 'none'; }
+					} else {
+						c.style.display = 'none';
+					}
 				});
-				if(shownEl) shownEl.textContent = shown;
-				if(emptyEl) emptyEl.style.display = shown ? 'none' : 'block';
+				if(shownEl) shownEl.textContent = visible;
+				if(totalEl) totalEl.textContent = matched;
+				if(emptyEl) emptyEl.style.display = matched ? 'none' : 'block';
+				if(loadMoreBtn) loadMoreBtn.style.display = (matched > visibleLimit) ? '' : 'none';
 			};
+			var resetVisible = function(){ visibleLimit = pageSize; };
 
-			if(qEl) qEl.addEventListener('input', function(){ state.q = this.value.trim().toLowerCase(); apply(); });
-			if(sortEl) sortEl.addEventListener('change', function(){ state.sort = this.value; apply(); });
+			if(qEl) qEl.addEventListener('input', function(){ state.q = this.value.trim().toLowerCase(); resetVisible(); apply(); });
+			if(sortEl) sortEl.addEventListener('change', function(){ state.sort = this.value; resetVisible(); apply(); });
 			ROOT.querySelectorAll('.xrv-chip').forEach(function(chip){
 				chip.addEventListener('click', function(){
 					this.setAttribute('aria-pressed', this.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
 					var g = this.getAttribute('data-group');
 					state[g] = Array.prototype.slice.call(ROOT.querySelectorAll('.xrv-chip[data-group="' + g + '"][aria-pressed="true"]')).map(function(x){ return x.value; });
-					apply();
+					resetVisible(); apply();
 				});
 			});
+			if(loadMoreBtn) loadMoreBtn.addEventListener('click', function(){ visibleLimit += loadStep; apply(); });
 			var resetBtn = ROOT.querySelector('#xrv-reset');
 			if(resetBtn) resetBtn.addEventListener('click', function(){
 				state = { q:'', series:[], audience:[], topic:[], sort:'curated' };
 				if(qEl) qEl.value = '';
 				if(sortEl) sortEl.value = 'curated';
 				ROOT.querySelectorAll('.xrv-chip').forEach(function(x){ x.setAttribute('aria-pressed','false'); });
-				apply();
+				resetVisible(); apply();
 			});
 			apply();
 		}
@@ -1565,7 +1603,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 		return;
 	}
 	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.6', true );
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.7', true );
 	wp_enqueue_script( 'xrv-admin' );
 	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 }
