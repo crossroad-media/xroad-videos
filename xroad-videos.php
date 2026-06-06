@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.7
+ * Version:           1.0.8
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -160,7 +160,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.7' );
+	update_option( 'xrv_version', '1.0.8' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -532,8 +532,10 @@ function xrv_render( $atts = array() ) {
 	}
 	$use_cols   = $fixed_cols > 0;
 	$grid_class = $use_cols ? 'xrv-grid xrv-grid--cols' : 'xrv-grid';
+	// For the aligned grid, set the column count as a CUSTOM PROPERTY (not grid-template-columns directly)
+	// so the responsive media queries — which step it down to 2 then 1 on tablet/mobile — can override it.
 	$grid_style = $use_cols
-		? 'grid-template-columns:repeat(' . $fixed_cols . ',minmax(0,1fr))'
+		? '--xrv-cols:' . $fixed_cols
 		: 'column-width:320px';
 	$caro_cols  = $fixed_cols > 0 ? $fixed_cols : 3;
 
@@ -1049,9 +1051,12 @@ function xrv_inline_css() {
 .xrv--library .xrv-tool{margin-top:6px}
 .xrv--library .xrv-carousel{margin-bottom:46px}
 .xrv--library .xrv-section-title + .xrv-tool,.xrv--library .xrv-carousel + .xrv-section-title{margin-top:30px}
-/* Aligned column grid (fixed columns) instead of masonry: rows line up like a feed. */
-.xrv-grid--cols{display:grid;gap:30px 24px;column-gap:24px}
+/* Aligned column grid (fixed columns) instead of masonry: rows line up like a feed. Column count comes
+   from the --xrv-cols custom property so the media queries below can step it down on tablet/mobile. */
+.xrv-grid--cols{display:grid;gap:30px 24px;grid-template-columns:repeat(var(--xrv-cols,3),minmax(0,1fr))}
 .xrv-grid--cols .xrv-card{display:block;width:auto;margin:0;break-inside:auto}
+@media (max-width:880px){.xrv-grid--cols{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.xrv-grid--cols{grid-template-columns:1fr}}
 /* Featured carousel */
 .xrv-carousel{position:relative;padding:0 8px}
 .xrv-caro-viewport{overflow:hidden}
@@ -1070,7 +1075,17 @@ function xrv_inline_css() {
 .xrv-caro-dot.is-active{background:#013C60}
 .xrv-caro-dot:focus-visible{outline:2px solid #019AB3;outline-offset:2px}
 @media (max-width:880px){.xrv-caro-track .xrv-card{flex-basis:50%;max-width:50%}}
-@media (max-width:560px){.xrv-caro-track .xrv-card{flex-basis:100%;max-width:100%}.xrv-caro-prev{left:-4px}.xrv-caro-next{right:-4px}.xrv-section-title{font-size:26px !important}}
+/* Mobile: drop the JS arrow/dot carousel for a native, thumb-swipeable scroll-snap strip (peeks the next
+   card). transform:none overrides the JS translateX so native scroll takes over; arrows/dots hide. */
+@media (max-width:560px){
+	.xrv-carousel{padding:0}
+	.xrv-caro-viewport{overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+	.xrv-caro-viewport::-webkit-scrollbar{display:none}
+	.xrv-caro-track{transform:none !important}
+	.xrv-caro-track .xrv-card{flex:0 0 84%;max-width:84%;scroll-snap-align:center}
+	.xrv-caro-arrow,.xrv-caro-dots{display:none}
+	.xrv-section-title{font-size:26px !important}
+}
 /* Load more + subscribe row (under the browse grid) */
 .xrv-more{display:flex;justify-content:center;align-items:center;gap:14px;flex-wrap:wrap;margin-top:36px}
 .xrv-loadmore{background:#1a2332;color:#fff;border:none;font-family:inherit;font-size:14px;font-weight:600;letter-spacing:.01em;padding:13px 28px;border-radius:5px;cursor:pointer;transition:background .15s ease}
@@ -1603,7 +1618,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 		return;
 	}
 	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.7', true );
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.8', true );
 	wp_enqueue_script( 'xrv-admin' );
 	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 }
