@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.0.0
+ * Version:           2.0.1.beta
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -162,7 +162,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.0.0' );
+	update_option( 'xrv_version', '2.0.1.beta' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -2795,6 +2795,63 @@ function xrv_yt_videos_meta( $ids, $key ) {
 	return $out;
 }
 
+/* ---- Resolve a channel URL / @handle / name to a channel ID, then list its PUBLIC playlists. ---- */
+function xrv_yt_channel_id( $url, $key ) {
+	$url = trim( (string) $url );
+	if ( preg_match( '#youtube\.com/channel/(UC[\w-]+)#i', $url, $m ) ) { return $m[1]; }
+	if ( preg_match( '#^UC[\w-]{20,}$#', $url ) ) { return $url; }
+	if ( preg_match( '#youtube\.com/@([\w.\-]+)#i', $url, $m ) || preg_match( '#^@([\w.\-]+)$#', $url, $m ) ) {
+		$r = xrv_yt_get( 'channels', array( 'part' => 'id', 'forHandle' => '@' . $m[1] ), $key );
+	} elseif ( preg_match( '#youtube\.com/user/([\w-]+)#i', $url, $m ) ) {
+		$r = xrv_yt_get( 'channels', array( 'part' => 'id', 'forUsername' => $m[1] ), $key );
+	} else {
+		// A /c/ vanity URL or a bare channel name: search for the channel.
+		$q = preg_match( '#youtube\.com/c/([\w-]+)#i', $url, $m ) ? $m[1] : $url;
+		if ( '' === $q ) { return new WP_Error( 'xrv_yt', 'Enter a channel URL, @handle, or name.' ); }
+		$r = xrv_yt_get( 'search', array( 'part' => 'snippet', 'type' => 'channel', 'q' => $q, 'maxResults' => 1 ), $key );
+		if ( is_wp_error( $r ) ) { return $r; }
+		return $r['items'][0]['id']['channelId'] ?? new WP_Error( 'xrv_yt', 'No channel found for that name.' );
+	}
+	if ( is_wp_error( $r ) ) { return $r; }
+	return $r['items'][0]['id'] ?? new WP_Error( 'xrv_yt', 'Channel not found.' );
+}
+function xrv_yt_channel_playlists( $url, $key ) {
+	$cid = xrv_yt_channel_id( $url, $key );
+	if ( is_wp_error( $cid ) ) { return $cid; }
+	$out = array(); $page = '';
+	do {
+		$r = xrv_yt_get( 'playlists', array( 'part' => 'snippet,contentDetails', 'channelId' => $cid, 'maxResults' => 50, 'pageToken' => $page ), $key );
+		if ( is_wp_error( $r ) ) { return $r; }
+		foreach ( (array) ( $r['items'] ?? array() ) as $it ) {
+			$pid = $it['id'] ?? '';
+			if ( '' === $pid ) { continue; }
+			$out[] = array(
+				'id'    => $pid,
+				'title' => $it['snippet']['title'] ?? '(untitled playlist)',
+				'count' => (int) ( $it['contentDetails']['itemCount'] ?? 0 ),
+			);
+		}
+		$page = $r['nextPageToken'] ?? '';
+	} while ( $page && count( $out ) < 200 );
+	return $out;
+}
+
+/* ---- AJAX: list a channel's playlists for the Import picker (reads nothing into the library). ---- */
+add_action( 'wp_ajax_xrv_yt_playlists', 'xrv_ajax_yt_playlists' );
+function xrv_ajax_yt_playlists() {
+	check_ajax_referer( 'xrv_import', 'nonce' );
+	if ( ! current_user_can( 'edit_others_posts' ) ) { wp_send_json_error( array( 'msg' => 'forbidden' ) ); }
+	$key = isset( $_POST['key'] ) ? sanitize_text_field( wp_unslash( $_POST['key'] ) ) : '';
+	if ( '' === $key ) { $key = (string) get_option( 'xrv_yt_api_key', '' ); }
+	if ( '' === $key ) { wp_send_json_error( array( 'msg' => 'A YouTube Data API key is required to list playlists. Add one above or in Settings.' ) ); }
+	$channel = isset( $_POST['channel'] ) ? sanitize_text_field( wp_unslash( $_POST['channel'] ) ) : '';
+	if ( '' === trim( $channel ) ) { wp_send_json_error( array( 'msg' => 'Enter a channel URL, @handle, or name.' ) ); }
+	$lists = xrv_yt_channel_playlists( $channel, $key );
+	if ( is_wp_error( $lists ) ) { wp_send_json_error( array( 'msg' => $lists->get_error_message() ) ); }
+	if ( empty( $lists ) ) { wp_send_json_error( array( 'msg' => 'No public playlists found on that channel.' ) ); }
+	wp_send_json_success( array( 'playlists' => $lists ) );
+}
+
 /* ---- AJAX: dry-run preview (resolve sources -> list with new/exists status; writes nothing) ---- */
 add_action( 'wp_ajax_xrv_import_preview', 'xrv_ajax_import_preview' );
 function xrv_ajax_import_preview() {
@@ -2966,6 +3023,14 @@ function xrv_render_import_page() {
 		<table class="form-table" role="presentation"><tbody>
 			<tr><th scope="row"><label for="xrv-imp-key">YouTube Data API key</label><br><span style="font-weight:400;color:#787c82;font-size:12px">optional</span></th>
 				<td><input type="text" id="xrv-imp-key" class="regular-text" value="<?php echo esc_attr( $key ); ?>" placeholder="Leave blank to import by URL (title + thumbnail only)" autocomplete="off"></td></tr>
+<tr><th scope="row"><label for="xrv-imp-pl-ch">Pick a playlist</label><br><span style="font-weight:400;color:#787c82;font-size:12px">optional &middot; needs API key</span></th>
+				<td>
+					<input type="text" id="xrv-imp-pl-ch" class="regular-text" placeholder="Channel URL, @handle, or name">
+					<button type="button" id="xrv-imp-pl-load" class="button">List playlists</button>
+					<span id="xrv-imp-pl-status" style="margin-left:6px;color:#787c82"></span>
+					<p style="margin:8px 0 0"><select id="xrv-imp-pl" class="regular-text" style="display:none"><option value="">Select a playlist&hellip;</option></select></p>
+					<p class="description">List the public playlists on a channel and pick one; it loads into the <strong>Videos</strong> box below, then click <strong>Preview import</strong>.</p>
+				</td></tr>
 			<tr><th scope="row"><label for="xrv-imp-src">Videos</label></th>
 				<td>
 					<textarea id="xrv-imp-src" rows="7" class="large-text code" placeholder="https://www.youtube.com/watch?v=...&#10;https://youtu.be/...&#10;https://www.youtube.com/@channel   (needs API key)&#10;https://www.youtube.com/playlist?list=...   (needs API key)"></textarea>
@@ -3007,6 +3072,25 @@ function xrv_import_inline_js() {
 	function post(action,data){ data.action=action; data.nonce=C.nonce; var b=new URLSearchParams(data); return fetch(C.ajax,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()}).then(function(r){return r.json();}); }
 
 	if(fileEl) fileEl.addEventListener('change', function(){ var f=fileEl.files[0]; if(!f) return; var r=new FileReader(); r.onload=function(){ src.value=(src.value?src.value+'\n':'')+r.result; }; r.readAsText(f); });
+
+	// Playlist picker: list a channel's public playlists, then load the chosen one into the Videos box.
+	var plCh=$('#xrv-imp-pl-ch'), plBtn=$('#xrv-imp-pl-load'), plSel=$('#xrv-imp-pl'), plStatus=$('#xrv-imp-pl-status');
+	if(plBtn) plBtn.addEventListener('click', function(){
+		var ch=plCh?plCh.value.trim():''; if(!ch){ plStatus.textContent='Enter a channel first.'; return; }
+		plStatus.textContent='Loading…'; plBtn.disabled=true;
+		post('xrv_yt_playlists',{ channel:ch, key:(keyEl?keyEl.value:'') }).then(function(res){
+			plBtn.disabled=false;
+			if(!res || !res.success){ plStatus.innerHTML='<span style="color:#b32d2e">'+esc((res&&res.data&&res.data.msg)||'Could not load playlists.')+'</span>'; return; }
+			var pls=res.data.playlists||[];
+			plSel.innerHTML='<option value="">Select a playlist…</option>'+pls.map(function(p){ return '<option value="'+esc(p.id)+'">'+esc(p.title)+' ('+p.count+')</option>'; }).join('');
+			plSel.style.display=''; plStatus.textContent=pls.length+' playlist'+(pls.length===1?'':'s')+' found.';
+		}).catch(function(e){ plBtn.disabled=false; plStatus.innerHTML='<span style="color:#b32d2e">Error: '+esc(String(e))+'</span>'; });
+	});
+	if(plSel) plSel.addEventListener('change', function(){
+		if(!plSel.value){ return; }
+		src.value='https://www.youtube.com/playlist?list='+plSel.value;
+		plStatus.textContent='Loaded into the Videos box below — click Preview import.';
+	});
 
 	$('#xrv-imp-preview').addEventListener('click', function(){
 		statusEl.textContent='Resolving…'; resultsEl.innerHTML=''; progEl.innerHTML='';
