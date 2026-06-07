@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.8
+ * Version:           1.0.9
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -160,7 +160,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.8' );
+	update_option( 'xrv_version', '1.0.9' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -406,16 +406,63 @@ function xrv_iso_to_seconds( $iso ) {
 	return ( (int) $d->d * 86400 ) + ( (int) $d->h * 3600 ) + ( (int) $d->i * 60 ) + (int) $d->s;
 }
 
-/** The local poster URL for a card: the sideloaded attachment if present, else the post thumbnail. */
-function xrv_local_poster_url( $post_id, $thumb_id ) {
+/**
+ * Resolve the attachment ID used as a card's poster, in priority order:
+ *   1. the per-video poster (a custom upload OR the auto-sideloaded YouTube thumbnail) — `_xrv_local_thumb_id`
+ *   2. the post's featured image, if one was set separately
+ *   3. the site-wide default poster set in Settings
+ * Returns 0 when none resolves (the card then shows the CSS placeholder).
+ *
+ * @param int      $post_id  The xroad_video post ID.
+ * @param int|null $thumb_id Pre-fetched _xrv_local_thumb_id (pass it to avoid a repeat lookup), or null.
+ * @return int Attachment ID (0 if none).
+ */
+function xrv_effective_thumb_id( $post_id, $thumb_id = null ) {
+	$thumb_id = ( null === $thumb_id ) ? (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true ) : (int) $thumb_id;
 	if ( $thumb_id ) {
-		$url = wp_get_attachment_image_url( (int) $thumb_id, 'large' );
+		return $thumb_id;
+	}
+	$featured = (int) get_post_thumbnail_id( $post_id );
+	if ( $featured ) {
+		return $featured;
+	}
+	$s = xrv_get_settings();
+	return (int) $s['default_thumb_id'];
+}
+
+/** The local poster URL for a card, following the xrv_effective_thumb_id() priority chain. */
+function xrv_local_poster_url( $post_id, $thumb_id ) {
+	$id = xrv_effective_thumb_id( $post_id, $thumb_id );
+	if ( $id ) {
+		$url = wp_get_attachment_image_url( $id, 'large' );
 		if ( $url ) {
 			return $url;
 		}
 	}
-	$pt = get_the_post_thumbnail_url( $post_id, 'large' );
-	return $pt ? $pt : '';
+	return '';
+}
+
+/**
+ * Responsive srcset + sizes for a card poster, so the browser fetches an appropriately sized image
+ * instead of always shipping the 1024px "large". Returns empty strings when no media-library attachment
+ * backs the poster (e.g. an external featured image), in which case the card just uses its single src.
+ *
+ * @param int $thumb_id The poster attachment ID (0 when none).
+ * @return array{srcset:string,sizes:string}
+ */
+function xrv_poster_srcset( $thumb_id ) {
+	$id = (int) $thumb_id;
+	if ( ! $id ) {
+		return array( 'srcset' => '', 'sizes' => '' );
+	}
+	$srcset = wp_get_attachment_image_srcset( $id, 'large' );
+	if ( ! $srcset ) {
+		return array( 'srcset' => '', 'sizes' => '' );
+	}
+	// Cards render ~full-width on phones and ~480px on larger screens; this lets the browser pick the
+	// smallest sufficient candidate. Filterable for themes with a materially different grid width.
+	$sizes = apply_filters( 'xrv_poster_sizes', '(max-width: 782px) 100vw, 480px', $id );
+	return array( 'srcset' => $srcset, 'sizes' => (string) $sizes );
 }
 
 /* =================================================================================================
@@ -504,8 +551,10 @@ function xrv_render( $atts = array() ) {
 		$term_map = array();
 		$groups   = array();
 		foreach ( $tax_for as $group => $tax ) {
-			$slugs = wp_get_post_terms( $id, $tax, array( 'fields' => 'slugs' ) );
-			$slugs = is_wp_error( $slugs ) ? array() : $slugs;
+			// get_the_terms() reads the term cache WP_Query already primed for this post type, so the whole
+			// grid costs one bulk term query instead of three uncached queries per card (wp_get_post_terms).
+			$terms = get_the_terms( $id, $tax );
+			$slugs = is_array( $terms ) ? wp_list_pluck( $terms, 'slug' ) : array();
 			$term_map[ $tax ] = $slugs;
 			$groups[ $group ] = $slugs;
 			foreach ( $slugs as $s ) {
@@ -520,6 +569,7 @@ function xrv_render( $atts = array() ) {
 		$dur_iso   = (string) get_post_meta( $id, '_xrv_duration_iso', true );
 		$upload    = (string) get_post_meta( $id, '_xrv_upload_date', true );
 		$thumb_id  = (int) get_post_meta( $id, '_xrv_local_thumb_id', true );
+		$poster_ss = xrv_poster_srcset( xrv_effective_thumb_id( $id, $thumb_id ) );
 
 		$records[] = array(
 			'id'         => $id,
@@ -534,6 +584,8 @@ function xrv_render( $atts = array() ) {
 			'dur_sec'    => xrv_iso_to_seconds( $dur_iso ),
 			'upload'     => $upload,
 			'poster'     => xrv_local_poster_url( $id, $thumb_id ),
+			'poster_srcset' => $poster_ss['srcset'],
+			'poster_sizes'  => $poster_ss['sizes'],
 			'series'     => $groups['series'],
 			'audience'   => $groups['audience'],
 			'topic'      => $groups['topic'],
@@ -578,7 +630,7 @@ function xrv_render( $atts = array() ) {
 
 	<?php if ( $show_carousel ) : ?>
 		<?php if ( 'library' === $layout ) : ?><h2 class="xrv-section-title">Featured Videos</h2><?php endif; ?>
-		<?php echo xrv_render_carousel( $featured, $caro_cols ); ?>
+		<?php echo xrv_render_carousel( $featured, $caro_cols, $card_meta ); ?>
 	<?php endif; ?>
 
 	<?php if ( $show_grid ) : ?>
@@ -661,7 +713,7 @@ function xrv_render( $atts = array() ) {
  *     mobile) with prev/next arrows and pagination dots. Reuses the same facade card; cards play in the
  *     lightbox. Pure CSS + a small vanilla controller (see xrv_inline_js).
  * ------------------------------------------------------------------------------------------------- */
-function xrv_render_carousel( $records, $cols ) {
+function xrv_render_carousel( $records, $cols, $card_meta = 'full' ) {
 	if ( empty( $records ) ) {
 		return '';
 	}
@@ -720,7 +772,7 @@ function xrv_render_card( $r, $meta = 'full' ) {
 		<div class="xrv-frame">
 			<button type="button" class="xrv-facade" aria-label="Play video: <?php echo esc_attr( $title ); ?>">
 				<?php if ( $poster !== '' ) : ?>
-					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>" width="480" height="360" loading="lazy" decoding="async" alt="<?php echo esc_attr( $title ); ?>">
+					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>"<?php if ( ! empty( $r['poster_srcset'] ) ) : ?> srcset="<?php echo esc_attr( $r['poster_srcset'] ); ?>" sizes="<?php echo esc_attr( $r['poster_sizes'] ); ?>"<?php endif; ?> width="480" height="360" loading="lazy" decoding="async" alt="<?php echo esc_attr( $title ); ?>">
 				<?php else : ?>
 					<span class="xrv-thumb xrv-thumb--ph" aria-hidden="true"></span>
 				<?php endif; ?>
@@ -942,7 +994,7 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 		'@graph'   => array( $org_node, $collection ),
 	);
 
-	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . '</script>' . "\n";
+	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP ) . '</script>' . "\n";
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -1064,7 +1116,7 @@ function xrv_single_video_schema( $post_id ) {
 			$node,
 		),
 	);
-	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . '</script>' . "\n";
+	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP ) . '</script>' . "\n";
 }
 
 /* =================================================================================================
@@ -1547,7 +1599,7 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '1.0.8', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '1.0.9', true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
@@ -1674,6 +1726,7 @@ function xrv_render_single( $post_id ) {
 	$dur_iso  = (string) get_post_meta( $post_id, '_xrv_duration_iso', true );
 	$upload   = (string) get_post_meta( $post_id, '_xrv_upload_date', true );
 	$thumb_id = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
+	$poster_ss = xrv_poster_srcset( xrv_effective_thumb_id( $post_id, $thumb_id ) );
 
 	$series   = wp_get_post_terms( $post_id, 'xrv_series', array( 'fields' => 'slugs' ) );
 	$audience = wp_get_post_terms( $post_id, 'xrv_audience', array( 'fields' => 'slugs' ) );
@@ -1691,6 +1744,8 @@ function xrv_render_single( $post_id ) {
 		'dur_clock'  => xrv_iso_to_clock( $dur_iso ),
 		'upload'     => $upload,
 		'poster'     => xrv_local_poster_url( $post_id, $thumb_id ),
+		'poster_srcset' => $poster_ss['srcset'],
+		'poster_sizes'  => $poster_ss['sizes'],
 		'series'     => is_wp_error( $series ) ? array() : $series,
 		'audience'   => is_wp_error( $audience ) ? array() : $audience,
 		'topic'      => is_wp_error( $topic ) ? array() : $topic,
@@ -1774,13 +1829,23 @@ function xrv_render_meta_box( $post ) {
 
 	$row( 'Video URL (paste the watch link; the ID is extracted automatically)', '_xrv_source_url', $src_url, 'e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'url' );
 
-	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">Detected video ID: <code>' . ( $vid !== '' ? esc_html( $vid ) : '— (saved after you add a URL)' ) . '</code>';
-	if ( $thumb_id ) {
-		echo ' &nbsp;·&nbsp; Local thumbnail: <strong style="color:#007A53">stored</strong> (attachment #' . (int) $thumb_id . ')';
-	} else {
-		echo ' &nbsp;·&nbsp; Local thumbnail: <strong style="color:#a05a00">not yet stored</strong> — it is downloaded automatically on save';
-	}
-	echo '</p>';
+	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">Detected video ID: <code>' . ( $vid !== '' ? esc_html( $vid ) : '— (saved after you add a URL)' ) . '</code></p>';
+
+	// Poster image: a custom upload OR the auto-fetched YouTube thumbnail. Media picker wired in xrv_media_picker_js().
+	$is_custom   = '1' === (string) get_post_meta( $post->ID, '_xrv_thumb_custom', true );
+	$eff_id      = xrv_effective_thumb_id( $post->ID, $thumb_id );
+	$preview_url = $eff_id ? wp_get_attachment_image_url( $eff_id, 'medium' ) : '';
+	$src_label   = $is_custom ? 'custom upload' : ( $thumb_id ? 'auto-fetched from YouTube' : ( $eff_id ? 'site default' : 'none yet' ) );
+	$settings_link = esc_url( admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) );
+	echo '<div class="xrv-media-field" style="margin:0 0 14px;padding:12px;border:1px solid #e2e6eb;border-radius:6px;background:#fbfbfc">'
+		. '<label style="display:block;font-weight:600;margin-bottom:6px">Poster image <span style="font-weight:400;color:#787c82">(' . esc_html( $src_label ) . ')</span></label>'
+		. '<div class="xrv-media-preview" style="margin-bottom:8px">' . ( $preview_url ? '<img src="' . esc_url( $preview_url ) . '" alt="" style="max-width:220px;height:auto;border-radius:4px;display:block">' : '<span style="color:#a05a00;font-size:12px">No poster yet — one is downloaded from YouTube automatically on save.</span>' ) . '</div>'
+		. '<input type="hidden" class="xrv-media-id" name="_xrv_local_thumb_id" value="' . (int) $thumb_id . '">'
+		. '<input type="hidden" class="xrv-media-custom" name="_xrv_thumb_custom" value="' . ( $is_custom ? '1' : '0' ) . '">'
+		. '<button type="button" class="button xrv-media-pick">Upload / choose image</button>'
+		. ' <button type="button" class="button-link xrv-media-clear" style="color:#b32d2e;margin-left:8px;' . ( $thumb_id ? '' : 'display:none' ) . '">Reset to automatic</button>'
+		. '<p class="description" style="margin-top:8px">Upload your own poster to override the YouTube thumbnail. <strong>Reset to automatic</strong> clears it so the YouTube thumbnail is re-fetched on save. If a video has no poster at all, the <a href="' . $settings_link . '">site default poster</a> is used.</p>'
+		. '</div>';
 
 	echo '<p style="margin:0 0 14px"><label for="_xrv_description" style="display:block;font-weight:600;margin-bottom:4px">Plain-language description (one or two sentences)</label>'
 		. '<textarea id="_xrv_description" name="_xrv_description" rows="3" class="widefat" placeholder="A short, plain-language summary of the video.">'
@@ -1872,17 +1937,34 @@ function xrv_save_meta( $post_id, $post ) {
 	update_post_meta( $post_id, '_xrv_duration_iso', $dur );
 	update_post_meta( $post_id, '_xrv_upload_date', $upload );
 
-	// Sideload a LOCAL thumbnail when none is stored yet OR the video ID changed. This is what makes the
-	// rendered grid reference a /wp-content/uploads/ image and fire ZERO requests to i.ytimg.com.
-	$thumb_id    = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
-	$needs_thumb = $id !== '' && ( $thumb_id === 0 || $new_id !== $old_id );
-	if ( $needs_thumb ) {
-		$attach = xrv_sideload_thumbnail( $post_id, $id, $provider );
-		if ( ! is_wp_error( $attach ) ) {
-			update_post_meta( $post_id, '_xrv_local_thumb_id', (int) $attach );
-			set_post_thumbnail( $post_id, (int) $attach );
+	// Poster image. The editor may upload/choose a CUSTOM poster (media picker in the meta box); a custom
+	// choice is stored verbatim and never overwritten by the auto-sideload. Otherwise a LOCAL thumbnail is
+	// sideloaded from the provider when none is stored yet or the video ID changed — the no-Google-call
+	// hardening that keeps the rendered grid pointing at /wp-content/uploads/ and fires ZERO requests to
+	// i.ytimg.com before a click.
+	$is_custom    = isset( $_POST['_xrv_thumb_custom'] ) && '1' === $_POST['_xrv_thumb_custom'];
+	$posted_thumb = isset( $_POST['_xrv_local_thumb_id'] ) ? max( 0, (int) wp_unslash( $_POST['_xrv_local_thumb_id'] ) ) : null;
+
+	if ( $is_custom && $posted_thumb ) {
+		update_post_meta( $post_id, '_xrv_local_thumb_id', $posted_thumb );
+		update_post_meta( $post_id, '_xrv_thumb_custom', '1' );
+		set_post_thumbnail( $post_id, $posted_thumb );
+	} else {
+		delete_post_meta( $post_id, '_xrv_thumb_custom' );
+		if ( 0 === $posted_thumb ) {
+			// "Reset to automatic": drop the stored poster so it is re-fetched below.
+			delete_post_meta( $post_id, '_xrv_local_thumb_id' );
 		}
-		// On WP_Error the editor's manually uploaded featured image (if any) remains the poster fallback.
+		$thumb_id    = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
+		$needs_thumb = $id !== '' && ( $thumb_id === 0 || $new_id !== $old_id );
+		if ( $needs_thumb ) {
+			$attach = xrv_sideload_thumbnail( $post_id, $id, $provider );
+			if ( ! is_wp_error( $attach ) ) {
+				update_post_meta( $post_id, '_xrv_local_thumb_id', (int) $attach );
+				set_post_thumbnail( $post_id, (int) $attach );
+			}
+			// On WP_Error the editor's manually uploaded featured image (if any) remains the poster fallback.
+		}
 	}
 }
 
@@ -1897,17 +1979,75 @@ function xrv_save_meta( $post_id, $post ) {
  * ------------------------------------------------------------------------------------------------- */
 add_action( 'admin_enqueue_scripts', 'xrv_admin_autotitle_assets' );
 function xrv_admin_autotitle_assets( $hook ) {
-	if ( 'post.php' !== $hook && 'post-new.php' !== $hook ) {
+	$screen     = get_current_screen();
+	$is_edit    = in_array( $hook, array( 'post.php', 'post-new.php' ), true ) && $screen && 'xroad_video' === $screen->post_type;
+	$is_settings = isset( $GLOBALS['xrv_settings_hook'] ) && $hook === $GLOBALS['xrv_settings_hook'];
+	if ( ! $is_edit && ! $is_settings ) {
 		return;
 	}
-	$screen = get_current_screen();
-	if ( ! $screen || 'xroad_video' !== $screen->post_type ) {
-		return;
+
+	if ( $is_edit ) {
+		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.9', true );
+		wp_enqueue_script( 'xrv-admin' );
+		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
-	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.8', true );
-	wp_enqueue_script( 'xrv-admin' );
-	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
+
+	// Poster media picker (per-video meta box AND the Settings default). Attaches to core's media-editor
+	// handle so wp.media is guaranteed loaded; the script no-ops if it somehow is not.
+	wp_enqueue_media();
+	wp_add_inline_script( 'media-editor', xrv_media_picker_js() );
+}
+
+/* Reusable WordPress media-library picker for any `.xrv-media-field` (hidden `.xrv-media-id` + optional
+ * `.xrv-media-custom` flag + `.xrv-media-preview` + pick/clear buttons). Used by the video meta box and
+ * the Settings default-poster control. Admin-only; never enqueued on the front end. */
+function xrv_media_picker_js() {
+	return <<<'JS'
+(function(){
+	if(!window.wp || !wp.media) return;
+	function previewImg(wrap, url){
+		var prev = wrap.querySelector('.xrv-media-preview'); if(!prev) return;
+		prev.textContent = '';
+		if(!url) return;
+		var img = document.createElement('img');
+		img.src = url; img.alt = '';
+		img.style.maxWidth = '220px'; img.style.height = 'auto'; img.style.borderRadius = '4px'; img.style.display = 'block';
+		prev.appendChild(img);
+	}
+	function bind(root){
+		Array.prototype.forEach.call(root.querySelectorAll('.xrv-media-pick'), function(btn){
+			if(btn.dataset.xrvBound) return; btn.dataset.xrvBound = '1';
+			btn.addEventListener('click', function(e){
+				e.preventDefault();
+				var wrap = btn.closest('.xrv-media-field'); if(!wrap) return;
+				var frame = wp.media({ title:'Select or upload a poster image', button:{ text:'Use this image' }, multiple:false, library:{ type:'image' } });
+				frame.on('select', function(){
+					var a = frame.state().get('selection').first().toJSON();
+					var idEl = wrap.querySelector('.xrv-media-id'); if(idEl) idEl.value = a.id;
+					var customEl = wrap.querySelector('.xrv-media-custom'); if(customEl) customEl.value = '1';
+					var url = (a.sizes && (a.sizes.medium || a.sizes.thumbnail)) ? (a.sizes.medium || a.sizes.thumbnail).url : a.url;
+					previewImg(wrap, url);
+					var clr = wrap.querySelector('.xrv-media-clear'); if(clr) clr.style.display = '';
+				});
+				frame.open();
+			});
+		});
+		Array.prototype.forEach.call(root.querySelectorAll('.xrv-media-clear'), function(btn){
+			if(btn.dataset.xrvBound) return; btn.dataset.xrvBound = '1';
+			btn.addEventListener('click', function(e){
+				e.preventDefault();
+				var wrap = btn.closest('.xrv-media-field'); if(!wrap) return;
+				var idEl = wrap.querySelector('.xrv-media-id'); if(idEl) idEl.value = '0';
+				var customEl = wrap.querySelector('.xrv-media-custom'); if(customEl) customEl.value = '0';
+				previewImg(wrap, '');
+				btn.style.display = 'none';
+			});
+		});
+	}
+	if(document.readyState !== 'loading'){ bind(document); } else { document.addEventListener('DOMContentLoaded', function(){ bind(document); }); }
+})();
+JS;
 }
 
 function xrv_admin_autotitle_js() {
@@ -1993,6 +2133,11 @@ function xrv_settings_defaults() {
 		'load_more'       => 3,
 		'subscribe_url'   => '',
 		'subscribe_label' => 'Subscribe to our YouTube channel',
+		'default_thumb_id' => 0,
+		'sync_url'        => '',
+		'sync_freq'       => 'off',
+		'sync_status'     => 'publish',
+		'sync_max'        => 25,
 	);
 }
 function xrv_get_settings() {
@@ -2013,6 +2158,12 @@ function xrv_sanitize_settings( $in ) {
 	$out['load_more']       = max( 1, (int) ( isset( $in['load_more'] ) ? $in['load_more'] : $d['load_more'] ) );
 	$out['subscribe_url']   = isset( $in['subscribe_url'] ) ? esc_url_raw( $in['subscribe_url'] ) : '';
 	$out['subscribe_label'] = isset( $in['subscribe_label'] ) ? sanitize_text_field( $in['subscribe_label'] ) : $d['subscribe_label'];
+	$out['default_thumb_id'] = max( 0, (int) ( isset( $in['default_thumb_id'] ) ? $in['default_thumb_id'] : 0 ) );
+	$out['sync_url']        = isset( $in['sync_url'] ) ? esc_url_raw( trim( $in['sync_url'] ) ) : '';
+	$sf = isset( $in['sync_freq'] ) ? strtolower( $in['sync_freq'] ) : 'off';
+	$out['sync_freq']       = in_array( $sf, array( 'off', 'hourly', 'daily', 'weekly', 'monthly' ), true ) ? $sf : 'off';
+	$out['sync_status']     = ( isset( $in['sync_status'] ) && 'draft' === $in['sync_status'] ) ? 'draft' : 'publish';
+	$out['sync_max']        = min( 50, max( 1, (int) ( isset( $in['sync_max'] ) ? $in['sync_max'] : $d['sync_max'] ) ) );
 	return $out;
 }
 add_action( 'admin_init', 'xrv_register_settings' );
@@ -2022,7 +2173,151 @@ function xrv_register_settings() {
 }
 add_action( 'admin_menu', 'xrv_register_settings_page' );
 function xrv_register_settings_page() {
-	add_submenu_page( 'edit.php?post_type=xroad_video', 'Crossroad Videos Settings', 'Settings', 'manage_options', 'xrv-settings', 'xrv_render_settings_page' );
+	$GLOBALS['xrv_settings_hook'] = add_submenu_page( 'edit.php?post_type=xroad_video', 'Crossroad Videos Settings', 'Settings', 'manage_options', 'xrv-settings', 'xrv_render_settings_page' );
+}
+
+/* =================================================================================================
+ * 9e. CHANNEL AUTO-SYNC  (poll a channel/playlist for new uploads — on a schedule or on demand)
+ *     Reuses the importer's YouTube Data API helpers. Only ADDS videos whose ID is not already in the
+ *     library (dedup on _xrv_video_id), so a run is always idempotent and safe. Requires the API key
+ *     (the only supported way to enumerate a channel's latest uploads). WP-Cron drives the schedule;
+ *     "Sync now" runs it on demand. New videos publish or stay draft per the Settings choice.
+ * ================================================================================================= */
+
+/* Public entry point. A short-lived transient lock prevents two runs (e.g. a cron tick overlapping a
+ * "Sync now" click) from both inserting the same new video. If a run is already in flight we return the
+ * last result untouched rather than duplicating work. The lock self-heals: it expires on its own if a
+ * run dies mid-way, so a crash can never wedge sync permanently. */
+function xrv_sync_run() {
+	if ( get_transient( 'xrv_sync_lock' ) ) {
+		$last = get_option( 'xrv_sync_last', array() );
+		return is_array( $last ) ? $last : array();
+	}
+	set_transient( 'xrv_sync_lock', 1, 15 * MINUTE_IN_SECONDS );
+	try {
+		$res = xrv_sync_perform();
+	} finally {
+		delete_transient( 'xrv_sync_lock' );
+	}
+	return $res;
+}
+
+/* The sync engine. Returns (and stores in option xrv_sync_last) a small result array. */
+function xrv_sync_perform() {
+	$s   = xrv_get_settings();
+	$key = (string) get_option( 'xrv_yt_api_key', '' );
+	$url = isset( $s['sync_url'] ) ? trim( (string) $s['sync_url'] ) : '';
+	$now = current_time( 'mysql' );
+
+	if ( '' === $key || '' === $url ) {
+		$res = array( 'time' => $now, 'ok' => false, 'checked' => 0, 'added' => 0, 'msg' => 'Needs a YouTube Data API key and a channel/playlist URL.' );
+		update_option( 'xrv_sync_last', $res ); return $res;
+	}
+
+	// Resolve the source to a playlist of uploads (a ?list= URL is already a playlist).
+	if ( preg_match( '#[?&]list=([A-Za-z0-9_-]+)#', $url, $m ) ) { $playlist = $m[1]; }
+	else { $playlist = xrv_yt_uploads_playlist( $url, $key ); }
+	if ( is_wp_error( $playlist ) ) {
+		$res = array( 'time' => $now, 'ok' => false, 'checked' => 0, 'added' => 0, 'msg' => $playlist->get_error_message() );
+		update_option( 'xrv_sync_last', $res ); return $res;
+	}
+
+	$max = min( 50, max( 1, (int) ( isset( $s['sync_max'] ) ? $s['sync_max'] : 25 ) ) );
+	$ids = xrv_yt_playlist_ids( $playlist, $key, $max );
+	if ( is_wp_error( $ids ) ) {
+		$res = array( 'time' => $now, 'ok' => false, 'checked' => 0, 'added' => 0, 'msg' => $ids->get_error_message() );
+		update_option( 'xrv_sync_last', $res ); return $res;
+	}
+	$ids = array_slice( array_values( array_unique( $ids ) ), 0, $max );
+
+	// Which of these are not already in the library?
+	global $wpdb;
+	$existing = array_flip( (array) $wpdb->get_col( "SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_xrv_video_id'" ) );
+	$new = array();
+	foreach ( $ids as $id ) { if ( ! isset( $existing[ $id ] ) ) { $new[] = $id; } }
+
+	$added = 0; $titles = array();
+	if ( $new ) {
+		$status    = ( isset( $s['sync_status'] ) && 'draft' === $s['sync_status'] ) ? 'draft' : 'publish';
+		$meta      = xrv_yt_videos_meta( $new, $key );
+		if ( is_wp_error( $meta ) ) { $meta = array(); }
+		$max_order = (int) $wpdb->get_var( "SELECT MAX(menu_order) FROM {$wpdb->posts} WHERE post_type = 'xroad_video'" );
+
+		foreach ( $new as $id ) {
+			$mv    = isset( $meta[ $id ] ) ? $meta[ $id ] : array();
+			$title = ! empty( $mv['title'] ) ? sanitize_text_field( $mv['title'] ) : $id;
+			$max_order++;
+			$pid = wp_insert_post( array( 'post_type' => 'xroad_video', 'post_status' => $status, 'post_title' => $title, 'menu_order' => $max_order ) );
+			if ( is_wp_error( $pid ) ) { continue; }
+
+			update_post_meta( $pid, '_xrv_provider', 'youtube' );
+			update_post_meta( $pid, '_xrv_video_id', $id );
+			update_post_meta( $pid, '_xrv_source_url', 'https://www.youtube.com/watch?v=' . $id );
+			if ( ! empty( $mv['duration'] ) ) { update_post_meta( $pid, '_xrv_duration_iso', sanitize_text_field( $mv['duration'] ) ); }
+			if ( ! empty( $mv['upload'] ) )   { update_post_meta( $pid, '_xrv_upload_date', sanitize_text_field( $mv['upload'] ) ); }
+			if ( ! empty( $mv['desc'] ) )     { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $mv['desc'] ) ); }
+
+			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube' );
+			if ( ! is_wp_error( $att ) ) { update_post_meta( $pid, '_xrv_local_thumb_id', (int) $att ); set_post_thumbnail( $pid, (int) $att ); }
+
+			$added++; $titles[] = $title;
+		}
+	}
+
+	$res = array( 'time' => $now, 'ok' => true, 'checked' => count( $ids ), 'added' => $added, 'titles' => array_slice( $titles, 0, 10 ) );
+	update_option( 'xrv_sync_last', $res );
+	return $res;
+}
+
+/* Custom "weekly" cron interval (WP ships only hourly / twicedaily / daily). */
+add_filter( 'cron_schedules', 'xrv_cron_schedules' );
+function xrv_cron_schedules( $schedules ) {
+	if ( ! isset( $schedules['weekly'] ) ) {
+		$schedules['weekly'] = array( 'interval' => WEEK_IN_SECONDS, 'display' => 'Once weekly' );
+	}
+	if ( ! isset( $schedules['monthly'] ) ) {
+		$schedules['monthly'] = array( 'interval' => MONTH_IN_SECONDS, 'display' => 'Once monthly' );
+	}
+	return $schedules;
+}
+
+/* The scheduled event handler. */
+add_action( 'xrv_sync_event', 'xrv_sync_run' );
+
+/* (Re)schedule whenever the settings are saved: clear any existing event, then schedule if enabled + configured. */
+add_action( 'update_option_xrv_settings', 'xrv_sync_reschedule' );
+add_action( 'add_option_xrv_settings', 'xrv_sync_reschedule' );
+add_action( 'update_option_xrv_yt_api_key', 'xrv_sync_reschedule' );
+function xrv_sync_reschedule() {
+	$ts = wp_next_scheduled( 'xrv_sync_event' );
+	if ( $ts ) { wp_unschedule_event( $ts, 'xrv_sync_event' ); }
+
+	$s     = xrv_get_settings();
+	$freqs = array( 'hourly', 'daily', 'weekly', 'monthly' );
+	$freq  = isset( $s['sync_freq'] ) ? $s['sync_freq'] : 'off';
+	$ready = in_array( $freq, $freqs, true )
+		&& '' !== trim( (string) ( isset( $s['sync_url'] ) ? $s['sync_url'] : '' ) )
+		&& '' !== (string) get_option( 'xrv_yt_api_key', '' );
+
+	if ( $ready ) { wp_schedule_event( time() + 60, $freq, 'xrv_sync_event' ); }
+}
+
+/* On-demand "Sync now" (admin-post action; not a settings save). */
+add_action( 'admin_post_xrv_sync_now', 'xrv_sync_now_handler' );
+function xrv_sync_now_handler() {
+	if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'forbidden' ); }
+	check_admin_referer( 'xrv_sync_now' );
+	xrv_sync_run();
+	wp_safe_redirect( add_query_arg( 'xrv_synced', '1', admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) );
+	exit;
+}
+
+/* Clear the scheduled event on deactivation (in addition to the rewrite flush). */
+register_deactivation_hook( __FILE__, 'xrv_sync_clear_cron' );
+function xrv_sync_clear_cron() {
+	$ts = wp_next_scheduled( 'xrv_sync_event' );
+	if ( $ts ) { wp_unschedule_event( $ts, 'xrv_sync_event' ); }
+	wp_clear_scheduled_hook( 'xrv_sync_event' );
 }
 function xrv_render_settings_page() {
 	if ( ! current_user_can( 'manage_options' ) ) { return; }
@@ -2146,12 +2441,98 @@ function xrv_render_settings_page() {
 				<tr>
 					<th scope="row"><label for="xrv-key">API key</label></th>
 					<td><input type="text" id="xrv-key" name="xrv_yt_api_key" value="<?php echo esc_attr( $key ); ?>" class="regular-text" autocomplete="off">
-					<p class="description">Only needed to import an entire channel/playlist with durations &amp; descriptions. Pasting URLs or a JSON file needs no key. Used by <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=xroad_video&page=xrv-import' ) ); ?>">Import</a>.</p></td>
+					<p class="description">Only needed to import an entire channel/playlist with durations &amp; descriptions, and for <strong>auto-sync</strong> below. Pasting URLs or a JSON file needs no key. Used by <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=xroad_video&page=xrv-import' ) ); ?>">Import</a>.</p></td>
+				</tr>
+			</table>
+
+			<h2 class="title">Default poster image</h2>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Default poster</th>
+					<td>
+						<?php
+						$def_id  = (int) $s['default_thumb_id'];
+						$def_url = $def_id ? wp_get_attachment_image_url( $def_id, 'medium' ) : '';
+						?>
+						<div class="xrv-media-field">
+							<div class="xrv-media-preview" style="margin-bottom:8px"><?php if ( $def_url ) { echo '<img src="' . esc_url( $def_url ) . '" alt="" style="max-width:220px;height:auto;border-radius:4px;display:block">'; } ?></div>
+							<input type="hidden" class="xrv-media-id" name="xrv_settings[default_thumb_id]" value="<?php echo (int) $def_id; ?>">
+							<button type="button" class="button xrv-media-pick">Upload / choose image</button>
+							<button type="button" class="button-link xrv-media-clear" style="color:#b32d2e;margin-left:8px;<?php echo $def_id ? '' : 'display:none'; ?>">Remove</button>
+							<p class="description">Shown for any video that has no YouTube thumbnail and no custom poster &mdash; for example a video added before its thumbnail finished downloading. A neutral, branded placeholder works best.</p>
+						</div>
+					</td>
+				</tr>
+			</table>
+
+			<h2 class="title">Automatic channel sync</h2>
+			<p class="description" style="max-width:780px">Poll a YouTube channel or playlist and add any <strong>new</strong> uploads to the library automatically. Videos already in the library (matched by video ID) are skipped, so it is always safe to run. Needs the YouTube Data API key above.<?php if ( '' === $key ) { echo ' <strong style="color:#b32d2e">Add an API key to enable it.</strong>'; } ?></p>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row"><label for="xrv-sync-url">Channel or playlist URL</label></th>
+					<td><input type="url" id="xrv-sync-url" name="xrv_settings[sync_url]" value="<?php echo esc_attr( $s['sync_url'] ); ?>" class="regular-text" placeholder="https://www.youtube.com/@yourchannel">
+					<p class="description">A channel URL (<code>/@handle</code>, <code>/channel/UC…</code>, <code>/user/…</code>) or a <code>?list=…</code> playlist URL.</p></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-sync-freq">Check frequency</label></th>
+					<td><select id="xrv-sync-freq" name="xrv_settings[sync_freq]">
+						<?php foreach ( array( 'off' => 'On demand / never', 'hourly' => 'Hourly', 'daily' => 'Daily', 'weekly' => 'Weekly', 'monthly' => 'Monthly' ) as $val => $lbl ) {
+							echo '<option value="' . esc_attr( $val ) . '" ' . selected( $s['sync_freq'], $val, false ) . '>' . esc_html( $lbl ) . '</option>';
+						} ?>
+					</select>
+					<p class="description"><strong>On demand / never</strong> turns off the schedule &mdash; the library only updates when you click <em>Sync now</em> below. Any other choice checks automatically at that cadence.
+					<?php
+					$next = wp_next_scheduled( 'xrv_sync_event' );
+					if ( $next ) {
+						$tz = function_exists( 'wp_timezone_string' ) ? wp_timezone_string() : (string) get_option( 'timezone_string' );
+						echo ' Next automatic check: <strong>' . esc_html( get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $next ), 'M j, Y g:i a' ) ) . '</strong>' . ( '' !== $tz ? ' (' . esc_html( $tz ) . ')' : ' (site time)' ) . '.';
+					}
+					?></p></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-sync-status">Add new videos as</label></th>
+					<td><select id="xrv-sync-status" name="xrv_settings[sync_status]">
+						<option value="publish" <?php selected( $s['sync_status'], 'publish' ); ?>>Published (live immediately)</option>
+						<option value="draft" <?php selected( $s['sync_status'], 'draft' ); ?>>Draft (review before publishing)</option>
+					</select>
+					<p class="description">Choose <strong>Draft</strong> if you want to review titles/taxonomy before each new video goes live.</p></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-sync-max">Videos to check</label></th>
+					<td><input type="number" id="xrv-sync-max" name="xrv_settings[sync_max]" value="<?php echo esc_attr( (int) $s['sync_max'] ); ?>" min="1" max="50" class="small-text">
+					<p class="description">How many of the channel's most recent uploads to scan each run (1&ndash;50).</p></td>
 				</tr>
 			</table>
 
 			<?php submit_button(); ?>
 		</form>
+
+		<?php
+		// On-demand sync (separate form: it performs an action, not a settings save).
+		if ( isset( $_GET['xrv_synced'] ) ) {
+			$last = get_option( 'xrv_sync_last', array() );
+			if ( ! empty( $last['ok'] ) ) {
+				$msg = sprintf( 'Sync complete: checked %d, added %d new video%s.', (int) $last['checked'], (int) $last['added'], 1 === (int) $last['added'] ? '' : 's' );
+				if ( ! empty( $last['titles'] ) ) { $msg .= ' (' . esc_html( implode( ', ', array_map( 'sanitize_text_field', $last['titles'] ) ) ) . ')'; }
+				echo '<div class="notice notice-success is-dismissible"><p>' . wp_kses_post( $msg ) . '</p></div>';
+			} elseif ( ! empty( $last['msg'] ) ) {
+				echo '<div class="notice notice-error is-dismissible"><p>Sync could not run: ' . esc_html( $last['msg'] ) . '</p></div>';
+			}
+		}
+		?>
+		<h2 class="title">Run a sync now</h2>
+		<p class="description" style="max-width:780px">Check the channel immediately, using the settings above. Save your changes first if you just edited them.</p>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<input type="hidden" name="action" value="xrv_sync_now">
+			<?php wp_nonce_field( 'xrv_sync_now' ); ?>
+			<?php submit_button( 'Sync now', 'secondary', 'submit', false, '' === $key || empty( $s['sync_url'] ) ? array( 'disabled' => 'disabled' ) : array() ); ?>
+		</form>
+		<?php
+		$last = get_option( 'xrv_sync_last', array() );
+		if ( ! empty( $last['time'] ) ) {
+			echo '<p class="description" style="margin-top:8px">Last run: <strong>' . esc_html( get_date_from_gmt( get_gmt_from_date( $last['time'] ), 'M j, Y g:i a' ) ) . '</strong> &mdash; ' . ( ! empty( $last['ok'] ) ? esc_html( sprintf( 'checked %d, added %d.', (int) $last['checked'], (int) $last['added'] ) ) : esc_html( $last['msg'] ) ) . '</p>';
+		}
+		?>
 	</div>
 	<?php
 }
@@ -2555,9 +2936,12 @@ function xrv_uninstall_cleanup() {
 		}
 	}
 
+	wp_clear_scheduled_hook( 'xrv_sync_event' );
+
 	delete_option( 'xrv_version' );
 	delete_option( 'xrv_yt_api_key' );
 	delete_option( 'xrv_settings' );
+	delete_option( 'xrv_sync_last' );
 	delete_option( 'xrv_delete_data_on_uninstall' );
 	delete_option( 'xrv_delete_thumbs_on_uninstall' );
 }
