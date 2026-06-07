@@ -2,6 +2,9 @@
 xroad-videos.zip
 /_pkg/
 
+# Local / client-specific tooling (not part of the generic plugin)
+/tools/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

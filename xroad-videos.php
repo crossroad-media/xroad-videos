@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.7
+ * Version:           1.0.8
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -160,7 +160,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.7' );
+	update_option( 'xrv_version', '1.0.8' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -398,6 +398,14 @@ function xrv_iso_to_clock( $iso ) {
 	return sprintf( '%d:%02d', $m, $s );
 }
 
+/** ISO 8601 duration -> total seconds (0 when missing/invalid). Used for the duration sort. */
+function xrv_iso_to_seconds( $iso ) {
+	$iso = trim( (string) $iso );
+	if ( $iso === '' || ! preg_match( '/^P/', $iso ) ) { return 0; }
+	try { $d = new DateInterval( $iso ); } catch ( Exception $e ) { return 0; }
+	return ( (int) $d->d * 86400 ) + ( (int) $d->h * 3600 ) + ( (int) $d->i * 60 ) + (int) $d->s;
+}
+
 /** The local poster URL for a card: the sideloaded attachment if present, else the post thumbnail. */
 function xrv_local_poster_url( $post_id, $thumb_id ) {
 	if ( $thumb_id ) {
@@ -420,6 +428,10 @@ function xrv_local_poster_url( $post_id, $thumb_id ) {
 
 function xrv_render( $atts = array() ) {
 
+	// Drop empty attrs so a blank shortcode value OR an unset/"site default" block control falls through to
+	// the site defaults below (instead of overriding them with an empty string).
+	$atts = array_filter( (array) $atts, function( $v ) { return '' !== $v && null !== $v; } );
+	$s = xrv_get_settings(); // site-wide defaults (Videos -> Settings); explicit shortcode/block attrs override these
 	$atts = shortcode_atts( array(
 		'series'   => '',   // comma-separated xrv_series slugs to pre-filter
 		'audience' => '',   // comma-separated xrv_audience slugs
@@ -429,17 +441,29 @@ function xrv_render( $atts = array() ) {
 		'playback' => 'lightbox', // 'lightbox' (pops out into a centered overlay) | 'inline' (plays in the card)
 		'layout'   => 'grid',      // 'grid' | 'carousel' | 'library' (featured carousel + browse grid)
 		'controls' => 'true',      // show the search / sort / filter / count bar on the grid
+		'filter_ui' => $s['filter_ui'],   // facet filters as dropdown 'select' menus (default) or clickable 'chips'
+		'card_meta' => $s['card_meta'],   // card text under the title: 'full' (desc+tags) | 'compact' (desc) | 'title' (title only)
 		'featured_limit' => 6,     // how many videos feed the featured carousel (library/carousel layout)
 		'heading'  => '',          // optional centered section heading (grid/carousel layout)
-		'per_page' => 9,           // browse grid: how many cards show before "Load more"
-		'load_more' => 3,          // how many more cards each "Load more" click reveals
-		'subscribe_url'   => '',   // YouTube channel URL; when set, a "Subscribe" button shows under the grid
-		'subscribe_label' => 'Subscribe to our YouTube channel',
+		'per_page' => $s['per_page'],     // browse grid: how many cards show before "Load more"
+		'load_more' => $s['load_more'],   // how many more cards each "Load more" click reveals
+		'subscribe_url'   => $s['subscribe_url'],   // YouTube channel URL; when set, a "Subscribe" button shows under the grid
+		'subscribe_label' => $s['subscribe_label'],
+		'consent_notice'  => $s['consent_notice'],  // off | light | strict | geo  — informed-consent UI at the facade
+		'consent_text'    => $s['consent_text'],
+		'consent_button'  => $s['consent_button'],
+		'consent_decline' => $s['consent_decline'], // label for the decline/dismiss control on the prompt
+		'privacy_url'     => $s['privacy_url'],      // privacy policy link in the notice; defaults to the WP privacy page
 	), $atts, 'xroad-videos' );
 
 	$playback = ( 'inline' === $atts['playback'] ) ? 'inline' : 'lightbox';
 	$layout   = in_array( $atts['layout'], array( 'grid', 'carousel', 'library' ), true ) ? $atts['layout'] : 'grid';
 	$controls = ! in_array( strtolower( (string) $atts['controls'] ), array( 'false', '0', 'no', 'off' ), true );
+	$filter_ui = ( 'chips' === strtolower( (string) $atts['filter_ui'] ) ) ? 'chips' : 'select';
+	$cn = strtolower( (string) $atts['consent_notice'] );
+	$consent_notice = in_array( $cn, array( 'light', 'strict', 'geo' ), true ) ? $cn : 'off';
+	$card_meta = in_array( strtolower( (string) $atts['card_meta'] ), array( 'full', 'compact', 'title' ), true ) ? strtolower( (string) $atts['card_meta'] ) : 'full';
+	$privacy_url = '' !== $atts['privacy_url'] ? esc_url( $atts['privacy_url'] ) : esc_url( (string) get_privacy_policy_url() );
 	$per_page  = max( 1, (int) $atts['per_page'] );
 	$load_step = max( 1, (int) $atts['load_more'] );
 	$subscribe_url = esc_url( $atts['subscribe_url'] );
@@ -507,6 +531,7 @@ function xrv_render( $atts = array() ) {
 			'dedicated'  => $dedicated,
 			'dur_iso'    => $dur_iso,
 			'dur_clock'  => xrv_iso_to_clock( $dur_iso ),
+			'dur_sec'    => xrv_iso_to_seconds( $dur_iso ),
 			'upload'     => $upload,
 			'poster'     => xrv_local_poster_url( $id, $thumb_id ),
 			'series'     => $groups['series'],
@@ -544,9 +569,8 @@ function xrv_render( $atts = array() ) {
 
 	ob_start();
 	?>
-<div id="xroad-videos-app" class="xrv xrv--<?php echo esc_attr( $layout ); ?>" data-playback="<?php echo esc_attr( $playback ); ?>" data-layout="<?php echo esc_attr( $layout ); ?>">
-	<?php echo xrv_icon_sprite(); ?>
-	<?php echo xrv_inline_css(); ?>
+<div id="xroad-videos-app" class="xrv xrv--<?php echo esc_attr( $layout ); ?>" data-playback="<?php echo esc_attr( $playback ); ?>" data-layout="<?php echo esc_attr( $layout ); ?>" data-consent="<?php echo esc_attr( $consent_notice ); ?>" data-consent-text="<?php echo esc_attr( $atts['consent_text'] ); ?>" data-consent-btn="<?php echo esc_attr( $atts['consent_button'] ); ?>" data-consent-decline="<?php echo esc_attr( $atts['consent_decline'] ); ?>" data-privacy="<?php echo esc_attr( $privacy_url ); ?>"<?php if ( 'geo' === $consent_notice ) : ?> data-region-url="<?php echo esc_url( rest_url( 'xrv/v1/region' ) ); ?>"<?php endif; ?>>
+	<?php echo xrv_head_assets_once(); ?>
 
 	<?php if ( 'library' !== $layout && '' !== $atts['heading'] ) : ?>
 		<h2 class="xrv-section-title"><?php echo esc_html( $atts['heading'] ); ?></h2>
@@ -566,22 +590,34 @@ function xrv_render( $atts = array() ) {
 					<svg class="xrv-ic"><use href="#xrv-i-search"/></svg>
 					<input type="text" id="xrv-q" placeholder="Search videos&hellip;" aria-label="Search videos by keyword">
 				</div>
-				<div class="xrv-sortwrap">
-					<label for="xrv-sort">Sort</label>
-					<select id="xrv-sort">
-						<option value="curated">Curated order</option>
-						<option value="newest">Newest first</option>
-						<option value="oldest">Oldest first</option>
-						<option value="title">Title (A&ndash;Z)</option>
-					</select>
+				<div class="xrv-ctrls">
+					<?php if ( 'select' === $filter_ui ) {
+						// Facet filters as compact dropdown selects, grouped with Sort on the right of the bar.
+						echo xrv_render_filter_select( 'series',   'Series',   'xrv_series',   $facet['series'] );
+						echo xrv_render_filter_select( 'audience', 'Audience', 'xrv_audience', $facet['audience'] );
+						echo xrv_render_filter_select( 'topic',    'Topic',    'xrv_topic',    $facet['topic'] );
+					} ?>
+					<div class="xrv-sortwrap">
+						<label for="xrv-sort">Sort</label>
+						<select id="xrv-sort">
+							<option value="curated">Curated order</option>
+							<option value="newest">Newest first</option>
+							<option value="oldest">Oldest first</option>
+							<option value="title">Title (A&ndash;Z)</option>
+							<option value="short">Shortest first</option>
+							<option value="long">Longest first</option>
+						</select>
+					</div>
 				</div>
 			</div>
 
 			<?php
-			// Filter chip rows, one per facet, built from the live counts so no empty filter ever shows.
-			echo xrv_render_filter_group( 'series',   'Series',   'xrv_series',   $facet['series'] );
-			echo xrv_render_filter_group( 'audience', 'Audience', 'xrv_audience', $facet['audience'] );
-			echo xrv_render_filter_group( 'topic',    'Topic',    'xrv_topic',    $facet['topic'] );
+			if ( 'chips' === $filter_ui ) {
+				// Filter chip rows, one per facet, built from the live counts so no empty filter ever shows.
+				echo xrv_render_filter_group( 'series',   'Series',   'xrv_series',   $facet['series'] );
+				echo xrv_render_filter_group( 'audience', 'Audience', 'xrv_audience', $facet['audience'] );
+				echo xrv_render_filter_group( 'topic',    'Topic',    'xrv_topic',    $facet['topic'] );
+			}
 			?>
 
 			<div class="xrv-statusbar">
@@ -591,7 +627,7 @@ function xrv_render( $atts = array() ) {
 			<?php endif; ?>
 
 			<div class="<?php echo esc_attr( $grid_class ); ?>" id="xrv-grid" style="<?php echo esc_attr( $grid_style ); ?>" data-perpage="<?php echo (int) $per_page; ?>" data-loadstep="<?php echo (int) $load_step; ?>">
-				<?php foreach ( $records as $r ) { echo xrv_render_card( $r ); } ?>
+				<?php foreach ( $records as $r ) { echo xrv_render_card( $r, $card_meta ); } ?>
 			</div>
 
 			<div class="xrv-empty" id="xrv-empty" style="display:none">
@@ -608,7 +644,7 @@ function xrv_render( $atts = array() ) {
 		</section>
 	<?php endif; ?>
 
-	<?php echo xrv_inline_js(); ?>
+	<?php echo xrv_footer_js_once(); ?>
 </div>
 	<?php
 	// Emit VideoObject schema for the full set, but only from a layout that shows the grid (so a
@@ -636,7 +672,7 @@ function xrv_render_carousel( $records, $cols ) {
 		<button type="button" class="xrv-caro-arrow xrv-caro-prev" aria-label="Previous videos">&#8249;</button>
 		<div class="xrv-caro-viewport">
 			<div class="xrv-caro-track">
-				<?php foreach ( $records as $r ) { echo xrv_render_card( $r ); } ?>
+				<?php foreach ( $records as $r ) { echo xrv_render_card( $r, $card_meta ); } ?>
 			</div>
 		</div>
 		<button type="button" class="xrv-caro-arrow xrv-caro-next" aria-label="More videos">&#8250;</button>
@@ -650,7 +686,7 @@ function xrv_render_carousel( $records, $cols ) {
  * 5a. One video card. The initial state is a LOCAL poster + a native <button> play control. No iframe,
  *     no third-party request, no cookie. The facade JS swaps in the youtube-nocookie iframe on click.
  * ------------------------------------------------------------------------------------------------- */
-function xrv_render_card( $r ) {
+function xrv_render_card( $r, $meta = 'full' ) {
 	$title    = $r['title'];
 	$dedicated = $r['dedicated'];
 
@@ -678,6 +714,7 @@ function xrv_render_card( $r ) {
 		data-audience="<?php echo esc_attr( implode( ' ', $r['audience'] ) ); ?>"
 		data-topic="<?php echo esc_attr( implode( ' ', $r['topic'] ) ); ?>"
 		data-date="<?php echo esc_attr( $r['date_key'] ); ?>"
+		data-seconds="<?php echo (int) ( $r['dur_sec'] ?? 0 ); ?>"
 		data-title="<?php echo esc_attr( strtolower( $title ) ); ?>"
 		data-search="<?php echo esc_attr( $r['search'] ); ?>">
 		<div class="xrv-frame">
@@ -695,8 +732,8 @@ function xrv_render_card( $r ) {
 		</div>
 		<figcaption class="xrv-cap">
 			<h3 class="xrv-title"><?php echo esc_html( $title ); ?></h3>
-			<?php if ( $r['desc'] !== '' ) : ?><p class="xrv-desc"><?php echo esc_html( $r['desc'] ); ?></p><?php endif; ?>
-			<?php if ( $tags_html !== '' ) : ?><p class="xrv-tags"><?php echo $tags_html; ?></p><?php endif; ?>
+			<?php if ( 'title' !== $meta && $r['desc'] !== '' ) : ?><p class="xrv-desc"><?php echo esc_html( $r['desc'] ); ?></p><?php endif; ?>
+			<?php if ( 'full' === $meta && $tags_html !== '' ) : ?><p class="xrv-tags"><?php echo $tags_html; ?></p><?php endif; ?>
 			<?php if ( $dedicated !== '' ) : ?>
 				<a class="xrv-page-link" href="<?php echo esc_url( $dedicated ); ?>">Watch on its page <svg class="xrv-ic"><use href="#xrv-i-arrow"/></svg></a>
 			<?php endif; ?>
@@ -730,6 +767,76 @@ function xrv_render_filter_group( $group, $heading, $taxonomy, $counts ) {
 	</div>
 	<?php
 	return ob_get_clean();
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * 5c. Filter-select renderer. A compact dropdown per facet (single choice + "All"), shown only for
+ *     terms that actually occur, ordered by the seeded vocabulary. Used when filter_ui="select".
+ * ------------------------------------------------------------------------------------------------- */
+function xrv_render_filter_select( $group, $heading, $taxonomy, $counts ) {
+	if ( empty( $counts ) ) {
+		return '';
+	}
+	$ordered = get_terms( array( 'taxonomy' => $taxonomy, 'hide_empty' => true, 'orderby' => 'term_id' ) );
+	if ( is_wp_error( $ordered ) || empty( $ordered ) ) {
+		return '';
+	}
+	$id = 'xrv-fsel-' . $group;
+	ob_start(); ?>
+	<div class="xrv-fselwrap">
+		<label for="<?php echo esc_attr( $id ); ?>"><?php echo esc_html( $heading ); ?></label>
+		<select class="xrv-fsel" id="<?php echo esc_attr( $id ); ?>" data-group="<?php echo esc_attr( $group ); ?>">
+			<option value="">All <?php echo esc_html( $heading ); ?></option>
+			<?php foreach ( $ordered as $t ) :
+				if ( empty( $counts[ $t->slug ] ) ) { continue; } ?>
+				<option value="<?php echo esc_attr( $t->slug ); ?>"><?php echo esc_html( $t->name ); ?> (<?php echo (int) $counts[ $t->slug ]; ?>)</option>
+			<?php endforeach; ?>
+		</select>
+	</div>
+	<?php
+	return ob_get_clean();
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * 5d. Region endpoint for the geo-aware consent notice (consent_notice="geo"). Cache-safe: the page
+ *     stays fully cacheable; only this tiny uncached REST call decides whether the visitor is in a
+ *     consent-required region. Country comes from an edge header (Cloudflare CF-IPCountry / WP Engine /
+ *     a GeoIP var); sites without one fail SAFE to "consent required". Override via the xrv_consent_required filter.
+ * ------------------------------------------------------------------------------------------------- */
+add_action( 'rest_api_init', function () {
+	register_rest_route( 'xrv/v1', '/region', array(
+		'methods'             => 'GET',
+		'permission_callback' => '__return_true',
+		'callback'            => 'xrv_rest_region',
+	) );
+} );
+/* Shared edge/server geo detection — used by BOTH the REST endpoint and the Settings status panel. Returns
+ * the 2-letter country ('' if none), a human label, and the exact header it came from. No IP lookup, no
+ * external call, no bundled DB — the plugin only reads a header the edge/CDN/host already provides. */
+function xrv_geo_country() {
+	$sources = array(
+		'HTTP_CF_IPCOUNTRY'              => 'Cloudflare',
+		'GEOIP_COUNTRY_CODE'             => 'GeoIP module / WP Engine GeoTarget',
+		'HTTP_X_COUNTRY_CODE'            => 'Proxy header (X-Country-Code)',
+		'HTTP_CLOUDFRONT_VIEWER_COUNTRY' => 'AWS CloudFront',
+	);
+	foreach ( $sources as $k => $label ) {
+		if ( ! empty( $_SERVER[ $k ] ) ) {
+			return array( 'country' => strtoupper( substr( sanitize_text_field( wp_unslash( $_SERVER[ $k ] ) ), 0, 2 ) ), 'source' => $label, 'header' => $k );
+		}
+	}
+	return array( 'country' => '', 'source' => '', 'header' => '' );
+}
+function xrv_is_consent_region( $cc ) {
+	$eea_uk_ch = array( 'AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','IS','LI','NO','GB','CH' );
+	return ( '' === $cc || 'XX' === $cc ) ? true : in_array( $cc, $eea_uk_ch, true ); // unknown -> fail safe to required
+}
+function xrv_rest_region() {
+	$g = xrv_geo_country();
+	$required = (bool) apply_filters( 'xrv_consent_required', xrv_is_consent_region( $g['country'] ), $g['country'] );
+	$res = new WP_REST_Response( array( 'country' => $g['country'], 'consent_required' => $required, 'source' => $g['source'] ), 200 );
+	$res->header( 'Cache-Control', 'no-store, max-age=0' );
+	return $res;
 }
 
 /* =================================================================================================
@@ -968,6 +1075,22 @@ function xrv_single_video_schema( $post_id ) {
  *    WCAG AA: 4.5:1 text contrast, 3:1 non-text/focus ring.
  * ================================================================================================= */
 
+/* Emit the shared inline assets (SVG sprite + CSS, and the JS) only ONCE per request, so multiple
+ * galleries/shortcodes on a single page don't duplicate ~29KB of identical inline payload. The JS already
+ * initialises every .xrv root, so one copy serves all instances. */
+function xrv_head_assets_once() {
+	static $done = false;
+	if ( $done ) { return ''; }
+	$done = true;
+	return xrv_icon_sprite() . "\n" . xrv_inline_css();
+}
+function xrv_footer_js_once() {
+	static $done = false;
+	if ( $done ) { return ''; }
+	$done = true;
+	return xrv_inline_js();
+}
+
 function xrv_icon_sprite() {
 	return <<<'SVG'
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
@@ -994,9 +1117,12 @@ function xrv_inline_css() {
 .xrv-search .xrv-ic{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:#5a6573}
 .xrv-search input{width:100%;padding:10px 12px 10px 36px;border:1px solid #c4ccd6;border-radius:4px;font-family:inherit;font-size:14px;color:#1a2332;background:#fff}
 .xrv-search input:focus{outline:2px solid #019AB3;outline-offset:-1px;border-color:#019AB3}
-.xrv-sortwrap{display:flex;align-items:center;gap:9px;font-size:12px}
-.xrv-sortwrap label{letter-spacing:.08em;text-transform:uppercase;color:#5a6573;font-weight:700}
-.xrv-sortwrap select{padding:7px 10px;border:1px solid #c4ccd6;border-radius:4px;font-family:inherit;font-size:13px;background:#fff;color:#1a2332;cursor:pointer}
+.xrv-ctrls{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap}
+.xrv-sortwrap,.xrv-fselwrap{display:flex;align-items:center;gap:9px;font-size:12px}
+.xrv-sortwrap label,.xrv-fselwrap label{letter-spacing:.08em;text-transform:uppercase;color:#5a6573;font-weight:700;white-space:nowrap}
+.xrv-sortwrap select,.xrv-fselwrap select{padding:7px 10px;border:1px solid #c4ccd6;border-radius:4px;font-family:inherit;font-size:13px;background:#fff;color:#1a2332;cursor:pointer;max-width:180px}
+.xrv-fselwrap select:focus,.xrv-sortwrap select:focus{outline:2px solid #019AB3;outline-offset:-1px;border-color:#019AB3}
+.xrv-fselwrap select[data-active="1"]{border-color:#013C60;background:#f0f6fa;font-weight:600}
 .xrv-fg{display:flex;align-items:baseline;gap:10px;margin:0 0 10px;flex-wrap:wrap}
 .xrv-ft{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#5a6573;font-weight:700;flex:0 0 64px;padding-top:5px}
 .xrv-chips{display:flex;flex-wrap:wrap;gap:7px}
@@ -1028,8 +1154,22 @@ function xrv_inline_css() {
 .xrv-dur{position:absolute;right:8px;bottom:8px;background:rgba(10,22,34,.85);color:#fff;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:3px;font-variant-numeric:tabular-nums}
 .xrv-iframe{display:block;width:100%;aspect-ratio:16/9;border:0;border-radius:6px}
 .xrv-cap{padding:12px 2px 0}
-.xrv-title{font-size:16px !important;font-weight:700;color:#013C60 !important;margin:0 0 6px !important;line-height:1.3 !important}
-.xrv-desc{font-size:13.5px;color:#4a5663;line-height:1.5;margin:0 0 9px}
+.xrv-consent-note{font-size:11.5px;color:#5a6573;line-height:1.4;margin:7px 0 0}
+.xrv-consent-note a{color:#017A8E}
+.xrv-consent{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;padding:18px;text-align:center;background:rgba(10,22,34,.88);border-radius:6px;z-index:4}
+.xrv-consent-msg{color:#fff;font-size:13.5px;line-height:1.45;margin:0;max-width:34em}
+.xrv-consent-go{background:#013C60;color:#fff;border:0;border-radius:4px;padding:9px 20px;font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;transition:background .15s ease}
+.xrv-consent-go:hover{background:#007A53}
+.xrv-consent-go:focus-visible,.xrv-consent-decline:focus-visible,.xrv-consent-x:focus-visible{outline:3px solid #019AB3;outline-offset:2px}
+.xrv-consent-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center}
+.xrv-consent-decline{background:transparent;color:#cfe9e0;border:1px solid rgba(255,255,255,.45);border-radius:4px;padding:9px 16px;font-family:inherit;font-size:14px;cursor:pointer;transition:border-color .15s ease,color .15s ease}
+.xrv-consent-decline:hover{border-color:#fff;color:#fff}
+.xrv-consent-x{position:absolute;top:7px;right:10px;background:transparent;border:0;color:rgba(255,255,255,.7);font-size:22px;line-height:1;cursor:pointer;padding:2px 7px;border-radius:3px}
+.xrv-consent-x:hover{color:#fff}
+.xrv-consent-link{color:#cfe9e0;font-size:12px}
+.xrv-title{font-size:16px !important;font-weight:700;color:#013C60 !important;margin:0 0 6px !important;line-height:1.2 !important}
+/* Match the production carousel caption (13px / 1.3) and cap the blurb at ~5 lines so cards stay uniform. */
+.xrv-desc{font-size:13px;color:#4a5663;line-height:1.3;margin:0 0 9px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;line-clamp:5;overflow:hidden}
 .xrv-tags{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11.5px;color:#5a6573;margin:0 0 9px}
 .xrv-tags span::before{content:"#";color:#c4ccd6;margin-right:1px}
 .xrv-page-link{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:700;letter-spacing:.02em;color:#017A8E !important}
@@ -1045,6 +1185,9 @@ function xrv_inline_css() {
 @media (max-width:560px){
 .xrv-grid{column-count:1 !important}
 .xrv-bar{flex-direction:column;align-items:stretch}
+.xrv-ctrls{flex-direction:column;align-items:stretch;gap:10px}
+.xrv-fselwrap,.xrv-sortwrap{justify-content:space-between}
+.xrv-fselwrap select,.xrv-sortwrap select{max-width:none;flex:1 1 auto;margin-left:10px}
 }
 /* Section heading (library/carousel layout): centered, matches the page's existing section titles. */
 .xrv-section-title{font-size:32px !important;line-height:1.2 !important;color:#013C60 !important;text-align:center !important;font-weight:700 !important;margin:0 0 22px !important}
@@ -1172,47 +1315,104 @@ function xrv_inline_js() {
 
 		var playbackMode = ROOT.getAttribute('data-playback') || 'lightbox';
 
-		// THE FACADE. Delegated on the whole root, so it covers BOTH the grid and the carousel. Until a
-		// click fires, the page has made ZERO requests to any Google domain. Playback: 'lightbox' (pops
-		// out into a centered overlay) or 'inline' (replaces the poster in place), per data-playback.
-		ROOT.addEventListener('click', function(e){
-			var btn = e.target && e.target.closest ? e.target.closest('.xrv-facade') : null;
-			if(!btn) return;
-			var card = btn.closest('.xrv-card');
-			if(!card) return;
-			var id = card.getAttribute('data-vid');
-			if(!id) return;
+		// ---- Informed-consent notice (consent_notice = off | light | strict | geo) ----
+		// The facade still makes ZERO third-party requests until a click. This only governs whether an
+		// informed notice precedes that click, and (for geo) whether it shows based on the visitor's region.
+		var consentMode = ROOT.getAttribute('data-consent') || 'off';
+		var consentText = ROOT.getAttribute('data-consent-text') || '';
+		var consentBtnLabel = ROOT.getAttribute('data-consent-btn') || 'Load video';
+		var consentDeclineLabel = ROOT.getAttribute('data-consent-decline') || 'No thanks';
+		var privacyUrl = ROOT.getAttribute('data-privacy') || '';
+		function consentRequiredNow(){
+			if(consentMode === 'off' || consentMode === 'light') return false;
+			if(consentMode === 'strict') return true;
+			return ROOT.dataset.consentRequired !== '0'; // geo: unknown/'1' => required (fail-safe)
+		}
+		if(consentMode === 'geo'){
+			var rurl = ROOT.getAttribute('data-region-url'), cached = null;
+			try { cached = sessionStorage.getItem('xrvConsentRequired'); } catch(e){}
+			if(cached !== null){ ROOT.dataset.consentRequired = cached; }
+			else if(rurl){
+				ROOT.dataset.consentRequired = '1';
+				fetch(rurl, {credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+					var v = (d && d.consent_required) ? '1' : '0';
+					try { sessionStorage.setItem('xrvConsentRequired', v); } catch(e){}
+					ROOT.dataset.consentRequired = v;
+				}).catch(function(){});
+			}
+		}
+		if(consentMode === 'light' && consentText){
+			Array.prototype.forEach.call(ROOT.querySelectorAll('.xrv-card'), function(card){
+				if(card.querySelector('.xrv-consent-note')) return;
+				var cap = card.querySelector('.xrv-cap') || card;
+				var p = document.createElement('p'); p.className = 'xrv-consent-note'; p.textContent = consentText + ' ';
+				if(privacyUrl){ var a = document.createElement('a'); a.href = privacyUrl; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Privacy'; p.appendChild(a); }
+				cap.appendChild(p);
+			});
+		}
+		function closeOverlay(card){ var ov = card.querySelector('.xrv-consent'); if(ov && ov.parentNode){ ov.parentNode.removeChild(ov); } }
+		function showConsentOverlay(card){
+			var frame = card.querySelector('.xrv-frame'); if(!frame || frame.querySelector('.xrv-consent')) return;
+			var ov = document.createElement('div'); ov.className = 'xrv-consent';
+			var x = document.createElement('button'); x.type = 'button'; x.className = 'xrv-consent-x'; x.setAttribute('aria-label', 'Decline and close'); x.textContent = '×';
+			var msg = document.createElement('p'); msg.className = 'xrv-consent-msg'; msg.textContent = consentText || 'This video is hosted by YouTube and may set cookies.';
+			var actions = document.createElement('div'); actions.className = 'xrv-consent-actions';
+			var go = document.createElement('button'); go.type = 'button'; go.className = 'xrv-consent-go'; go.textContent = consentBtnLabel;
+			var no = document.createElement('button'); no.type = 'button'; no.className = 'xrv-consent-decline'; no.textContent = consentDeclineLabel;
+			actions.appendChild(go); actions.appendChild(no);
+			ov.appendChild(x); ov.appendChild(msg); ov.appendChild(actions);
+			if(privacyUrl){ var a = document.createElement('a'); a.className = 'xrv-consent-link'; a.href = privacyUrl; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Privacy policy'; ov.appendChild(a); }
+			frame.appendChild(ov);
+		}
+
+		function playCard(card, btn){
+			var id = card.getAttribute('data-vid'); if(!id) return;
 			var provider = card.getAttribute('data-provider') || 'youtube';
 			var titleEl = card.querySelector('.xrv-title');
 			var title = titleEl ? titleEl.textContent.trim() : 'Video player';
 			var src = buildSrc(provider, id);
-
 			if(playbackMode === 'inline'){
 				var iframe = document.createElement('iframe');
-				iframe.className = 'xrv-iframe';
-				iframe.setAttribute('allowfullscreen', '');
+				iframe.className = 'xrv-iframe'; iframe.setAttribute('allowfullscreen', '');
 				iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
-				iframe.title = title;
-				iframe.src = src;
-				var frame = btn.closest('.xrv-frame') || btn.parentNode;
-				btn.replaceWith(iframe);
+				iframe.title = title; iframe.src = src;
+				var frame = (btn && btn.closest) ? (btn.closest('.xrv-frame') || btn.parentNode) : card.querySelector('.xrv-frame');
+				if(btn && btn.replaceWith){ btn.replaceWith(iframe); } else if(frame){ frame.appendChild(iframe); }
 				if(frame && frame.style){ frame.style.lineHeight = '0'; }
 			} else {
 				xrvOpenModal(src, title);
 			}
-
 			window.dataLayer = window.dataLayer || [];
-			window.dataLayer.push({
-				event: 'video_play',
-				video_provider: provider,
-				video_id: id,
-				video_title: title,
-				video_series: (card.getAttribute('data-series') || '').split(' ')[0]
-			});
+			window.dataLayer.push({ event:'video_play', video_provider:provider, video_id:id, video_title:title, video_series:(card.getAttribute('data-series') || '').split(' ')[0] });
+		}
+
+		// THE FACADE. Delegated on the whole root (covers grid AND carousel). Until a click fires, the page
+		// has made ZERO requests to any Google domain. With strict/geo consent, the first click shows an
+		// informed overlay; the user's confirmation is the consent that loads the embed.
+		ROOT.addEventListener('click', function(e){
+			// Decline: the × or "No thanks" closes the prompt and loads NOTHING (refusing must be as easy as accepting).
+			var no = e.target && e.target.closest ? e.target.closest('.xrv-consent-decline, .xrv-consent-x') : null;
+			if(no){ var nc = no.closest('.xrv-card'); if(nc){ closeOverlay(nc); } return; }
+			var go = e.target && e.target.closest ? e.target.closest('.xrv-consent-go') : null;
+			if(go){
+				var gc = go.closest('.xrv-card'); if(!gc) return;
+				gc.dataset.xrvConsented = '1';
+				closeOverlay(gc);
+				playCard(gc, gc.querySelector('.xrv-facade'));
+				return;
+			}
+			var btn = e.target && e.target.closest ? e.target.closest('.xrv-facade') : null;
+			if(!btn) return;
+			var card = btn.closest('.xrv-card'); if(!card) return;
+			if(consentRequiredNow() && card.dataset.xrvConsented !== '1'){ showConsentOverlay(card); return; }
+			playCard(card, btn);
 		});
 
-		// Mask post-click load latency: preconnect on first hover/focus, once per card.
+		// Mask post-click load latency: preconnect on first hover/focus, once per card. SUPPRESSED whenever a
+		// consent gate is required for this view (strict always; geo for EU/UK/EEA) — so a gated visitor's
+		// browser makes ZERO contact with YouTube (not even a DNS/TLS warm-up) until they accept.
 		function preconnect(card){
+			if(consentRequiredNow()) return;
 			if(card.dataset.xrvPre) return;
 			card.dataset.xrvPre = '1';
 			var provider = card.getAttribute('data-provider') || 'youtube';
@@ -1269,7 +1469,7 @@ function xrv_inline_js() {
 			var groupVals = function(card, g){ return (card.getAttribute('data-'+g) || '').split(' ').filter(Boolean); };
 			var matchGroup = function(g, card){ if(state[g].length === 0) return true; var vals = groupVals(card, g); return state[g].some(function(v){ return vals.indexOf(v) > -1; }); };
 			var matchSearch = function(card){ if(!state.q) return true; return (card.getAttribute('data-search') || '').indexOf(state.q) > -1; };
-			var cmp = function(a, b){ var s = state.sort; if(s==='newest') return (+b.getAttribute('data-date'))-(+a.getAttribute('data-date')); if(s==='oldest') return (+a.getAttribute('data-date'))-(+b.getAttribute('data-date')); if(s==='title') return a.getAttribute('data-title').localeCompare(b.getAttribute('data-title')); return 0; };
+			var cmp = function(a, b){ var s = state.sort; if(s==='newest') return (+b.getAttribute('data-date'))-(+a.getAttribute('data-date')); if(s==='oldest') return (+a.getAttribute('data-date'))-(+b.getAttribute('data-date')); if(s==='title') return a.getAttribute('data-title').localeCompare(b.getAttribute('data-title')); if(s==='short') return (+a.getAttribute('data-seconds'))-(+b.getAttribute('data-seconds')); if(s==='long') return (+b.getAttribute('data-seconds'))-(+a.getAttribute('data-seconds')); return 0; };
 			var apply = function(){
 				var ordered = (state.sort === 'curated') ? origOrder.slice() : cards.slice().sort(cmp);
 				ordered.forEach(function(c){ grid.appendChild(c); });
@@ -1301,6 +1501,14 @@ function xrv_inline_js() {
 					resetVisible(); apply();
 				});
 			});
+			ROOT.querySelectorAll('.xrv-fsel').forEach(function(sel){
+				sel.addEventListener('change', function(){
+					var g = this.getAttribute('data-group');
+					state[g] = this.value ? [this.value] : [];
+					this.setAttribute('data-active', this.value ? '1' : '0');
+					resetVisible(); apply();
+				});
+			});
 			if(loadMoreBtn) loadMoreBtn.addEventListener('click', function(){ visibleLimit += loadStep; apply(); });
 			var resetBtn = ROOT.querySelector('#xrv-reset');
 			if(resetBtn) resetBtn.addEventListener('click', function(){
@@ -1308,6 +1516,7 @@ function xrv_inline_js() {
 				if(qEl) qEl.value = '';
 				if(sortEl) sortEl.value = 'curated';
 				ROOT.querySelectorAll('.xrv-chip').forEach(function(x){ x.setAttribute('aria-pressed','false'); });
+				ROOT.querySelectorAll('.xrv-fsel').forEach(function(x){ x.value=''; x.setAttribute('data-active','0'); });
 				resetVisible(); apply();
 			});
 			apply();
@@ -1336,9 +1545,88 @@ function xrv_register_block() {
 	if ( ! function_exists( 'register_block_type' ) ) {
 		return;
 	}
+	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
+	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '1.0.8', true );
+	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
+	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
 		'render_callback' => function( $attributes ) { return xrv_render( (array) $attributes ); },
+		'editor_script'   => 'xrv-block',
+		'attributes'      => array(
+			'layout' => $str, 'columns' => $str, 'playback' => $str, 'controls' => $str, 'filter_ui' => $str, 'card_meta' => $str,
+			'per_page' => $str, 'load_more' => $str, 'featured_limit' => $str, 'heading' => $str,
+			'subscribe_url' => $str, 'subscribe_label' => $str, 'consent_notice' => $str, 'consent_text' => $str,
+			'consent_button' => $str, 'consent_decline' => $str, 'privacy_url' => $str, 'series' => $str, 'audience' => $str, 'topic' => $str, 'limit' => $str,
+		),
 	) );
+}
+/* Inline Gutenberg editor UI (vanilla wp.* — no JSX/build). Empty values inherit the site Settings defaults. */
+function xrv_block_editor_js() {
+	return <<<'JS'
+( function( blocks, element, blockEditor, components ){
+	if(!blocks || !element || !blockEditor || !components) return;
+	var el = element.createElement, Fragment = element.Fragment;
+	var InspectorControls = blockEditor.InspectorControls;
+	var useBlockProps = blockEditor.useBlockProps;
+	var PanelBody = components.PanelBody, SelectControl = components.SelectControl, TextControl = components.TextControl, RangeControl = components.RangeControl, ToggleControl = components.ToggleControl;
+	blocks.registerBlockType('xroad/videos', {
+		apiVersion: 2,
+		title: 'Crossroad Videos',
+		description: 'Privacy-first YouTube gallery (click-to-load facade).',
+		icon: 'video-alt3',
+		category: 'media',
+		example: {},
+		edit: function(props){
+			var a = props.attributes, set = props.setAttributes;
+			var f = function(k){ return function(v){ var o={}; o[k]=v; set(o); }; };
+			var num = function(k, def){ return function(v){ var o={}; o[k]=String(v); set(o); }; };
+			var controlsOn = (a.controls !== 'false');
+			return el(Fragment, {},
+				el(InspectorControls, {},
+					el(PanelBody, { title:'Layout', initialOpen:true },
+						el(SelectControl, { label:'Layout', value:a.layout||'grid', options:[
+							{label:'Grid', value:'grid'}, {label:'Library (featured + grid)', value:'library'}, {label:'Carousel', value:'carousel'} ], onChange:f('layout') }),
+						el(SelectControl, { label:'Playback', value:a.playback||'lightbox', options:[
+							{label:'Lightbox (pop-out)', value:'lightbox'}, {label:'Inline', value:'inline'} ], onChange:f('playback') }),
+						el(TextControl, { label:'Fixed columns (blank = responsive)', value:a.columns||'', onChange:f('columns') }),
+						el(TextControl, { label:'Heading (optional)', value:a.heading||'', onChange:f('heading') }),
+						el(ToggleControl, { label:'Show search / sort / filter bar', checked:controlsOn, onChange:function(v){ set({controls: v?'true':'false'}); } })
+					),
+					el(PanelBody, { title:'Browse', initialOpen:false },
+						el(SelectControl, { label:'Filter style (blank = site default)', value:a.filter_ui||'', options:[
+							{label:'Site default', value:''}, {label:'Dropdown selects', value:'select'}, {label:'Clickable chips', value:'chips'} ], onChange:f('filter_ui') }),
+						el(SelectControl, { label:'Card text (blank = site default)', value:a.card_meta||'', options:[
+							{label:'Site default', value:''}, {label:'Full (title + desc + tags)', value:'full'}, {label:'Compact (title + desc)', value:'compact'}, {label:'Title only', value:'title'} ], onChange:f('card_meta') }),
+						el(RangeControl, { label:'Show before “Load more” (0 = site default)', min:0, max:60, value: parseInt(a.per_page,10)||0, onChange:num('per_page') }),
+						el(RangeControl, { label:'“Load more” step (0 = site default)', min:0, max:24, value: parseInt(a.load_more,10)||0, onChange:num('load_more') }),
+						el(TextControl, { label:'Subscribe URL', value:a.subscribe_url||'', onChange:f('subscribe_url') })
+					),
+					el(PanelBody, { title:'Privacy & consent', initialOpen:false },
+						el(SelectControl, { label:'Consent mode (blank = site default)', value:a.consent_notice||'', options:[
+							{label:'Site default', value:''}, {label:'Global (GDPR + CCPA)', value:'geo'}, {label:'Strict GDPR (every visitor)', value:'strict'}, {label:'No consent integration', value:'off'} ], onChange:f('consent_notice') }),
+						el(TextControl, { label:'Privacy URL (blank = site default)', value:a.privacy_url||'', onChange:f('privacy_url') })
+					),
+					el(PanelBody, { title:'Pre-filter to terms (optional)', initialOpen:false },
+						el(TextControl, { label:'Series slugs (comma-separated)', value:a.series||'', onChange:f('series') }),
+						el(TextControl, { label:'Audience slugs', value:a.audience||'', onChange:f('audience') }),
+						el(TextControl, { label:'Topic slugs', value:a.topic||'', onChange:f('topic') })
+					)
+				),
+				el('div', useBlockProps ? useBlockProps() : {},
+					el('div', { style:{ border:'1px dashed #c4ccd6', borderRadius:'6px', padding:'18px', textAlign:'center', color:'#50575e', background:'#f6f7f7' } },
+						el('strong', { style:{ color:'#013C60' } }, '▶ Crossroad Videos'),
+						el('div', { style:{ fontSize:'12px', marginTop:'5px' } },
+							(a.layout||'grid') + ' · ' + (a.consent_notice ? ('consent: '+a.consent_notice) : 'consent: site default') + ' · ' + (controlsOn ? 'controls on' : 'controls off')),
+						el('div', { style:{ fontSize:'11px', marginTop:'3px', color:'#787c82' } }, 'Rendered live on the front end.')
+					)
+				)
+			);
+		},
+		save: function(){ return null; }
+	});
+} )( window.wp.blocks, window.wp.element, window.wp.blockEditor, window.wp.components );
+JS;
 }
 
 /* =================================================================================================
@@ -1413,12 +1701,11 @@ function xrv_render_single( $post_id ) {
 	ob_start();
 	?>
 <div id="xroad-videos-app" class="xrv xrv--single" data-playback="inline">
-	<?php echo xrv_icon_sprite(); ?>
-	<?php echo xrv_inline_css(); ?>
+	<?php echo xrv_head_assets_once(); ?>
 	<div class="xrv-grid" style="column-count:1">
 		<?php echo xrv_render_card( $r ); ?>
 	</div>
-	<?php echo xrv_inline_js(); ?>
+	<?php echo xrv_footer_js_once(); ?>
 </div>
 	<?php
 	echo xrv_single_video_schema( $post_id ); // standalone rich VideoObject (not the CollectionPage wrapper)
@@ -1618,7 +1905,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 		return;
 	}
 	// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.7', true );
+	wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.8', true );
 	wp_enqueue_script( 'xrv-admin' );
 	wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 }
@@ -1668,6 +1955,548 @@ function xrv_admin_autotitle_js() {
 		input.addEventListener('paste', function(){ setTimeout(maybeFill, 60); });
 	});
 })();
+JS;
+}
+
+/* =================================================================================================
+ * 9c. BULK IMPORTER  (native, zero-dependency — paste URLs / a file / a channel or playlist)
+ *     A first-class admin tool under "Crossroad Videos > Import". Two tiers:
+ *       Tier 1 (no setup): paste/upload YouTube video URLs. Title via oEmbed, thumbnail sideloaded.
+ *       Tier 2 (optional free YouTube Data API key): pull an entire channel or playlist by URL AND
+ *               fill rich metadata (duration, upload date, description) for full VideoObject schema.
+ *     Flow: Source -> dry-run Preview (new vs. already-in-library) -> skip/overwrite confirmation ->
+ *     batched AJAX import with a progress bar. Reuses xrv_extract_video_id / xrv_fetch_oembed /
+ *     xrv_sideload_thumbnail. No WPCode, no SSH, no external dependency.
+ * ================================================================================================= */
+
+add_action( 'admin_menu', 'xrv_register_import_page' );
+function xrv_register_import_page() {
+	add_submenu_page( 'edit.php?post_type=xroad_video', 'Import Videos', 'Import', 'edit_others_posts', 'xrv-import', 'xrv_render_import_page' );
+}
+
+/* =================================================================================================
+ * 9d. SETTINGS  (Videos -> Settings): site-wide DEFAULTS for every gallery + the YouTube API key.
+ *     Shortcode/block attributes ALWAYS override these (see xrv_render). Lets a non-technical admin set
+ *     compliance (consent) and browse defaults once, instead of remembering per-shortcode attributes.
+ * ================================================================================================= */
+
+function xrv_settings_defaults() {
+	return array(
+		'consent_notice'  => 'off',
+		'consent_text'    => 'This video is hosted by YouTube. Playing it may set cookies on your device.',
+		'consent_button'  => 'Load video',
+		'consent_decline' => 'No thanks',
+		'privacy_url'     => '',
+		'filter_ui'       => 'select',
+		'card_meta'       => 'full',
+		'per_page'        => 9,
+		'load_more'       => 3,
+		'subscribe_url'   => '',
+		'subscribe_label' => 'Subscribe to our YouTube channel',
+	);
+}
+function xrv_get_settings() {
+	return wp_parse_args( (array) get_option( 'xrv_settings', array() ), xrv_settings_defaults() );
+}
+function xrv_sanitize_settings( $in ) {
+	$d = xrv_settings_defaults(); $in = (array) $in; $out = array();
+	$cn = isset( $in['consent_notice'] ) ? strtolower( $in['consent_notice'] ) : 'off';
+	$out['consent_notice']  = in_array( $cn, array( 'off', 'light', 'strict', 'geo' ), true ) ? $cn : 'off';
+	$out['consent_text']    = isset( $in['consent_text'] ) ? sanitize_text_field( $in['consent_text'] ) : $d['consent_text'];
+	$out['consent_button']  = isset( $in['consent_button'] ) ? sanitize_text_field( $in['consent_button'] ) : $d['consent_button'];
+	$out['consent_decline'] = isset( $in['consent_decline'] ) ? sanitize_text_field( $in['consent_decline'] ) : $d['consent_decline'];
+	$out['privacy_url']     = isset( $in['privacy_url'] ) ? esc_url_raw( $in['privacy_url'] ) : '';
+	$out['filter_ui']       = ( isset( $in['filter_ui'] ) && 'chips' === $in['filter_ui'] ) ? 'chips' : 'select';
+	$cm = isset( $in['card_meta'] ) ? strtolower( $in['card_meta'] ) : 'full';
+	$out['card_meta']       = in_array( $cm, array( 'full', 'compact', 'title' ), true ) ? $cm : 'full';
+	$out['per_page']        = max( 1, (int) ( isset( $in['per_page'] ) ? $in['per_page'] : $d['per_page'] ) );
+	$out['load_more']       = max( 1, (int) ( isset( $in['load_more'] ) ? $in['load_more'] : $d['load_more'] ) );
+	$out['subscribe_url']   = isset( $in['subscribe_url'] ) ? esc_url_raw( $in['subscribe_url'] ) : '';
+	$out['subscribe_label'] = isset( $in['subscribe_label'] ) ? sanitize_text_field( $in['subscribe_label'] ) : $d['subscribe_label'];
+	return $out;
+}
+add_action( 'admin_init', 'xrv_register_settings' );
+function xrv_register_settings() {
+	register_setting( 'xrv_settings_group', 'xrv_settings', array( 'type' => 'array', 'sanitize_callback' => 'xrv_sanitize_settings' ) );
+	register_setting( 'xrv_settings_group', 'xrv_yt_api_key', array( 'type' => 'string', 'sanitize_callback' => 'sanitize_text_field' ) );
+}
+add_action( 'admin_menu', 'xrv_register_settings_page' );
+function xrv_register_settings_page() {
+	add_submenu_page( 'edit.php?post_type=xroad_video', 'Crossroad Videos Settings', 'Settings', 'manage_options', 'xrv-settings', 'xrv_render_settings_page' );
+}
+function xrv_render_settings_page() {
+	if ( ! current_user_can( 'manage_options' ) ) { return; }
+	$s       = xrv_get_settings();
+	$key     = (string) get_option( 'xrv_yt_api_key', '' );
+	$wp_priv = get_privacy_policy_url();
+	?>
+	<div class="wrap">
+		<h1>Crossroad Videos — Settings</h1>
+		<p style="max-width:780px;color:#50575e">Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.</p>
+		<form method="post" action="options.php">
+			<?php settings_fields( 'xrv_settings_group' ); ?>
+
+			<h2 class="title">Privacy &amp; consent</h2>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Geo source</th>
+					<td>
+						<?php
+						$g = xrv_geo_country();
+						if ( '' !== $g['country'] ) {
+							$cf_icon = ( 'HTTP_CF_IPCOUNTRY' === $g['header'] )
+								? '<svg width="18" height="18" viewBox="0 0 24 24" style="vertical-align:-4px;margin-right:3px" aria-hidden="true"><path fill="#F6821F" d="M19.35 10.04A7.49 7.49 0 0 0 12 4 7.5 7.5 0 0 0 5.04 8.73 6 6 0 0 0 6 20h13a5 5 0 0 0 .35-9.96z"/></svg>'
+								: '';
+							echo '<p style="margin:.2em 0"><span style="color:#007a53;font-weight:600">&#10003; Detected: ' . esc_html( $g['country'] ) . '</span> via ' . $cf_icon . '<strong>' . esc_html( $g['source'] ) . '</strong> <code>' . esc_html( $g['header'] ) . '</code></p>';
+							echo '<p class="description">This request resolved to <strong>' . esc_html( $g['country'] ) . '</strong>, so in <strong>Global</strong> mode a visitor here ' . ( xrv_is_consent_region( $g['country'] ) ? 'would see the opt-in prompt' : 'would play in one click' ) . '. Geolocation is read per-visitor at runtime, so the page stays fully cacheable.</p>';
+						} else {
+							echo '<p style="margin:.2em 0"><span style="color:#b32d2e;font-weight:600">&#9888; No visitor-country header detected on this server.</span></p>';
+							echo '<p class="description">In <strong>Global</strong> mode the EU/UK/EEA prompt safely shows to <em>everyone</em> (fail-safe) when region is unknown. To enable region targeting, turn on a visitor-country header from one of: '
+								. '<strong>Cloudflare</strong> &rarr; Rules &rarr; Managed Transforms &rarr; &ldquo;Add visitor location headers&rdquo; (free, one toggle); '
+								. '<strong>WP Engine</strong> &rarr; GeoTarget; an <strong>AWS CloudFront</strong> viewer-country header; or an nginx/Apache GeoIP2 module. '
+								. 'Or wire your own logic via the <code>xrv_consent_required</code> filter. <em>Strict GDPR needs no geo header; it prompts everyone.</em></p>';
+						}
+						?>
+						<p class="description"><a href="<?php echo esc_url( rest_url( 'xrv/v1/region' ) ); ?>" target="_blank" rel="noopener">Test the live region endpoint &rarr;</a></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-consent">Consent mode</label></th>
+					<td>
+						<select id="xrv-consent" name="xrv_settings[consent_notice]">
+							<option value="geo"    <?php selected( $s['consent_notice'], 'geo' ); ?>>Global (respects regional privacy laws including GDPR and CCPA) - recommended</option>
+							<option value="strict" <?php selected( $s['consent_notice'], 'strict' ); ?>>Strict GDPR (opt-in prompt for every visitor)</option>
+							<option value="off"    <?php selected( $s['consent_notice'], 'off' ); ?>>No Consent Integration</option>
+						</select>
+						<p class="description" style="max-width:760px">
+							Every mode uses the click-to-load facade: the player makes no request, cookie, or connection to YouTube until a visitor clicks play. These options set the consent layer on top of that.
+						</p>
+						<ul class="description" style="max-width:760px;list-style:disc;margin-left:1.4em">
+							<li><strong>Global</strong> (recommended): adapts to the visitor's region. Visitors in the EU, UK, EEA, or Switzerland get a dismissible opt-in "Load video" prompt before anything loads (GDPR / ePrivacy), and their browser makes <strong>zero</strong> contact with any Google domain (the background preconnect is suppressed too) until they accept. Everyone else, including US / California visitors, plays in one click; because the facade shares no data with YouTube until that click, this meets the US notice-and-opt-out model (CCPA / CPRA) without adding friction. Region is detected from an edge country header (see <strong>Geo source</strong> above).</li>
+							<li><strong>Strict GDPR</strong>: the dismissible opt-in prompt and zero-contact guarantee for <strong>every</strong> visitor worldwide, regardless of region. The most defensible posture; slightly slower first play.</li>
+							<li><strong>No Consent Integration</strong>: no prompt or notice. The click-to-load facade still applies (no YouTube contact until a click), but the plugin adds no consent layer. Use only where you handle consent elsewhere or do not serve regulated regions.</li>
+						</ul>
+						<p class="description" style="max-width:760px">
+							The opt-in prompt is declinable (× or "No thanks"), so refusing is as easy as accepting, and the click is the consent that loads the embed. Global mode reads a visitor-country header from your edge/CDN; if none is present it fails safe by prompting everyone, and the <code>xrv_consent_required</code> filter can override the region logic.<br>
+							<em>Informational only, not legal advice. Cookies and tags from your analytics, ads, and consent manager are governed by those tools, not this plugin.</em>
+						</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-ctext">Notice text</label></th>
+					<td><input type="text" id="xrv-ctext" name="xrv_settings[consent_text]" value="<?php echo esc_attr( $s['consent_text'] ); ?>" class="large-text">
+					<p class="description">Shown in the consent prompt.</p></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-cbtn">Accept button label</label></th>
+					<td><input type="text" id="xrv-cbtn" name="xrv_settings[consent_button]" value="<?php echo esc_attr( $s['consent_button'] ); ?>" class="regular-text"> <span class="description">used by the consent prompt</span></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-cdecline">Decline button label</label></th>
+					<td><input type="text" id="xrv-cdecline" name="xrv_settings[consent_decline]" value="<?php echo esc_attr( $s['consent_decline'] ); ?>" class="regular-text"> <span class="description">the “No thanks” option on the prompt</span></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-priv">Privacy policy URL</label></th>
+					<td><input type="url" id="xrv-priv" name="xrv_settings[privacy_url]" value="<?php echo esc_attr( $s['privacy_url'] ); ?>" class="regular-text" placeholder="<?php echo esc_attr( $wp_priv ? $wp_priv : 'https://example.org/privacy-policy/' ); ?>">
+					<p class="description"><?php echo $wp_priv ? 'Leave blank to use your WordPress privacy page: ' . esc_html( $wp_priv ) : 'Leave blank to use your WordPress privacy page (none set yet).'; ?></p></td>
+				</tr>
+			</table>
+
+			<h2 class="title">Browse defaults</h2>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Filter style</th>
+					<td>
+						<label style="margin-right:18px"><input type="radio" name="xrv_settings[filter_ui]" value="select" <?php checked( $s['filter_ui'], 'select' ); ?>> Dropdown selects</label>
+						<label><input type="radio" name="xrv_settings[filter_ui]" value="chips" <?php checked( $s['filter_ui'], 'chips' ); ?>> Clickable chips</label>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-cardmeta">Card text</label></th>
+					<td>
+						<select id="xrv-cardmeta" name="xrv_settings[card_meta]">
+							<option value="full"    <?php selected( $s['card_meta'], 'full' ); ?>>Full — title + description + tags</option>
+							<option value="compact" <?php selected( $s['card_meta'], 'compact' ); ?>>Compact — title + description</option>
+							<option value="title"   <?php selected( $s['card_meta'], 'title' ); ?>>Title only — thumbnail + title (matches a stock YouTube grid)</option>
+						</select>
+						<p class="description">What shows beneath each video thumbnail. “Title only” gives the cleanest, feed-style grid.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-pp">Show before “Load more”</label></th>
+					<td><input type="number" min="1" id="xrv-pp" name="xrv_settings[per_page]" value="<?php echo (int) $s['per_page']; ?>" class="small-text"> videos</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-lm">“Load more” reveals</label></th>
+					<td><input type="number" min="1" id="xrv-lm" name="xrv_settings[load_more]" value="<?php echo (int) $s['load_more']; ?>" class="small-text"> more per click</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-sub">Subscribe button URL</label></th>
+					<td><input type="url" id="xrv-sub" name="xrv_settings[subscribe_url]" value="<?php echo esc_attr( $s['subscribe_url'] ); ?>" class="regular-text" placeholder="https://youtube.com/@yourchannel">
+					<p class="description">When set, a Subscribe button appears under the grid.</p></td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-sublabel">Subscribe button label</label></th>
+					<td><input type="text" id="xrv-sublabel" name="xrv_settings[subscribe_label]" value="<?php echo esc_attr( $s['subscribe_label'] ); ?>" class="regular-text"></td>
+				</tr>
+			</table>
+
+			<h2 class="title">YouTube Data API key (optional)</h2>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row"><label for="xrv-key">API key</label></th>
+					<td><input type="text" id="xrv-key" name="xrv_yt_api_key" value="<?php echo esc_attr( $key ); ?>" class="regular-text" autocomplete="off">
+					<p class="description">Only needed to import an entire channel/playlist with durations &amp; descriptions. Pasting URLs or a JSON file needs no key. Used by <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=xroad_video&page=xrv-import' ) ); ?>">Import</a>.</p></td>
+				</tr>
+			</table>
+
+			<?php submit_button(); ?>
+		</form>
+	</div>
+	<?php
+}
+
+/* ---- Normalize a taxonomy field from an import record: array OR comma/pipe/semicolon string -> clean name list ---- */
+function xrv_import_term_list( $val ) {
+	if ( is_array( $val ) ) { $parts = $val; }
+	elseif ( is_string( $val ) && '' !== trim( $val ) ) { $parts = preg_split( '/[|;,]+/', $val ); }
+	else { return array(); }
+	$out = array();
+	foreach ( $parts as $p ) { $p = sanitize_text_field( trim( (string) $p ) ); if ( '' !== $p && ! in_array( $p, $out, true ) ) { $out[] = $p; } }
+	return $out;
+}
+
+/* ---- YouTube Data API helpers (only used when an API key is supplied) ---- */
+function xrv_yt_get( $path, $params, $key ) {
+	$params['key'] = $key;
+	$res = wp_remote_get( 'https://www.googleapis.com/youtube/v3/' . $path . '?' . http_build_query( $params ), array( 'timeout' => 15 ) );
+	if ( is_wp_error( $res ) ) { return new WP_Error( 'xrv_yt', $res->get_error_message() ); }
+	$body = json_decode( wp_remote_retrieve_body( $res ), true );
+	if ( 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
+		return new WP_Error( 'xrv_yt', isset( $body['error']['message'] ) ? $body['error']['message'] : 'YouTube API error.' );
+	}
+	return $body;
+}
+function xrv_yt_uploads_playlist( $url, $key ) {
+	$cid = '';
+	if ( preg_match( '#youtube\.com/channel/(UC[\w-]+)#i', $url, $m ) ) {
+		$cid = $m[1];
+	} elseif ( preg_match( '#youtube\.com/@([\w.\-]+)#i', $url, $m ) ) {
+		$r = xrv_yt_get( 'channels', array( 'part' => 'contentDetails', 'forHandle' => '@' . $m[1] ), $key );
+		if ( is_wp_error( $r ) ) { return $r; }
+		return $r['items'][0]['contentDetails']['relatedPlaylists']['uploads'] ?? new WP_Error( 'xrv_yt', 'Channel not found for that handle.' );
+	} elseif ( preg_match( '#youtube\.com/user/([\w-]+)#i', $url, $m ) ) {
+		$r = xrv_yt_get( 'channels', array( 'part' => 'contentDetails', 'forUsername' => $m[1] ), $key );
+		if ( is_wp_error( $r ) ) { return $r; }
+		return $r['items'][0]['contentDetails']['relatedPlaylists']['uploads'] ?? new WP_Error( 'xrv_yt', 'Channel not found for that user.' );
+	} elseif ( preg_match( '#youtube\.com/c/([\w-]+)#i', $url, $m ) ) {
+		$r = xrv_yt_get( 'search', array( 'part' => 'snippet', 'type' => 'channel', 'q' => $m[1], 'maxResults' => 1 ), $key );
+		if ( is_wp_error( $r ) ) { return $r; }
+		$cid = $r['items'][0]['id']['channelId'] ?? '';
+	}
+	if ( '' === $cid ) { return new WP_Error( 'xrv_yt', 'Could not resolve a channel from that URL.' ); }
+	$r = xrv_yt_get( 'channels', array( 'part' => 'contentDetails', 'id' => $cid ), $key );
+	if ( is_wp_error( $r ) ) { return $r; }
+	return $r['items'][0]['contentDetails']['relatedPlaylists']['uploads'] ?? new WP_Error( 'xrv_yt', 'Could not find the uploads playlist.' );
+}
+function xrv_yt_playlist_ids( $playlist_id, $key, $max = 500 ) {
+	$ids = array(); $page = '';
+	do {
+		$r = xrv_yt_get( 'playlistItems', array( 'part' => 'contentDetails', 'playlistId' => $playlist_id, 'maxResults' => 50, 'pageToken' => $page ), $key );
+		if ( is_wp_error( $r ) ) { return $r; }
+		foreach ( (array) ( $r['items'] ?? array() ) as $it ) {
+			$vid = $it['contentDetails']['videoId'] ?? '';
+			if ( $vid ) { $ids[] = $vid; }
+		}
+		$page = $r['nextPageToken'] ?? '';
+	} while ( $page && count( $ids ) < $max );
+	return $ids;
+}
+function xrv_yt_videos_meta( $ids, $key ) {
+	$out = array();
+	foreach ( array_chunk( $ids, 50 ) as $chunk ) {
+		$r = xrv_yt_get( 'videos', array( 'part' => 'snippet,contentDetails', 'id' => implode( ',', $chunk ), 'maxResults' => 50 ), $key );
+		if ( is_wp_error( $r ) ) { return $r; }
+		foreach ( (array) ( $r['items'] ?? array() ) as $it ) {
+			$out[ $it['id'] ] = array(
+				'title'    => $it['snippet']['title'] ?? '',
+				'desc'     => $it['snippet']['description'] ?? '',
+				'upload'   => isset( $it['snippet']['publishedAt'] ) ? substr( $it['snippet']['publishedAt'], 0, 10 ) : '',
+				'duration' => $it['contentDetails']['duration'] ?? '',
+			);
+		}
+	}
+	return $out;
+}
+
+/* ---- AJAX: dry-run preview (resolve sources -> list with new/exists status; writes nothing) ---- */
+add_action( 'wp_ajax_xrv_import_preview', 'xrv_ajax_import_preview' );
+function xrv_ajax_import_preview() {
+	check_ajax_referer( 'xrv_import', 'nonce' );
+	if ( ! current_user_can( 'edit_others_posts' ) ) { wp_send_json_error( array( 'msg' => 'You do not have permission to import.' ) ); }
+
+	$key = isset( $_POST['api_key'] ) ? sanitize_text_field( wp_unslash( $_POST['api_key'] ) ) : '';
+	if ( '' !== $key ) { update_option( 'xrv_yt_api_key', $key ); } else { $key = (string) get_option( 'xrv_yt_api_key', '' ); }
+
+	$raw      = isset( $_POST['source'] ) ? wp_unslash( $_POST['source'] ) : '';
+	$raw_trim = ltrim( (string) $raw );
+	$ids = array(); $errors = array(); $json_meta = array();
+
+	if ( '' !== $raw_trim && '[' === $raw_trim[0] ) {
+		// A JSON array of records: { "id"|"url", "title"?, "duration"?, "upload"?, "desc"? }. Lets a
+		// prepared metadata file import rich VideoObject data with NO API key (the "upload a file" path).
+		$decoded = json_decode( $raw, true );
+		if ( ! is_array( $decoded ) ) { wp_send_json_error( array( 'msg' => 'That looks like JSON but could not be parsed.' ) ); }
+		foreach ( $decoded as $rec ) {
+			if ( ! is_array( $rec ) ) { continue; }
+			$rid = ! empty( $rec['id'] ) ? preg_replace( '/[^A-Za-z0-9_-]/', '', (string) $rec['id'] ) : ( ! empty( $rec['url'] ) ? xrv_extract_video_id( (string) $rec['url'], 'youtube' ) : '' );
+			if ( '' === $rid ) { continue; }
+			$ids[] = $rid;
+			$json_meta[ $rid ] = array(
+				'title'    => isset( $rec['title'] ) ? (string) $rec['title'] : '',
+				'desc'     => isset( $rec['desc'] ) ? (string) $rec['desc'] : '',
+				'upload'   => isset( $rec['upload'] ) ? (string) $rec['upload'] : '',
+				'duration' => isset( $rec['duration'] ) ? (string) $rec['duration'] : '',
+				'series'   => xrv_import_term_list( isset( $rec['series'] ) ? $rec['series'] : '' ),
+				'audience' => xrv_import_term_list( isset( $rec['audience'] ) ? $rec['audience'] : '' ),
+				'topic'    => xrv_import_term_list( isset( $rec['topic'] ) ? $rec['topic'] : '' ),
+			);
+		}
+	} else {
+		$lines = array_values( array_filter( array_map( 'trim', preg_split( '/[\r\n,]+/', $raw ) ) ) );
+		foreach ( $lines as $line ) {
+			if ( preg_match( '#[?&]list=([A-Za-z0-9_-]+)#', $line, $m ) ) {
+				if ( '' === $key ) { $errors[] = 'A playlist URL needs an API key.'; continue; }
+				$r = xrv_yt_playlist_ids( $m[1], $key );
+				if ( is_wp_error( $r ) ) { $errors[] = $r->get_error_message(); continue; }
+				$ids = array_merge( $ids, $r );
+			} elseif ( preg_match( '#youtube\.com/(channel/|@|c/|user/)#i', $line ) && ! preg_match( '#[?&]v=|/(watch|embed|shorts|live)#i', $line ) ) {
+				if ( '' === $key ) { $errors[] = 'A channel URL needs an API key (or paste individual video URLs).'; continue; }
+				$pl = xrv_yt_uploads_playlist( $line, $key );
+				if ( is_wp_error( $pl ) ) { $errors[] = $pl->get_error_message(); continue; }
+				$r = xrv_yt_playlist_ids( $pl, $key );
+				if ( is_wp_error( $r ) ) { $errors[] = $r->get_error_message(); continue; }
+				$ids = array_merge( $ids, $r );
+			} else {
+				$vid = xrv_extract_video_id( $line, 'youtube' );
+				if ( $vid ) { $ids[] = $vid; } elseif ( '' !== $line ) { $errors[] = 'Could not read: ' . esc_html( mb_substr( $line, 0, 40 ) ); }
+			}
+		}
+	}
+	$ids = array_values( array_unique( $ids ) );
+	if ( empty( $ids ) ) { wp_send_json_error( array( 'msg' => $errors ? implode( ' ', $errors ) : 'No YouTube videos found in the input.' ) ); }
+
+	// Metadata: start from any JSON-provided fields, then fill gaps from the API when a key is present.
+	$meta = $json_meta;
+	if ( '' !== $key ) {
+		$m = xrv_yt_videos_meta( $ids, $key );
+		if ( ! is_wp_error( $m ) ) {
+			foreach ( $m as $mid => $mv ) {
+				if ( empty( $meta[ $mid ] ) ) { $meta[ $mid ] = $mv; continue; }
+				foreach ( $mv as $k => $val ) { if ( empty( $meta[ $mid ][ $k ] ) ) { $meta[ $mid ][ $k ] = $val; } }
+			}
+		}
+	}
+	$rich = ( '' !== $key ) || ! empty( $json_meta );
+
+	global $wpdb;
+	$existing = array_flip( (array) $wpdb->get_col( "SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_xrv_video_id'" ) );
+
+	$videos = array(); $new = 0;
+	foreach ( $ids as $id ) {
+		$title = $meta[ $id ]['title'] ?? '';
+		if ( '' === $title ) { $o = xrv_fetch_oembed( 'https://www.youtube.com/watch?v=' . $id, 'youtube' ); $title = $o['title'] ?? $id; }
+		$is_existing = isset( $existing[ $id ] );
+		if ( ! $is_existing ) { $new++; }
+		$videos[] = array(
+			'id'       => $id,
+			'title'    => $title,
+			'duration' => $meta[ $id ]['duration'] ?? '',
+			'upload'   => $meta[ $id ]['upload'] ?? '',
+			'desc'     => isset( $meta[ $id ]['desc'] ) ? mb_substr( $meta[ $id ]['desc'], 0, 5000 ) : '',
+			'series'   => isset( $meta[ $id ]['series'] ) ? (array) $meta[ $id ]['series'] : array(),
+			'audience' => isset( $meta[ $id ]['audience'] ) ? (array) $meta[ $id ]['audience'] : array(),
+			'topic'    => isset( $meta[ $id ]['topic'] ) ? (array) $meta[ $id ]['topic'] : array(),
+			'exists'   => $is_existing,
+			'thumb'    => 'https://i.ytimg.com/vi/' . $id . '/mqdefault.jpg',
+		);
+	}
+	wp_send_json_success( array( 'videos' => $videos, 'total' => count( $videos ), 'new' => $new, 'exists' => count( $videos ) - $new, 'errors' => $errors, 'rich' => $rich ) );
+}
+
+/* ---- AJAX: import a batch (create/update + sideload thumbnail). Called repeatedly by the JS. ---- */
+add_action( 'wp_ajax_xrv_import_run', 'xrv_ajax_import_run' );
+function xrv_ajax_import_run() {
+	check_ajax_referer( 'xrv_import', 'nonce' );
+	if ( ! current_user_can( 'edit_others_posts' ) ) { wp_send_json_error( array( 'msg' => 'forbidden' ) ); }
+
+	$overwrite = isset( $_POST['overwrite'] ) && '1' === $_POST['overwrite'];
+	$items     = json_decode( isset( $_POST['items'] ) ? wp_unslash( $_POST['items'] ) : '[]', true );
+	if ( ! is_array( $items ) ) { wp_send_json_error( array( 'msg' => 'Bad payload.' ) ); }
+
+	global $wpdb;
+	$max_order = (int) $wpdb->get_var( "SELECT MAX(menu_order) FROM {$wpdb->posts} WHERE post_type = 'xroad_video'" );
+
+	$results = array();
+	foreach ( $items as $v ) {
+		$id = isset( $v['id'] ) ? preg_replace( '/[^A-Za-z0-9_-]/', '', $v['id'] ) : '';
+		if ( '' === $id ) { $results[] = array( 'id' => '', 'status' => 'failed' ); continue; }
+
+		$ex = get_posts( array( 'post_type' => 'xroad_video', 'post_status' => 'any', 'meta_key' => '_xrv_video_id', 'meta_value' => $id, 'fields' => 'ids', 'posts_per_page' => 1 ) );
+		if ( $ex && ! $overwrite ) { $results[] = array( 'id' => $id, 'status' => 'skipped' ); continue; }
+
+		$title = isset( $v['title'] ) && '' !== $v['title'] ? sanitize_text_field( $v['title'] ) : $id;
+		if ( $ex ) {
+			$pid = $ex[0];
+			wp_update_post( array( 'ID' => $pid, 'post_title' => $title ) );
+			$status = 'updated';
+		} else {
+			$max_order++;
+			$pid = wp_insert_post( array( 'post_type' => 'xroad_video', 'post_status' => 'publish', 'post_title' => $title, 'menu_order' => $max_order ) );
+			if ( is_wp_error( $pid ) ) { $results[] = array( 'id' => $id, 'status' => 'failed' ); continue; }
+			$status = 'created';
+		}
+
+		update_post_meta( $pid, '_xrv_provider', 'youtube' );
+		update_post_meta( $pid, '_xrv_video_id', $id );
+		update_post_meta( $pid, '_xrv_source_url', 'https://www.youtube.com/watch?v=' . $id );
+		if ( ! empty( $v['duration'] ) ) { update_post_meta( $pid, '_xrv_duration_iso', sanitize_text_field( $v['duration'] ) ); }
+		if ( ! empty( $v['upload'] ) )   { update_post_meta( $pid, '_xrv_upload_date', sanitize_text_field( $v['upload'] ) ); }
+		if ( isset( $v['desc'] ) && '' !== $v['desc'] ) { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $v['desc'] ) ); }
+
+		// Taxonomies (Series / Audience / Topic): assign by NAME, creating any term that doesn't exist yet.
+		foreach ( array( 'series' => 'xrv_series', 'audience' => 'xrv_audience', 'topic' => 'xrv_topic' ) as $field => $tax ) {
+			$names = xrv_import_term_list( isset( $v[ $field ] ) ? $v[ $field ] : '' );
+			if ( empty( $names ) || ! taxonomy_exists( $tax ) ) { continue; }
+			$term_ids = array();
+			foreach ( $names as $name ) {
+				$term = get_term_by( 'name', $name, $tax );
+				if ( ! $term ) { $ins = wp_insert_term( $name, $tax ); if ( ! is_wp_error( $ins ) ) { $term_ids[] = (int) $ins['term_id']; } }
+				else { $term_ids[] = (int) $term->term_id; }
+			}
+			if ( $term_ids ) { wp_set_object_terms( $pid, $term_ids, $tax, false ); }
+		}
+
+		if ( ! (int) get_post_meta( $pid, '_xrv_local_thumb_id', true ) ) {
+			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube' );
+			if ( ! is_wp_error( $att ) ) { update_post_meta( $pid, '_xrv_local_thumb_id', (int) $att ); set_post_thumbnail( $pid, (int) $att ); }
+		}
+		$results[] = array( 'id' => $id, 'status' => $status );
+	}
+	wp_send_json_success( array( 'results' => $results ) );
+}
+
+/* ---- The Import admin screen ---- */
+function xrv_render_import_page() {
+	if ( ! current_user_can( 'edit_others_posts' ) ) { return; }
+	$key = (string) get_option( 'xrv_yt_api_key', '' );
+	?>
+	<div class="wrap xrv-import">
+		<h1>Import Videos</h1>
+		<p style="max-width:760px;color:#50575e">Paste YouTube video links (one per line) or upload a list. With an optional free
+		<a href="https://developers.google.com/youtube/v3/getting-started" target="_blank" rel="noopener">YouTube Data API key</a>
+		you can also paste a whole <strong>channel</strong> or <strong>playlist</strong> URL and pull duration, date, and description for richer schema.</p>
+
+		<table class="form-table" role="presentation"><tbody>
+			<tr><th scope="row"><label for="xrv-imp-key">YouTube Data API key</label><br><span style="font-weight:400;color:#787c82;font-size:12px">optional</span></th>
+				<td><input type="text" id="xrv-imp-key" class="regular-text" value="<?php echo esc_attr( $key ); ?>" placeholder="Leave blank to import by URL (title + thumbnail only)" autocomplete="off"></td></tr>
+			<tr><th scope="row"><label for="xrv-imp-src">Videos</label></th>
+				<td>
+					<textarea id="xrv-imp-src" rows="7" class="large-text code" placeholder="https://www.youtube.com/watch?v=...&#10;https://youtu.be/...&#10;https://www.youtube.com/@channel   (needs API key)&#10;https://www.youtube.com/playlist?list=...   (needs API key)"></textarea>
+					<p><label class="button">Choose file&hellip;<input type="file" id="xrv-imp-file" accept=".txt,.csv,.json" style="display:none"></label> <span style="color:#787c82">.txt / .csv of URLs, or a .json metadata file (id, title, duration, upload, desc) for rich import with no API key</span></p>
+				</td></tr>
+		</tbody></table>
+
+		<p><button id="xrv-imp-preview" class="button button-primary">Preview import</button> <span id="xrv-imp-status" style="margin-left:8px"></span></p>
+		<div id="xrv-imp-results"></div>
+		<div id="xrv-imp-progress"></div>
+	</div>
+	<style>
+		.xrv-import #xrv-imp-results table{max-width:920px}
+		.xrv-import td .xrv-badge-new{color:#007a53;font-weight:600}
+		.xrv-import td .xrv-badge-exists{color:#8a6a2a;font-weight:600}
+		.xrv-import fieldset{border:1px solid #dcdcde;border-radius:4px;padding:10px 14px;max-width:920px}
+		.xrv-import .xrv-bar-wrap{max-width:920px;background:#e2e6eb;border-radius:6px;height:16px;overflow:hidden}
+		.xrv-import .xrv-bar{height:100%;width:0;background:#007a53;transition:width .3s}
+		.xrv-import .xrv-tag{display:inline-block;margin:2px 4px 2px 0;padding:1px 8px;border-radius:10px;font-size:11px;line-height:1.7;white-space:nowrap}
+		.xrv-import .xrv-tag.is-series{background:#e6f4ee;color:#0a6b48}
+		.xrv-import .xrv-tag.is-aud{background:#eef1fb;color:#3a4a8c}
+		.xrv-import .xrv-tag.is-topic{background:#f3eefb;color:#6b3a8c}
+	</style>
+	<script>window.XRV_IMP = { ajax: <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, nonce: <?php echo wp_json_encode( wp_create_nonce( 'xrv_import' ) ); ?> };</script>
+	<?php
+	echo xrv_import_inline_js();
+}
+
+function xrv_import_inline_js() {
+	return <<<'JS'
+<script>
+(function(){
+	var C = window.XRV_IMP || {};
+	var $ = function(s){ return document.querySelector(s); };
+	var src=$('#xrv-imp-src'), keyEl=$('#xrv-imp-key'), fileEl=$('#xrv-imp-file');
+	var statusEl=$('#xrv-imp-status'), resultsEl=$('#xrv-imp-results'), progEl=$('#xrv-imp-progress');
+	var videos=[];
+	function esc(s){ var d=document.createElement('div'); d.textContent=(s==null?'':s); return d.innerHTML; }
+	function post(action,data){ data.action=action; data.nonce=C.nonce; var b=new URLSearchParams(data); return fetch(C.ajax,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()}).then(function(r){return r.json();}); }
+
+	if(fileEl) fileEl.addEventListener('change', function(){ var f=fileEl.files[0]; if(!f) return; var r=new FileReader(); r.onload=function(){ src.value=(src.value?src.value+'\n':'')+r.result; }; r.readAsText(f); });
+
+	$('#xrv-imp-preview').addEventListener('click', function(){
+		statusEl.textContent='Resolving…'; resultsEl.innerHTML=''; progEl.innerHTML='';
+		post('xrv_import_preview',{ source:src.value, api_key:(keyEl?keyEl.value:'') }).then(function(res){
+			if(!res || !res.success){ statusEl.innerHTML='<span style="color:#b32d2e">'+esc((res&&res.data&&res.data.msg)||'Preview failed.')+'</span>'; return; }
+			videos=res.data.videos; render(res.data);
+		}).catch(function(e){ statusEl.innerHTML='<span style="color:#b32d2e">Error: '+esc(String(e))+'</span>'; });
+	});
+
+	function render(d){
+		statusEl.innerHTML='<strong>'+d.total+'</strong> found · <strong>'+d.new+'</strong> new · <strong>'+d.exists+'</strong> already in library · '+(d.rich?'rich metadata ✓':'titles only (add an API key for duration/date/description)');
+		if(d.errors && d.errors.length){ statusEl.innerHTML += '<br><span style="color:#b32d2e">'+d.errors.map(esc).join('<br>')+'</span>'; }
+		var anyTax = videos.some(function(v){ return (v.series&&v.series.length)||(v.audience&&v.audience.length)||(v.topic&&v.topic.length); });
+		function tags(arr,cls){ return (arr||[]).map(function(t){ return '<span class="xrv-tag '+cls+'">'+esc(t)+'</span>'; }).join(''); }
+		var rows=videos.map(function(v,i){
+			return '<tr><td><input type="checkbox" class="xrv-cb" data-i="'+i+'" checked></td>'+
+				'<td><img src="'+esc(v.thumb)+'" width="80" height="45" style="border-radius:3px;object-fit:cover"></td>'+
+				'<td>'+esc(v.title)+'</td>'+
+				'<td>'+(v.duration?esc(v.duration):'—')+'</td>'+
+				(anyTax?'<td>'+(tags(v.series,'is-series')+tags(v.audience,'is-aud')+tags(v.topic,'is-topic')||'—')+'</td>':'')+
+				'<td>'+(v.exists?'<span class="xrv-badge-exists">EXISTS</span>':'<span class="xrv-badge-new">NEW</span>')+'</td></tr>';
+		}).join('');
+		resultsEl.innerHTML =
+			'<table class="widefat striped" style="margin-top:12px"><thead><tr><th style="width:32px"><input type="checkbox" id="xrv-all" checked></th><th>Thumbnail</th><th>Title</th><th>Duration</th>'+(anyTax?'<th>Suggested terms <span style="font-weight:400;color:#787c82">(Series · Audience · Topic)</span></th>':'')+'<th>Status</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+			'<fieldset style="margin:14px 0"><legend><strong>If a video is already in the library:</strong></legend>'+
+			'<label style="margin-right:18px"><input type="radio" name="xrv-conf" value="skip" checked> Skip it (keep what is there)</label>'+
+			'<label><input type="radio" name="xrv-conf" value="overwrite"> Overwrite — refresh title, metadata &amp; thumbnail</label></fieldset>'+
+			'<button id="xrv-run" class="button button-primary button-hero">Import selected</button>';
+		$('#xrv-all').addEventListener('change', function(){ var c=this.checked; resultsEl.querySelectorAll('.xrv-cb').forEach(function(x){x.checked=c;}); });
+		$('#xrv-run').addEventListener('click', run);
+	}
+
+	function run(){
+		var overwrite = (resultsEl.querySelector('input[name=xrv-conf]:checked')||{}).value==='overwrite';
+		var sel=[]; resultsEl.querySelectorAll('.xrv-cb:checked').forEach(function(x){ sel.push(videos[+x.getAttribute('data-i')]); });
+		if(!sel.length){ progEl.innerHTML='<p>Nothing selected.</p>'; return; }
+		var runBtn=$('#xrv-run'); runBtn.disabled=true;
+		var total=sel.length, done=0, tally={created:0,updated:0,skipped:0,failed:0};
+		progEl.innerHTML='<div style="margin:14px 0"><div class="xrv-bar-wrap"><div class="xrv-bar" id="xrv-bar"></div></div><p id="xrv-msg" style="margin-top:8px">Starting…</p></div>';
+		var SIZE=5, idx=0;
+		function next(){
+			if(idx>=total){ $('#xrv-msg').innerHTML='<strong>Done.</strong> Created '+tally.created+' · Updated '+tally.updated+' · Skipped '+tally.skipped+(tally.failed?' · Failed '+tally.failed:'')+'. <a href="edit.php?post_type=xroad_video">View all videos &rarr;</a>'; runBtn.disabled=false; return; }
+			var batch=sel.slice(idx,idx+SIZE); idx+=SIZE;
+			var payload=batch.map(function(v){ return {id:v.id,title:v.title,duration:v.duration,upload:v.upload,desc:v.desc,series:v.series||[],audience:v.audience||[],topic:v.topic||[]}; });
+			post('xrv_import_run',{ items:JSON.stringify(payload), overwrite:overwrite?'1':'0' }).then(function(res){
+				if(res && res.success && res.data && res.data.results){ res.data.results.forEach(function(r){ if(tally[r.status]!=null) tally[r.status]++; }); }
+				else { tally.failed+=batch.length; }
+				done+=batch.length; var pct=Math.round(done/total*100);
+				$('#xrv-bar').style.width=pct+'%'; $('#xrv-msg').textContent='Imported '+done+' of '+total+'…';
+				next();
+			}).catch(function(){ tally.failed+=batch.length; done+=batch.length; next(); });
+		}
+		next();
+	}
+})();
+</script>
 JS;
 }
 
@@ -1727,6 +2556,8 @@ function xrv_uninstall_cleanup() {
 	}
 
 	delete_option( 'xrv_version' );
+	delete_option( 'xrv_yt_api_key' );
+	delete_option( 'xrv_settings' );
 	delete_option( 'xrv_delete_data_on_uninstall' );
 	delete_option( 'xrv_delete_thumbs_on_uninstall' );
 }
