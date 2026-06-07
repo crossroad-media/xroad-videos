@@ -1,6 +1,6 @@
 # Crossroad Videos (`xroad-videos`)
 
-A single-file WordPress plugin by [Crossroad Media](https://crossroad.us). A privacy-first, click-to-load video gallery and a drop-in alternative to **Smash Balloon YouTube Feed** for any site running a cookie/consent manager, now with geo-aware GDPR consent modes, a built-in bulk importer, a site-wide settings page, and multiple layouts.
+A single-file WordPress plugin by [Crossroad Media](https://crossroad.us). A privacy-first, click-to-load video gallery and a drop-in alternative to **Smash Balloon YouTube Feed** for any site running a cookie/consent manager. Supports **YouTube, Vimeo, Wistia, Loom, Dailymotion, and self-hosted MP4 / WebM** behind one facade, with geo-aware GDPR consent modes, a built-in bulk importer, a site-wide settings page, and multiple layouts.
 
 ## Why it exists
 
@@ -19,16 +19,16 @@ This is the ["facade" pattern](https://stackoverflow.com/questions/5242429/what-
 
 ## What it does
 
-- **Curated CPT** `xroad_video`. Editors paste a YouTube URL and drag to reorder; no YouTube Data API key required.
+- **Curated CPT** `xroad_video`. Editors paste a video URL from any supported host and drag to reorder; the provider is auto-detected and no API key is required.
 - **Built-in bulk importer** (Videos → Import). Paste a list of URLs, point at a channel or playlist (optionally with a free API key for durations and upload dates), or upload a JSON file carrying full metadata and taxonomy terms. A dry-run preview shows new vs. already-in-library before anything is written, then the import runs in batched AJAX with a progress bar.
-- **Local thumbnail sideload** on save (maxres with hqdefault fallback, checked by HTTP status), so the grid references `/wp-content/uploads/` and never calls `i.ytimg.com`. No-key oEmbed prefills the title and description on first save.
+- **Local thumbnail sideload** on save, so the grid references `/wp-content/uploads/` and never calls the host's image CDN. YouTube uses its predictable poster URLs (maxres with hqdefault fallback, checked by HTTP status); every other host supplies its poster, and for all but YouTube its duration, from its own no-key oEmbed endpoint, which also prefills the title on first save.
 - **Layouts.** A featured carousel, a browse grid, or both in one shortcode (`layout="library"`), with lightbox or inline playback. Filtering (dropdown selects or chips for Series / Audience / Topic), keyword search, and sort (including shortest or longest by duration) are pure client-side toggles, so they run instantly with no network round-trip. Paged browse adds a Load More button and an optional Subscribe button, and the grid steps 3 to 2 to 1 columns on smaller screens.
 - **Geo-aware consent modes.** Global (recommended), Strict GDPR, or No consent integration. **Global** shows a dismissible opt-in prompt only to EU/UK/EEA/CH visitors (resolved from an edge country header) and stays frictionless for everyone else, including US / CCPA, since the facade shares no data with YouTube until a click. Whenever a prompt is required the plugin makes zero contact with any Google domain until the visitor accepts. See **Privacy, consent & GDPR** below.
 - **Site-wide settings page** (Videos → Settings). Set the consent mode, privacy URL, filter style, per-page counts, Subscribe URL, and YouTube Data API key once; every gallery inherits them, and any shortcode or block attribute still overrides.
 - **Self-generating VideoObject JSON-LD** inside a `CollectionPage` / `ItemList`, merging with the site's Organization node via the `xrv_org_id` filter. Single-video pages emit a standalone `VideoObject` with transcript and key-moment `Clip`s for rich-result and AI-citation eligibility.
 - **Shortcode, block, and block sidebar controls** under the collision-proof `xroad` namespace. The Gutenberg block exposes Layout, Browse, Privacy, and pre-filter panels through InspectorControls, with no build step.
 - **Three REST-exposed taxonomies** (`xrv_series`, `xrv_audience`, `xrv_topic`); sites define their own terms.
-- A `_xrv_provider` switch with Vimeo branches stubbed for 2.0.
+- **Multi-source.** One `_xrv_provider` switch routes YouTube, Vimeo, Wistia, Loom, Dailymotion, and self-hosted files, auto-detected from the pasted URL. Hosted videos load on click as the host's privacy-enhanced iframe (Vimeo with `dnt=1`); self-hosted files play in a native `<video>` element with zero third-party contact ever. Vimeo unlisted and domain-private videos keep their privacy hash, and galleries can mix sources in a single grid.
 
 No page builder, ACF, jQuery, or build step. The inline-asset architecture (CSS, JS, and SVG emitted once per request) survives a performance plugin's unused-CSS pass and moves between themes unchanged.
 
@@ -41,6 +41,21 @@ No page builder, ACF, jQuery, or build step. The inline-asset architecture (CSS,
 ```
 
 Block: **xroad/videos** (a PHP-rendered dynamic block that shares the shortcode's render path). Every attribute below is also a block sidebar control, and anything left blank inherits the site-wide default from **Videos → Settings**, which a shortcode or block attribute always overrides.
+
+### Sources
+
+Editors never pick a provider by hand: paste a URL and the host is detected automatically (the **Provider** selector defaults to Auto-detect). Supported sources:
+
+| Source | Paste | Metadata without an API key |
+|---|---|---|
+| YouTube | watch, `youtu.be`, Shorts, or embed URL | title, poster |
+| Vimeo | `vimeo.com/...` (including unlisted `vimeo.com/{id}/{hash}`) | title, poster, duration, description |
+| Wistia | a `wistia.com/medias/...` URL | title, poster, duration |
+| Loom | `loom.com/share/...` | title, poster, duration |
+| Dailymotion | `dailymotion.com/video/...` or `dai.ly/...` | title, poster |
+| Self-hosted file | a direct `.mp4` or `.webm` URL (pick **Self-hosted file**) | none; set the title and upload a poster yourself |
+
+Hosted videos load on click as the host's privacy-enhanced player (Vimeo uses `dnt=1` with no title or byline chrome); **self-hosted files** play in a native `<video>` element, so they make no third-party contact at any point. Galleries can mix sources freely in one grid. The bulk importer and channel sync remain YouTube-only in this release; multi-source bulk import is planned for 2.5.
 
 **Content and filtering**
 
@@ -101,11 +116,11 @@ Open a page using the gallery in DevTools (Network tab, cache disabled) and conf
 
 ## Privacy, consent & GDPR
 
-The gallery is a **click-to-load facade**: every card is a local first-party poster + a play button. Nothing (no request, cookie, connection, or `localStorage`) reaches YouTube/Google until a visitor deliberately clicks. On click it injects a `youtube-nocookie.com` iframe; **that click is the consent** that loads the embed.
+The gallery is a **click-to-load facade**: every card is a local first-party poster + a play button. Nothing (no request, cookie, connection, or `localStorage`) reaches the video host until a visitor deliberately clicks. On click it injects the host's privacy-enhanced player (a `youtube-nocookie.com` iframe for YouTube, `player.vimeo.com` with `dnt=1` for Vimeo, the equivalent for Wistia / Loom / Dailymotion, or a native `<video>` for self-hosted files); **that click is the consent** that loads the embed.
 
 On top of that baseline, the **Consent mode** (Settings → Videos → Settings, or `consent_notice=`) sets how consent is obtained:
 
-| Mode | `consent_notice` | What the visitor gets | Pre-click contact with YouTube |
+| Mode | `consent_notice` | What the visitor gets | Pre-click contact with the host |
 |---|---|---|---|
 | **Global** *(recommended)* | `geo` | EU/UK/EEA/CH visitors get the opt-in "Load video" prompt; everyone else (including US / CCPA) plays in one click | **none** for prompted visitors; preconnect for others |
 | **Strict GDPR** | `strict` | opt-in prompt for **every** visitor, worldwide | **none** for anyone |
@@ -136,13 +151,26 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.0.0
+
+Multi-source. The gallery is no longer YouTube-only: it now plays **Vimeo, Wistia, Loom, Dailymotion, and self-hosted MP4 / WebM files** through the same click-to-load facade, with the provider auto-detected from the pasted URL. Still a single-file, zero-dependency plugin, and the zero-third-party-request-until-click guarantee holds for every source (self-hosted files make no third-party contact at all). No new API keys: each host's title, poster, and (for all but YouTube) duration come from its no-key oEmbed endpoint.
+
+- **Five new providers via the existing `_xrv_provider` seam.** Vimeo, Wistia, Loom, Dailymotion, and self-hosted files join YouTube. Each routes through the same switch for ID parsing, embed URL, oEmbed endpoint, and poster source, so the renderer, schema, lightbox, consent modes, layouts, and search/sort are unchanged and behave identically across sources. Galleries can mix providers in one grid.
+- **Auto-detect provider.** The editor's Provider selector defaults to **Auto-detect**: paste a URL and the host is recognized from it, so editors never choose a provider by hand. The selector is still there to force a choice and to pick Self-hosted file.
+- **Self-hosted files (`provider:file`).** Paste a direct MP4 / WebM URL and the card plays it in a native `<video>` element on click. No iframe, no oEmbed, no external request at any point: the most private option, and a natural fit with the password-gate stack for client review reels. Upload a poster image in the editor, since self-hosted files have no remote thumbnail to fetch.
+- **Vimeo privacy hash.** Unlisted and domain-private Vimeo videos (`vimeo.com/{id}/{hash}`) keep their hash, so the on-click embed is reconstructed correctly. Vimeo plays with `dnt=1` and no title / byline / portrait chrome.
+- **No third-party thumbnail relay.** Posters for the new hosts are sideloaded from each host's own oEmbed `thumbnail_url` and stored locally like the YouTube poster, so there is no dependency on any external thumbnail service.
+- **Duration normalization.** oEmbed durations (returned in seconds) are normalized to ISO 8601 on save, so the existing clock display and shortest/longest sort work across every source with no other change.
+- **Scope.** The bulk importer and automatic channel sync stay YouTube-only in this release; multi-source bulk import is planned for 2.5. The enterprise tier (Brightcove, Kaltura) is intentionally out of scope, since composite account/player identity needs a providers settings panel.
+- **Payload.** Front-end inline assets are about 30.3 KB raw / 8.7 KB gzipped per page (the provider routing adds roughly 1.2 KB of JS over 1.0.9); admin and importer code is unchanged, and everything is still emitted once per request.
+
 ### 1.0.9
 
 Adds automatic channel sync: the plugin can poll a YouTube channel or playlist for new uploads and add them to the library, either on a schedule you set or on demand. Still a single-file, zero-dependency plugin; the sync engine and its controls are admin-only and add nothing to the front-end payload (unchanged at about 29 KB raw / 8.3 KB gzipped per page).
 
 - **Automatic channel sync** (Videos → Settings → Automatic channel sync). Point it at a channel URL (`/@handle`, `/channel/UC…`, `/user/…`) or a `?list=…` playlist and it scans the most recent uploads, adding any video not already in the library. Dedup is by video ID (`_xrv_video_id`), so a run is always idempotent and safe to repeat. Each new video gets its title, duration, upload date, description, and a sideloaded thumbnail, exactly like the importer. Requires the (free) YouTube Data API key already used by Import.
 - **Scheduled or on demand.** Pick a check frequency of Hourly, Daily, Weekly, or Monthly (WP-Cron), or **On demand / never** to disable the schedule and update only when you click **Sync now**. The Settings page shows the next scheduled run and a last-run summary.
-- **Publish or review.** Choose whether newly found videos go live immediately (Published) or land as Drafts for review before they appear, plus a cap on how many recent uploads to scan per run (1–50).
+- **Publish or review.** Choose whether newly found videos go live immediately (Published) or land as Drafts for review before they appear, plus a cap on how many recent uploads to scan per run (1 to 50).
 - **Clean lifecycle.** The cron event is rescheduled when settings change, cleared on deactivation, and removed (with its bookkeeping option) on uninstall. A short-lived lock prevents a scheduled run and a manual *Sync now* from overlapping and double-adding the same video.
 - **Hardening & performance** (applies to all galleries, not just sync). The JSON-LD `<script>` output now hex-escapes `<`, `>`, and `&`, so a video title or description (including titles pulled from YouTube) can never break out of the schema block. The grid render now reads taxonomy terms from the cache WordPress already primes, cutting roughly three database queries per card down to a single bulk query. The one WP 5.3-only call introduced for sync is now guarded, keeping the plugin compatible back to WordPress 5.0.
 - **Granular poster controls.** Each video now has a **Poster image** control in its editor: upload or choose any image from the media library to override the auto-fetched YouTube thumbnail, or **Reset to automatic** to re-fetch it. A custom poster is honored verbatim and is never overwritten by a re-sync. Settings adds a **Default poster image** used for any video that has no thumbnail of its own. The resolution order is custom upload → auto YouTube thumbnail → featured image → site default. Both pickers use the native WordPress media library (admin-only; no front-end weight).
@@ -199,9 +227,9 @@ Editor auto-title: pasting a URL fetches the title from the WordPress oEmbed pro
 
 YouTube facade, local thumbnails, masonry, self-generating VideoObject schema, `video_play` event, shortcode + block.
 
-### 2.0 (planned)
+### 2.5 (planned)
 
-Vimeo as a second `_xrv_provider` value (ID parser, `vumbnail`/oEmbed thumbnail, `player.vimeo.com` facade with `dnt=1`). No render rewrite; the provider switch already routes for it.
+Multi-source bulk import and channel/showcase sync (Vimeo showcases, Wistia projects), extending the YouTube-only importer to every provider.
 
 ## License
 
