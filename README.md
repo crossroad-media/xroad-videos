@@ -15,7 +15,7 @@ Every one of those has the same root cause: third-party requests firing **before
 
 This plugin inverts that. Every card starts as a **local poster image + a play button**: pure first-party HTML/CSS, zero requests to any Google domain, zero cookies, zero `localStorage`. Because nothing third-party fires before interaction, the consent manager has nothing to block, so no banner, overlay, or black player can appear. Only **on click** does it inject a `youtube-nocookie.com` iframe (the click is the consent) and push a `video_play` event to the dataLayer. Storing thumbnails locally hardens the guarantee: even the poster makes no call to `i.ytimg.com`.
 
-This is the [web.dev "facade" pattern](https://web.dev/articles/third-party-facades).
+This is the ["facade" pattern](https://stackoverflow.com/questions/5242429/what-is-the-facade-design-pattern).
 
 ## What it does
 
