@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           1.0.9
+ * Version:           2.0.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -47,9 +47,10 @@
  * CSS, the vanilla JS, and the schema. No page builder, no ACF, no jQuery, no build step. It drops into a
  * page-builder Text module, a core Shortcode block, or the xroad/videos block, and renders identically.
  *
- * PROVIDER ROUTING. A scalar _xrv_provider meta (youtube default; vimeo reserved for 2.0) routes all
- * provider-specific logic (ID parser, thumbnail candidates, embed URL) through a switch(), so a second
- * provider is additive, not a rewrite.
+ * PROVIDER ROUTING. A scalar _xrv_provider meta routes every provider-specific operation (ID parser,
+ * embed URL, oEmbed endpoint, poster source) through a switch(). 2.0 supports youtube, vimeo, wistia,
+ * loom, dailymotion, and self-hosted files; a new provider is additive, not a rewrite. The provider is
+ * auto-detected from the pasted URL, so editors normally never touch the selector.
  * ------------------------------------------------------------------------------------------------
  */
 
@@ -115,7 +116,8 @@ function xrv_register_data_model() {
 add_action( 'init', 'xrv_register_meta' );
 function xrv_register_meta() {
 	$fields = array(
-		'_xrv_provider'      => 'string',  // youtube (default) | vimeo (reserved for 2.0)
+		'_xrv_provider'      => 'string',  // youtube | vimeo | wistia | loom | dailymotion | file
+		'_xrv_video_hash'    => 'string',  // optional privacy hash (Vimeo unlisted / domain-private videos)
 		'_xrv_video_id'      => 'string',  // the platform video ID (11 chars for YouTube)
 		'_xrv_source_url'    => 'string',  // canonical watch URL
 		'_xrv_dedicated_url' => 'string',  // optional: a dedicated page for this video the card links to
@@ -160,7 +162,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '1.0.9' );
+	update_option( 'xrv_version', '2.0.0' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -171,6 +173,45 @@ register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
  *    vimeo is reserved. Adding it in 2.0 means filling three branches, not rewriting the renderer.
  * ================================================================================================= */
 
+/** Whitelist of providers xroad-videos can render. */
+function xrv_providers() {
+	return array( 'youtube', 'vimeo', 'wistia', 'loom', 'dailymotion', 'file' );
+}
+
+/** Sniff the provider from a pasted URL. Returns '' when nothing matches (caller falls back to youtube). */
+function xrv_detect_provider( $url ) {
+	$url = trim( (string) $url );
+	if ( $url === '' ) { return ''; }
+	if ( preg_match( '#(?:youtube(?:-nocookie)?\.com|youtu\.be)#i', $url ) ) { return 'youtube'; }
+	if ( preg_match( '#vimeo\.com#i', $url ) )                               { return 'vimeo'; }
+	if ( preg_match( '#(?:wistia\.(?:com|net)|wi\.st)#i', $url ) )           { return 'wistia'; }
+	if ( preg_match( '#loom\.com#i', $url ) )                                { return 'loom'; }
+	if ( preg_match( '#(?:dailymotion\.com|dai\.ly)#i', $url ) )             { return 'dailymotion'; }
+	if ( preg_match( '#\.(?:mp4|m4v|webm|ogv|ogg|mov)(?:[?\#]|$)#i', $url ) ) { return 'file'; }
+	return '';
+}
+
+/** Vimeo unlisted / domain-private videos carry a privacy hash (vimeo.com/{id}/{hash}). '' otherwise. */
+function xrv_extract_video_hash( $url, $provider = 'youtube' ) {
+	if ( 'vimeo' !== $provider ) { return ''; }
+	$url = trim( (string) $url );
+	if ( preg_match( '#vimeo\.com/\d+/([A-Za-z0-9]+)#i', $url, $m ) ) { return $m[1]; }
+	if ( preg_match( '#[?&]h=([A-Za-z0-9]+)#i', $url, $m ) )          { return $m[1]; }
+	return '';
+}
+
+/** Whole seconds (from an oEmbed duration) -> ISO 8601 (PT#H#M#S), so the existing clock + sort reuse it. */
+function xrv_seconds_to_iso( $sec ) {
+	$sec = (int) $sec;
+	if ( $sec <= 0 ) { return ''; }
+	$h = intdiv( $sec, 3600 ); $m = intdiv( $sec % 3600, 60 ); $s = $sec % 60;
+	$out = 'PT';
+	if ( $h ) { $out .= $h . 'H'; }
+	if ( $m ) { $out .= $m . 'M'; }
+	if ( $s || 'PT' === $out ) { $out .= $s . 'S'; }
+	return $out;
+}
+
 /** Extract the platform video ID from a pasted URL (or a bare ID). Returns '' if none found. */
 function xrv_extract_video_id( $url, $provider = 'youtube' ) {
 	$url = trim( (string) $url );
@@ -179,11 +220,37 @@ function xrv_extract_video_id( $url, $provider = 'youtube' ) {
 	}
 	switch ( $provider ) {
 		case 'vimeo':
-			// Reserved for 2.0. Vimeo IDs are numeric; accept a bare ID or a player/clip URL.
+			// Vimeo IDs are numeric; accept a bare ID or a player/clip URL (the privacy hash, if any,
+			// is captured separately by xrv_extract_video_hash()).
 			if ( preg_match( '/(?:vimeo\.com\/|video\/)(\d+)/', $url, $m ) ) {
 				return $m[1];
 			}
 			return preg_match( '/^\d+$/', $url ) ? $url : '';
+
+		case 'wistia':
+			// Hashed alphanumeric ID (e.g. 01a1d9f97c). Accept a medias/embed URL or a bare ID.
+			if ( preg_match( '#(?:wistia\.(?:com|net)|wi\.st)/(?:medias|embed/(?:iframe|medias|playlists))/([A-Za-z0-9]+)#i', $url, $m ) ) {
+				return $m[1];
+			}
+			return preg_match( '/^[A-Za-z0-9]{8,}$/', $url ) ? $url : '';
+
+		case 'loom':
+			// Share/embed ID (hex). Accept a share/embed URL or a bare ID.
+			if ( preg_match( '#loom\.com/(?:share|embed)/([A-Za-z0-9]+)#i', $url, $m ) ) {
+				return $m[1];
+			}
+			return preg_match( '/^[A-Za-z0-9]{20,}$/', $url ) ? $url : '';
+
+		case 'dailymotion':
+			// IDs look like x7tgad0 / k.... Accept a video, embed, or dai.ly short URL.
+			if ( preg_match( '#(?:dailymotion\.com/(?:video|embed/video)/|dai\.ly/)([A-Za-z0-9]+)#i', $url, $m ) ) {
+				return $m[1];
+			}
+			return preg_match( '/^[A-Za-z0-9]{5,}$/', $url ) ? $url : '';
+
+		case 'file':
+			// Self-hosted: the media URL (or a site-relative path) is itself the identifier.
+			return ( preg_match( '#^https?://#i', $url ) || 0 === strpos( $url, '/' ) ) ? $url : '';
 
 		case 'youtube':
 		default:
@@ -201,29 +268,40 @@ function xrv_extract_video_id( $url, $provider = 'youtube' ) {
 
 /** Ordered list of candidate thumbnail source URLs to try when sideloading the local poster. */
 function xrv_thumb_candidates( $id, $provider = 'youtube' ) {
-	switch ( $provider ) {
-		case 'vimeo':
-			// Reserved for 2.0: vumbnail provides a no-key thumbnail by Vimeo ID.
-			return array( 'https://vumbnail.com/' . $id . '.jpg' );
-
-		case 'youtube':
-		default:
-			// maxres is absent on older uploads and YouTube serves a valid-looking 404 BODY, so the
-			// sideload routine must check HTTP status, not image bytes. hqdefault always exists.
-			return array(
-				'https://i.ytimg.com/vi_webp/' . $id . '/maxresdefault.webp',
-				'https://i.ytimg.com/vi/' . $id . '/maxresdefault.jpg',
-				'https://i.ytimg.com/vi/' . $id . '/hqdefault.jpg',
-			);
+	// Only YouTube has stable ID-derived poster URLs. Every other host's poster comes from its oEmbed
+	// thumbnail_url, which the save / import path passes to xrv_sideload_thumbnail() explicitly, so this
+	// returns an empty list for them (no third-party thumbnail relay, no broken ID guesses).
+	if ( 'youtube' !== $provider ) {
+		return array();
 	}
+	// maxres is absent on older uploads and YouTube serves a valid-looking 404 BODY, so the sideload
+	// routine must check HTTP status, not image bytes. hqdefault always exists.
+	return array(
+		'https://i.ytimg.com/vi_webp/' . $id . '/maxresdefault.webp',
+		'https://i.ytimg.com/vi/' . $id . '/maxresdefault.jpg',
+		'https://i.ytimg.com/vi/' . $id . '/hqdefault.jpg',
+	);
 }
 
 /** The privacy-enhanced embed URL injected ON CLICK only. autoplay=1 because the click is the consent. */
-function xrv_embed_url( $id, $provider = 'youtube' ) {
+function xrv_embed_url( $id, $provider = 'youtube', $hash = '' ) {
 	switch ( $provider ) {
 		case 'vimeo':
-			// Reserved for 2.0: dnt=1 is Vimeo's do-not-track flag.
-			return 'https://player.vimeo.com/video/' . $id . '?autoplay=1&dnt=1';
+			// dnt=1 is Vimeo's do-not-track flag; title/byline/portrait stripped for a clean player.
+			return 'https://player.vimeo.com/video/' . rawurlencode( $id ) . '?autoplay=1&dnt=1&title=0&byline=0&portrait=0' . ( '' !== $hash ? '&h=' . rawurlencode( $hash ) : '' );
+
+		case 'wistia':
+			return 'https://fast.wistia.net/embed/iframe/' . rawurlencode( $id ) . '?autoPlay=true';
+
+		case 'loom':
+			return 'https://www.loom.com/embed/' . rawurlencode( $id ) . '?autoplay=1';
+
+		case 'dailymotion':
+			return 'https://www.dailymotion.com/embed/video/' . rawurlencode( $id ) . '?autoplay=1';
+
+		case 'file':
+			// Self-hosted: the media URL is played directly in a <video> element (handled client-side).
+			return $id;
 
 		case 'youtube':
 		default:
@@ -233,13 +311,9 @@ function xrv_embed_url( $id, $provider = 'youtube' ) {
 
 /** The remote thumbnail URL used as a SECONDARY thumbnailUrl in schema (not on the rendered card). */
 function xrv_remote_thumb_url( $id, $provider = 'youtube' ) {
-	switch ( $provider ) {
-		case 'vimeo':
-			return 'https://vumbnail.com/' . $id . '.jpg';
-		case 'youtube':
-		default:
-			return 'https://i.ytimg.com/vi/' . $id . '/hqdefault.jpg';
-	}
+	// YouTube has a stable ID-based poster URL. Other hosts expose their poster via oEmbed, which is
+	// sideloaded into the LOCAL poster, so there is no separate remote URL to advertise here.
+	return ( 'youtube' === $provider ) ? 'https://i.ytimg.com/vi/' . $id . '/hqdefault.jpg' : '';
 }
 
 /** The canonical watch URL for a video, used for schema contentUrl and as a source-URL fallback. */
@@ -247,6 +321,14 @@ function xrv_watch_url( $id, $provider = 'youtube' ) {
 	switch ( $provider ) {
 		case 'vimeo':
 			return 'https://vimeo.com/' . $id;
+		case 'wistia':
+			return 'https://fast.wistia.com/medias/' . $id;
+		case 'loom':
+			return 'https://www.loom.com/share/' . $id;
+		case 'dailymotion':
+			return 'https://www.dailymotion.com/video/' . $id;
+		case 'file':
+			return $id;
 		case 'youtube':
 		default:
 			return 'https://www.youtube.com/watch?v=' . $id;
@@ -261,6 +343,15 @@ function xrv_fetch_oembed( $watch_url, $provider = 'youtube' ) {
 	switch ( $provider ) {
 		case 'vimeo':
 			$endpoint = 'https://vimeo.com/api/oembed.json?url=' . rawurlencode( $watch_url );
+			break;
+		case 'wistia':
+			$endpoint = 'https://fast.wistia.com/oembed?url=' . rawurlencode( $watch_url );
+			break;
+		case 'loom':
+			$endpoint = 'https://www.loom.com/v1/oembed?url=' . rawurlencode( $watch_url );
+			break;
+		case 'dailymotion':
+			$endpoint = 'https://www.dailymotion.com/services/oembed?url=' . rawurlencode( $watch_url );
 			break;
 		case 'youtube':
 		default:
@@ -282,7 +373,7 @@ function xrv_fetch_oembed( $watch_url, $provider = 'youtube' ) {
  *     checked (not image bytes) because YouTube serves a valid-looking 404 body for missing maxres.
  *     Returns the attachment ID on success, or a WP_Error.
  * ------------------------------------------------------------------------------------------------- */
-function xrv_sideload_thumbnail( $post_id, $id, $provider = 'youtube' ) {
+function xrv_sideload_thumbnail( $post_id, $id, $provider = 'youtube', $candidates = null ) {
 	if ( ! function_exists( 'media_handle_sideload' ) ) {
 		require_once ABSPATH . 'wp-admin/includes/media.php';
 		require_once ABSPATH . 'wp-admin/includes/file.php';
@@ -291,7 +382,13 @@ function xrv_sideload_thumbnail( $post_id, $id, $provider = 'youtube' ) {
 
 	$last_error = new WP_Error( 'xrv_no_candidate', 'No thumbnail candidate was reachable.' );
 
-	foreach ( xrv_thumb_candidates( $id, $provider ) as $src ) {
+	$list = ( null !== $candidates ) ? array_values( array_filter( (array) $candidates ) ) : xrv_thumb_candidates( $id, $provider );
+	foreach ( $list as $src ) {
+		// Defense-in-depth: only ever fetch http(s) candidates. The non-YouTube thumbnail_url is returned
+		// by the provider's oEmbed, so this rejects any non-web scheme before a server-side fetch.
+		if ( ! preg_match( '#^https?://#i', (string) $src ) ) {
+			continue;
+		}
 		// HEAD-style status check first: YouTube returns 200 for hqdefault and a real 404 for absent maxres.
 		$head = wp_remote_head( $src, array( 'timeout' => 8, 'redirection' => 2 ) );
 		if ( is_wp_error( $head ) || 200 !== (int) wp_remote_retrieve_response_code( $head ) ) {
@@ -304,7 +401,10 @@ function xrv_sideload_thumbnail( $post_id, $id, $provider = 'youtube' ) {
 			continue;
 		}
 
-		$ext       = preg_match( '/\.webp(\?|$)/i', $src ) ? 'webp' : 'jpg';
+		$ext = 'jpg';
+		if ( preg_match( '/\.(webp|png|jpe?g|gif)(?:[?\#]|$)/i', $src, $em ) ) {
+			$ext = ( 'jpeg' === strtolower( $em[1] ) ) ? 'jpg' : strtolower( $em[1] );
+		}
 		$file_array = array(
 			'name'     => 'xrv-' . $provider . '-' . $id . '.' . $ext,
 			'tmp_name' => $tmp,
@@ -576,6 +676,7 @@ function xrv_render( $atts = array() ) {
 			'title'      => get_the_title( $id ),
 			'provider'   => $provider,
 			'vid'        => $vid,
+			'hash'       => (string) get_post_meta( $id, '_xrv_video_hash', true ),
 			'source_url' => (string) get_post_meta( $id, '_xrv_source_url', true ),
 			'desc'       => $desc,
 			'dedicated'  => $dedicated,
@@ -762,6 +863,7 @@ function xrv_render_card( $r, $meta = 'full' ) {
 	<figure class="xrv-card"
 		data-vid="<?php echo esc_attr( $r['vid'] ); ?>"
 		data-provider="<?php echo esc_attr( $r['provider'] ); ?>"
+		data-hash="<?php echo esc_attr( $r['hash'] ?? '' ); ?>"
 		data-series="<?php echo esc_attr( implode( ' ', $r['series'] ) ); ?>"
 		data-audience="<?php echo esc_attr( implode( ' ', $r['audience'] ) ); ?>"
 		data-topic="<?php echo esc_attr( implode( ' ', $r['topic'] ) ); ?>"
@@ -940,7 +1042,8 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 		if ( $r['poster'] !== '' ) {
 			$thumbs[] = $r['poster'];
 		}
-		$thumbs[] = xrv_remote_thumb_url( $r['vid'], $r['provider'] );
+		$rt = xrv_remote_thumb_url( $r['vid'], $r['provider'] );
+		if ( '' !== $rt ) { $thumbs[] = $rt; }
 		$node['thumbnailUrl'] = $thumbs;
 
 		if ( $r['upload'] !== '' ) {
@@ -951,7 +1054,7 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 		}
 
 		$node['contentUrl'] = ! empty( $r['source_url'] ) ? $r['source_url'] : xrv_watch_url( $r['vid'], $r['provider'] );
-		$node['embedUrl']   = xrv_embed_url( $r['vid'], $r['provider'] );
+		$node['embedUrl']   = xrv_embed_url( $r['vid'], $r['provider'], isset( $r['hash'] ) ? $r['hash'] : '' );
 		$node['publisher']  = $org_ref;
 
 		// Let sites extend a single VideoObject node (e.g. add `about`, `transcript`, `regionsAllowed`).
@@ -1041,6 +1144,7 @@ function xrv_single_video_schema( $post_id ) {
 	$provider = (string) get_post_meta( $post_id, '_xrv_provider', true );
 	$provider = $provider !== '' ? $provider : 'youtube';
 	$vid      = (string) get_post_meta( $post_id, '_xrv_video_id', true );
+	$hash     = (string) get_post_meta( $post_id, '_xrv_video_hash', true );
 	if ( $vid === '' ) {
 		return '';
 	}
@@ -1064,7 +1168,8 @@ function xrv_single_video_schema( $post_id ) {
 	if ( $poster !== '' ) {
 		$thumbs[] = $poster;
 	}
-	$thumbs[] = xrv_remote_thumb_url( $vid, $provider );
+	$rt = xrv_remote_thumb_url( $vid, $provider );
+	if ( '' !== $rt ) { $thumbs[] = $rt; }
 
 	$node = array(
 		'@type'            => 'VideoObject',
@@ -1074,7 +1179,7 @@ function xrv_single_video_schema( $post_id ) {
 		'thumbnailUrl'     => $thumbs,
 		'uploadDate'       => $upload,
 		'contentUrl'       => $content_url,
-		'embedUrl'         => xrv_embed_url( $vid, $provider ),
+		'embedUrl'         => xrv_embed_url( $vid, $provider, $hash ),
 		'publisher'        => array( '@id' => xrv_org_id() ),
 		'inLanguage'       => apply_filters( 'xrv_video_language', 'en', $post_id ),
 		'isFamilyFriendly' => true,
@@ -1204,7 +1309,8 @@ function xrv_inline_css() {
 .xrv-facade:hover .xrv-play{transform:translate(-50%,-50%) scale(1.08)}
 .xrv-facade:hover .xrv-play__bg{fill:#007A53;fill-opacity:1}
 .xrv-dur{position:absolute;right:8px;bottom:8px;background:rgba(10,22,34,.85);color:#fff;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:3px;font-variant-numeric:tabular-nums}
-.xrv-iframe{display:block;width:100%;aspect-ratio:16/9;border:0;border-radius:6px}
+.xrv-iframe,.xrv-video{display:block;width:100%;aspect-ratio:16/9;border:0;border-radius:6px}
+.xrv-video{background:#000;object-fit:contain}
 .xrv-cap{padding:12px 2px 0}
 .xrv-consent-note{font-size:11.5px;color:#5a6573;line-height:1.4;margin:7px 0 0}
 .xrv-consent-note a{color:#017A8E}
@@ -1296,7 +1402,7 @@ function xrv_inline_css() {
 .xrv-modal__backdrop{position:absolute;inset:0;background:rgba(8,16,28,.85)}
 .xrv-modal__dialog{position:relative;width:100%;max-width:1100px}
 .xrv-modal__frame{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.55)}
-.xrv-modal__frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.xrv-modal__frame iframe,.xrv-modal__frame video{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}
 .xrv-modal__close{position:absolute;top:-46px;right:0;width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.55);color:#fff;border-radius:50%;cursor:pointer;font-size:18px;line-height:1;padding:0}
 .xrv-modal__close:hover{background:rgba(255,255,255,.28)}
 .xrv-modal__close:focus-visible{outline:3px solid #019AB3;outline-offset:2px}
@@ -1329,16 +1435,11 @@ function xrv_inline_js() {
 		return m;
 	}
 	var xrvLastFocus = null;
-	function xrvOpenModal(src, title){
+	function xrvOpenModal(node, title){
 		var m = xrvGetModal();
 		var frame = m.querySelector('.xrv-modal__frame');
-		var iframe = document.createElement('iframe');
-		iframe.setAttribute('allowfullscreen', '');
-		iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
-		iframe.title = title || 'Video player';
-		iframe.src = src;
 		frame.innerHTML = '';
-		frame.appendChild(iframe);
+		frame.appendChild(node);
 		m.setAttribute('aria-label', title || 'Video player');
 		xrvLastFocus = document.activeElement;
 		m.removeAttribute('hidden');
@@ -1355,10 +1456,37 @@ function xrv_inline_js() {
 	}
 	document.addEventListener('keydown', function(e){ if(e.key === 'Escape' || e.keyCode === 27) xrvCloseModal(); });
 
-	function buildSrc(provider, id){
-		return (provider === 'vimeo')
-			? 'https://player.vimeo.com/video/' + id + '?autoplay=1&dnt=1'
-			: 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&modestbranding=1';
+	function xrvEmbedSrc(provider, id, hash){
+		switch(provider){
+			case 'vimeo':
+				return 'https://player.vimeo.com/video/' + encodeURIComponent(id) + '?autoplay=1&dnt=1&title=0&byline=0&portrait=0' + (hash ? '&h=' + encodeURIComponent(hash) : '');
+			case 'wistia':
+				return 'https://fast.wistia.net/embed/iframe/' + encodeURIComponent(id) + '?autoPlay=true';
+			case 'loom':
+				return 'https://www.loom.com/embed/' + encodeURIComponent(id) + '?autoplay=1';
+			case 'dailymotion':
+				return 'https://www.dailymotion.com/embed/video/' + encodeURIComponent(id) + '?autoplay=1';
+			default:
+				return 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&modestbranding=1';
+		}
+	}
+	// Build the element injected on click: a <video> for self-hosted files, an <iframe> for every host.
+	function xrvEmbedNode(provider, id, hash, title){
+		if(provider === 'file'){
+			var v = document.createElement('video');
+			v.className = 'xrv-video';
+			v.src = id;
+			v.controls = true; v.autoplay = true; v.setAttribute('playsinline', ''); v.setAttribute('preload', 'metadata');
+			v.title = title || 'Video player';
+			return v;
+		}
+		var iframe = document.createElement('iframe');
+		iframe.className = 'xrv-iframe';
+		iframe.setAttribute('allowfullscreen', '');
+		iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
+		iframe.title = title || 'Video player';
+		iframe.src = xrvEmbedSrc(provider, id, hash);
+		return iframe;
 	}
 
 	function initRoot(ROOT){
@@ -1407,7 +1535,9 @@ function xrv_inline_js() {
 			var frame = card.querySelector('.xrv-frame'); if(!frame || frame.querySelector('.xrv-consent')) return;
 			var ov = document.createElement('div'); ov.className = 'xrv-consent';
 			var x = document.createElement('button'); x.type = 'button'; x.className = 'xrv-consent-x'; x.setAttribute('aria-label', 'Decline and close'); x.textContent = '×';
-			var msg = document.createElement('p'); msg.className = 'xrv-consent-msg'; msg.textContent = consentText || 'This video is hosted by YouTube and may set cookies.';
+			var pv = card.getAttribute('data-provider') || 'youtube';
+			var hostName = ({ youtube:'YouTube', vimeo:'Vimeo', wistia:'Wistia', loom:'Loom', dailymotion:'Dailymotion', file:'this site' })[pv] || 'a third party';
+			var msg = document.createElement('p'); msg.className = 'xrv-consent-msg'; msg.textContent = consentText || ('This video is hosted by ' + hostName + ' and may set cookies.');
 			var actions = document.createElement('div'); actions.className = 'xrv-consent-actions';
 			var go = document.createElement('button'); go.type = 'button'; go.className = 'xrv-consent-go'; go.textContent = consentBtnLabel;
 			var no = document.createElement('button'); no.type = 'button'; no.className = 'xrv-consent-decline'; no.textContent = consentDeclineLabel;
@@ -1420,19 +1550,16 @@ function xrv_inline_js() {
 		function playCard(card, btn){
 			var id = card.getAttribute('data-vid'); if(!id) return;
 			var provider = card.getAttribute('data-provider') || 'youtube';
+			var hash = card.getAttribute('data-hash') || '';
 			var titleEl = card.querySelector('.xrv-title');
 			var title = titleEl ? titleEl.textContent.trim() : 'Video player';
-			var src = buildSrc(provider, id);
+			var node = xrvEmbedNode(provider, id, hash, title);
 			if(playbackMode === 'inline'){
-				var iframe = document.createElement('iframe');
-				iframe.className = 'xrv-iframe'; iframe.setAttribute('allowfullscreen', '');
-				iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
-				iframe.title = title; iframe.src = src;
 				var frame = (btn && btn.closest) ? (btn.closest('.xrv-frame') || btn.parentNode) : card.querySelector('.xrv-frame');
-				if(btn && btn.replaceWith){ btn.replaceWith(iframe); } else if(frame){ frame.appendChild(iframe); }
+				if(btn && btn.replaceWith){ btn.replaceWith(node); } else if(frame){ frame.appendChild(node); }
 				if(frame && frame.style){ frame.style.lineHeight = '0'; }
 			} else {
-				xrvOpenModal(src, title);
+				xrvOpenModal(node, title);
 			}
 			window.dataLayer = window.dataLayer || [];
 			window.dataLayer.push({ event:'video_play', video_provider:provider, video_id:id, video_title:title, video_series:(card.getAttribute('data-series') || '').split(' ')[0] });
@@ -1468,7 +1595,9 @@ function xrv_inline_js() {
 			if(card.dataset.xrvPre) return;
 			card.dataset.xrvPre = '1';
 			var provider = card.getAttribute('data-provider') || 'youtube';
-			var host = (provider === 'vimeo') ? 'https://player.vimeo.com' : 'https://www.youtube-nocookie.com';
+			var hosts = { youtube:'https://www.youtube-nocookie.com', vimeo:'https://player.vimeo.com', wistia:'https://fast.wistia.net', loom:'https://www.loom.com', dailymotion:'https://www.dailymotion.com' };
+			var host = hosts[provider];
+			if(!host) return; // self-hosted files: nothing third-party to warm up
 			var l = document.createElement('link'); l.rel = 'preconnect'; l.href = host;
 			document.head.appendChild(l);
 		}
@@ -1737,6 +1866,7 @@ function xrv_render_single( $post_id ) {
 		'title'      => get_the_title( $post_id ),
 		'provider'   => $provider,
 		'vid'        => $vid,
+		'hash'       => (string) get_post_meta( $post_id, '_xrv_video_hash', true ),
 		'source_url' => (string) get_post_meta( $post_id, '_xrv_source_url', true ),
 		'desc'       => (string) get_post_meta( $post_id, '_xrv_description', true ),
 		'dedicated'  => '', // on its own page there is nowhere else to link out to.
@@ -1800,7 +1930,7 @@ function xrv_render_meta_box( $post ) {
 	wp_nonce_field( 'xrv_save_meta', 'xrv_meta_nonce' );
 
 	$provider  = (string) get_post_meta( $post->ID, '_xrv_provider', true );
-	$provider  = $provider !== '' ? $provider : 'youtube';
+	$provider  = $provider !== '' ? $provider : 'auto';
 	$src_url    = (string) get_post_meta( $post->ID, '_xrv_source_url', true );
 	$vid       = (string) get_post_meta( $post->ID, '_xrv_video_id', true );
 	$dedicated = (string) get_post_meta( $post->ID, '_xrv_dedicated_url', true );
@@ -1821,13 +1951,26 @@ function xrv_render_meta_box( $post ) {
 
 	echo '<div style="max-width:760px">';
 
-	echo '<p style="margin:0 0 14px"><label for="_xrv_provider" style="display:block;font-weight:600;margin-bottom:4px">Provider</label>'
-		. '<select id="_xrv_provider" name="_xrv_provider" class="widefat">'
-		. '<option value="youtube"' . selected( $provider, 'youtube', false ) . '>YouTube</option>'
-		. '<option value="vimeo"' . selected( $provider, 'vimeo', false ) . ' disabled>Vimeo (reserved for 2.0)</option>'
-		. '</select></p>';
+	$provider_opts = array(
+		'auto'        => 'Auto-detect from URL (recommended)',
+		'youtube'     => 'YouTube',
+		'vimeo'       => 'Vimeo',
+		'wistia'      => 'Wistia',
+		'loom'        => 'Loom',
+		'dailymotion' => 'Dailymotion',
+		'file'        => 'Self-hosted file (MP4 / WebM)',
+	);
+	echo '<p style="margin:0 0 4px"><label for="_xrv_provider" style="display:block;font-weight:600;margin-bottom:4px">Provider</label>'
+		. '<select id="_xrv_provider" name="_xrv_provider" class="widefat">';
+	foreach ( $provider_opts as $pv => $plabel ) {
+		echo '<option value="' . esc_attr( $pv ) . '"' . selected( $provider, $pv, false ) . '>' . esc_html( $plabel ) . '</option>';
+	}
+	echo '</select></p>';
+	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">Leave this on <strong>Auto-detect</strong> and just paste the video URL below. Supported hosts: YouTube, Vimeo, Wistia, Loom, Dailymotion. For a <strong>self-hosted file</strong>, choose that option and paste a direct MP4 or WebM URL, then upload a poster image below.</p>';
 
 	$row( 'Video URL (paste the watch link; the ID is extracted automatically)', '_xrv_source_url', $src_url, 'e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'url' );
+
+	echo '<p style="margin:-6px 0 14px"><button type="button" class="button xrv-file-pick">Choose a video file from the Media Library</button> <span style="color:#666;font-size:12px">for a self-hosted MP4 / WebM; this fills the URL above and sets Provider to Self-hosted file.</span></p>';
 
 	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">Detected video ID: <code>' . ( $vid !== '' ? esc_html( $vid ) : '— (saved after you add a URL)' ) . '</code></p>';
 
@@ -1835,16 +1978,16 @@ function xrv_render_meta_box( $post ) {
 	$is_custom   = '1' === (string) get_post_meta( $post->ID, '_xrv_thumb_custom', true );
 	$eff_id      = xrv_effective_thumb_id( $post->ID, $thumb_id );
 	$preview_url = $eff_id ? wp_get_attachment_image_url( $eff_id, 'medium' ) : '';
-	$src_label   = $is_custom ? 'custom upload' : ( $thumb_id ? 'auto-fetched from YouTube' : ( $eff_id ? 'site default' : 'none yet' ) );
+	$src_label   = $is_custom ? 'custom upload' : ( $thumb_id ? 'auto-fetched from the video host' : ( $eff_id ? 'site default' : 'none yet' ) );
 	$settings_link = esc_url( admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) );
 	echo '<div class="xrv-media-field" style="margin:0 0 14px;padding:12px;border:1px solid #e2e6eb;border-radius:6px;background:#fbfbfc">'
 		. '<label style="display:block;font-weight:600;margin-bottom:6px">Poster image <span style="font-weight:400;color:#787c82">(' . esc_html( $src_label ) . ')</span></label>'
-		. '<div class="xrv-media-preview" style="margin-bottom:8px">' . ( $preview_url ? '<img src="' . esc_url( $preview_url ) . '" alt="" style="max-width:220px;height:auto;border-radius:4px;display:block">' : '<span style="color:#a05a00;font-size:12px">No poster yet — one is downloaded from YouTube automatically on save.</span>' ) . '</div>'
+		. '<div class="xrv-media-preview" style="margin-bottom:8px">' . ( $preview_url ? '<img src="' . esc_url( $preview_url ) . '" alt="" style="max-width:220px;height:auto;border-radius:4px;display:block">' : '<span style="color:#a05a00;font-size:12px">No poster yet — one is downloaded from the video host automatically on save (self-hosted files need a manual poster upload).</span>' ) . '</div>'
 		. '<input type="hidden" class="xrv-media-id" name="_xrv_local_thumb_id" value="' . (int) $thumb_id . '">'
 		. '<input type="hidden" class="xrv-media-custom" name="_xrv_thumb_custom" value="' . ( $is_custom ? '1' : '0' ) . '">'
 		. '<button type="button" class="button xrv-media-pick">Upload / choose image</button>'
 		. ' <button type="button" class="button-link xrv-media-clear" style="color:#b32d2e;margin-left:8px;' . ( $thumb_id ? '' : 'display:none' ) . '">Reset to automatic</button>'
-		. '<p class="description" style="margin-top:8px">Upload your own poster to override the YouTube thumbnail. <strong>Reset to automatic</strong> clears it so the YouTube thumbnail is re-fetched on save. If a video has no poster at all, the <a href="' . $settings_link . '">site default poster</a> is used.</p>'
+		. '<p class="description" style="margin-top:8px">Upload your own poster to override the auto-fetched thumbnail. <strong>Reset to automatic</strong> clears it so the host thumbnail is re-fetched on save. If a video has no poster at all, the <a href="' . $settings_link . '">site default poster</a> is used.</p>'
 		. '</div>';
 
 	echo '<p style="margin:0 0 14px"><label for="_xrv_description" style="display:block;font-weight:600;margin-bottom:4px">Plain-language description (one or two sentences)</label>'
@@ -1882,18 +2025,19 @@ function xrv_save_meta( $post_id, $post ) {
 		return;
 	}
 
-	// Provider (whitelisted; vimeo is reserved so it cannot be saved in 1.0).
-	$provider = isset( $_POST['_xrv_provider'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_provider'] ) ) : 'youtube';
-	if ( ! in_array( $provider, array( 'youtube' ), true ) ) {
-		$provider = 'youtube';
-	}
-	update_post_meta( $post_id, '_xrv_provider', $provider );
-
-	// URLs.
+	// URLs (read first so provider auto-detection can key off the source URL).
 	$source_url = isset( $_POST['_xrv_source_url'] ) ? esc_url_raw( wp_unslash( $_POST['_xrv_source_url'] ) ) : '';
 	$dedicated  = isset( $_POST['_xrv_dedicated_url'] ) ? esc_url_raw( wp_unslash( $_POST['_xrv_dedicated_url'] ) ) : '';
 	update_post_meta( $post_id, '_xrv_source_url', $source_url );
 	update_post_meta( $post_id, '_xrv_dedicated_url', $dedicated );
+
+	// Provider: an explicit selector choice wins; "auto" (or any unknown value) is detected from the URL.
+	$provider = isset( $_POST['_xrv_provider'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_provider'] ) ) : 'auto';
+	if ( ! in_array( $provider, xrv_providers(), true ) ) {
+		$provider = xrv_detect_provider( $source_url );
+		if ( '' === $provider ) { $provider = 'youtube'; }
+	}
+	update_post_meta( $post_id, '_xrv_provider', $provider );
 
 	// Description + manual metadata.
 	if ( isset( $_POST['_xrv_description'] ) ) {
@@ -1908,7 +2052,8 @@ function xrv_save_meta( $post_id, $post ) {
 	$dur    = isset( $_POST['_xrv_duration_iso'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_duration_iso'] ) ) : '';
 	$upload = isset( $_POST['_xrv_upload_date'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_upload_date'] ) ) : '';
 
-	// Derive the platform ID from the pasted URL. Editors never hand-type IDs.
+	// Derive the platform ID from the pasted URL. Editors never hand-type IDs. For self-hosted files the
+	// media URL itself is the identifier.
 	$old_id = (string) get_post_meta( $post_id, '_xrv_video_id', true );
 	$new_id = xrv_extract_video_id( $source_url, $provider );
 	if ( $new_id !== '' ) {
@@ -1916,24 +2061,45 @@ function xrv_save_meta( $post_id, $post ) {
 	}
 	$id = $new_id !== '' ? $new_id : $old_id;
 
-	// First-save prefill via no-key oEmbed: fill an empty post title and an empty description so schema
-	// is never blank. Never overwrites an editor-entered value.
-	if ( $id !== '' && ( ( $post->post_title === '' || $post->post_title === 'Auto Draft' ) || get_post_meta( $post_id, '_xrv_description', true ) === '' ) ) {
+	// Privacy hash (Vimeo unlisted / domain-private videos: vimeo.com/{id}/{hash}). Stored so the embed
+	// can be reconstructed on click; empty for public videos and every other provider.
+	$hash = xrv_extract_video_hash( $source_url, $provider );
+	if ( '' !== $hash ) {
+		update_post_meta( $post_id, '_xrv_video_hash', $hash );
+	} elseif ( $new_id !== '' && $new_id !== $old_id ) {
+		delete_post_meta( $post_id, '_xrv_video_hash' );
+	}
+
+	// No-key oEmbed metadata. Every provider except self-hosted files returns a title + thumbnail with no
+	// API key (and, for all but YouTube, duration + description too). Fetched once and reused below to
+	// prefill blank fields and to source the local poster, never overwriting an editor-entered value.
+	// YouTube is queried only when the title or description is still blank (preserves prior behavior); the
+	// other hosts are queried whenever an ID is present, because oEmbed is their poster + duration source.
+	$oembed      = array();
+	$title_blank = ( $post->post_title === '' || $post->post_title === 'Auto Draft' );
+	$desc_blank  = ( ! isset( $_POST['_xrv_description'] ) && get_post_meta( $post_id, '_xrv_description', true ) === '' );
+	if ( $id !== '' && 'file' !== $provider && ( 'youtube' !== $provider || $title_blank || $desc_blank ) ) {
 		$watch  = $source_url !== '' ? $source_url : xrv_watch_url( $id, $provider );
 		$oembed = xrv_fetch_oembed( $watch, $provider );
-		if ( ! empty( $oembed['title'] ) ) {
-			if ( $post->post_title === '' || $post->post_title === 'Auto Draft' ) {
-				// Unhook to avoid recursion, update the title, re-hook.
-				remove_action( 'save_post_xroad_video', 'xrv_save_meta', 10 );
-				wp_update_post( array( 'ID' => $post_id, 'post_title' => sanitize_text_field( $oembed['title'] ) ) );
-				add_action( 'save_post_xroad_video', 'xrv_save_meta', 10, 2 );
-			}
-			if ( get_post_meta( $post_id, '_xrv_description', true ) === '' && ! isset( $_POST['_xrv_description'] ) ) {
-				update_post_meta( $post_id, '_xrv_description', sanitize_text_field( $oembed['title'] ) );
-			}
+	}
+	if ( ! empty( $oembed['title'] ) && $title_blank ) {
+		// Unhook to avoid recursion, update the title, re-hook.
+		remove_action( 'save_post_xroad_video', 'xrv_save_meta', 10 );
+		wp_update_post( array( 'ID' => $post_id, 'post_title' => sanitize_text_field( $oembed['title'] ) ) );
+		add_action( 'save_post_xroad_video', 'xrv_save_meta', 10, 2 );
+	}
+	if ( $desc_blank ) {
+		$od = ! empty( $oembed['description'] ) ? $oembed['description'] : ( ! empty( $oembed['title'] ) ? $oembed['title'] : '' );
+		if ( '' !== $od ) {
+			update_post_meta( $post_id, '_xrv_description', sanitize_textarea_field( mb_substr( $od, 0, 5000 ) ) );
 		}
 	}
 
+	// Duration: an editor-entered ISO value wins; otherwise derive it from the oEmbed duration (seconds)
+	// normalized to ISO 8601 so the existing clock + duration sort keep working unchanged.
+	if ( '' === $dur && isset( $oembed['duration'] ) && (float) $oembed['duration'] > 0 ) {
+		$dur = xrv_seconds_to_iso( (int) round( (float) $oembed['duration'] ) );
+	}
 	update_post_meta( $post_id, '_xrv_duration_iso', $dur );
 	update_post_meta( $post_id, '_xrv_upload_date', $upload );
 
@@ -1956,9 +2122,15 @@ function xrv_save_meta( $post_id, $post ) {
 			delete_post_meta( $post_id, '_xrv_local_thumb_id' );
 		}
 		$thumb_id    = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
-		$needs_thumb = $id !== '' && ( $thumb_id === 0 || $new_id !== $old_id );
+		$needs_thumb = $id !== '' && 'file' !== $provider && ( $thumb_id === 0 || $new_id !== $old_id );
 		if ( $needs_thumb ) {
-			$attach = xrv_sideload_thumbnail( $post_id, $id, $provider );
+			// YouTube has predictable ID-based poster URLs; the other hosts return a thumbnail_url via
+			// oEmbed (no third-party thumbnail relay). Self-hosted files have no remote poster, so the
+			// editor's uploaded poster (or the site default) stands in.
+			$cands  = ( 'youtube' === $provider )
+				? xrv_thumb_candidates( $id, 'youtube' )
+				: ( ! empty( $oembed['thumbnail_url'] ) ? array( $oembed['thumbnail_url'] ) : array() );
+			$attach = xrv_sideload_thumbnail( $post_id, $id, $provider, $cands );
 			if ( ! is_wp_error( $attach ) ) {
 				update_post_meta( $post_id, '_xrv_local_thumb_id', (int) $attach );
 				set_post_thumbnail( $post_id, (int) $attach );
@@ -2029,6 +2201,19 @@ function xrv_media_picker_js() {
 					var url = (a.sizes && (a.sizes.medium || a.sizes.thumbnail)) ? (a.sizes.medium || a.sizes.thumbnail).url : a.url;
 					previewImg(wrap, url);
 					var clr = wrap.querySelector('.xrv-media-clear'); if(clr) clr.style.display = '';
+				});
+				frame.open();
+			});
+		});
+		Array.prototype.forEach.call(root.querySelectorAll('.xrv-file-pick'), function(btn){
+			if(btn.dataset.xrvBound) return; btn.dataset.xrvBound = '1';
+			btn.addEventListener('click', function(e){
+				e.preventDefault();
+				var frame = wp.media({ title:'Choose a video file', button:{ text:'Use this video' }, multiple:false, library:{ type:'video' } });
+				frame.on('select', function(){
+					var a = frame.state().get('selection').first().toJSON();
+					var u = document.getElementById('_xrv_source_url'); if(u){ u.value = a.url; }
+					var p = document.getElementById('_xrv_provider'); if(p){ p.value = 'file'; }
 				});
 				frame.open();
 			});
