@@ -151,6 +151,10 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.0.1.beta
+
+Beta release for testing the playlist picker before 2.0.1 stable. Adds a YouTube **playlist picker** to the importer. On the Import screen, enter a channel (URL, `@handle`, or name) and click **List playlists** to see that channel's public playlists with their video counts; pick one and it loads into the Videos box, ready to preview and import. Saves you finding and pasting an exact `?list=` playlist URL. Needs the same free YouTube Data API key the importer already uses; admin-only, no front-end change.
+
 ### 2.0.0
 
 Multi-source. The gallery is no longer YouTube-only: it now plays **Vimeo, Wistia, Loom, Dailymotion, and self-hosted MP4 / WebM files** through the same click-to-load facade, with the provider auto-detected from the pasted URL. Still a single-file, zero-dependency plugin, and the zero-third-party-request-until-click guarantee holds for every source (self-hosted files make no third-party contact at all). No new API keys: each host's title, poster, and (for all but YouTube) duration come from its no-key oEmbed endpoint.
