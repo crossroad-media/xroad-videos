@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.1.0
+ * Version:           2.0.1a
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -174,7 +174,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.1.0' );
+	update_option( 'xrv_version', '2.0.1a' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -684,7 +684,7 @@ function xrv_render( $atts = array() ) {
 	}
 
 	// Shorts filter: only = just verticals; hide = exclude them; all = mix (default).
-	$shorts = in_array( $atts['shorts'], array( 'all', 'only', 'hide' ), true ) ? $atts['shorts'] : 'all';
+	$shorts = in_array( $atts['shorts'], array( 'all', 'only', 'hide' ), true ) ? $atts['shorts'] : $s['shorts_default'];
 	if ( 'only' === $shorts )     { $query_args['meta_query'] = array( array( 'key' => '_xrv_short', 'compare' => 'EXISTS' ) ); }
 	elseif ( 'hide' === $shorts ) { $query_args['meta_query'] = array( array( 'key' => '_xrv_short', 'compare' => 'NOT EXISTS' ) ); }
 
@@ -768,6 +768,7 @@ function xrv_render( $atts = array() ) {
 	}
 	$use_cols   = $fixed_cols > 0;
 	$grid_class = $use_cols ? 'xrv-grid xrv-grid--cols' : 'xrv-grid';
+	if ( 'only' === $shorts ) { $grid_class .= ' xrv-grid--shelf'; } // verticals-only reads as a horizontal swipe shelf
 	// For the aligned grid, set the column count as a CUSTOM PROPERTY (not grid-template-columns directly)
 	// so the responsive media queries — which step it down to 2 then 1 on tablet/mobile — can override it.
 	$grid_style = $use_cols
@@ -1485,6 +1486,11 @@ function xrv_inline_css() {
 .xrv-modal__close:focus-visible{outline:3px solid var(--xrv-accent,#019AB3);outline-offset:2px}
 body.xrv-modal-open{overflow:hidden}
 @media (max-width:600px){.xrv-modal{padding:14px}.xrv-modal__close{top:-42px}}
+/* Shorts shelf: shorts="only" lays the verticals out as a horizontal, thumb-swipeable scroll-snap strip. */
+.xrv-grid--shelf{display:flex;gap:16px;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;padding-bottom:12px;scrollbar-width:thin}
+.xrv-grid--shelf::-webkit-scrollbar{height:8px}
+.xrv-grid--shelf::-webkit-scrollbar-thumb{background:rgba(0,0,0,.22);border-radius:8px}
+.xrv-grid--shelf .xrv-card,.xrv-grid--shelf .xrv-card[data-short]{flex:0 0 auto;width:230px;max-width:72vw;margin:0;scroll-snap-align:start;display:block}
 </style>
 CSS;
 }
@@ -1821,14 +1827,14 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.1.0', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.0.1a', true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
 		'render_callback' => function( $attributes ) { return xrv_render( (array) $attributes ); },
 		'editor_script'   => 'xrv-block',
 		'attributes'      => array(
-			'layout' => $str, 'columns' => $str, 'playback' => $str, 'controls' => $str, 'filter_ui' => $str, 'card_meta' => $str,
+			'layout' => $str, 'columns' => $str, 'playback' => $str, 'controls' => $str, 'filter_ui' => $str, 'card_meta' => $str, 'shorts' => $str,
 			'per_page' => $str, 'load_more' => $str, 'featured_limit' => $str, 'heading' => $str,
 			'subscribe_url' => $str, 'subscribe_label' => $str, 'consent_notice' => $str, 'consent_text' => $str,
 			'consent_button' => $str, 'consent_decline' => $str, 'privacy_url' => $str, 'series' => $str, 'audience' => $str, 'topic' => $str, 'limit' => $str,
@@ -1872,6 +1878,8 @@ function xrv_block_editor_js() {
 							{label:'Site default', value:''}, {label:'Dropdown selects', value:'select'}, {label:'Clickable chips', value:'chips'} ], onChange:f('filter_ui') }),
 						el(SelectControl, { label:'Card text (blank = site default)', value:a.card_meta||'', options:[
 							{label:'Site default', value:''}, {label:'Full (title + desc + tags)', value:'full'}, {label:'Compact (title + desc)', value:'compact'}, {label:'Title only', value:'title'} ], onChange:f('card_meta') }),
+						el(SelectControl, { label:'YouTube Shorts (blank = site default)', value:a.shorts||'', options:[
+							{label:'Site default', value:''}, {label:'Show alongside regular', value:'all'}, {label:'Only Shorts (swipe shelf)', value:'only'}, {label:'Hide Shorts', value:'hide'} ], onChange:f('shorts') }),
 						el(RangeControl, { label:'Show before “Load more” (0 = site default)', min:0, max:60, value: parseInt(a.per_page,10)||0, onChange:num('per_page') }),
 						el(RangeControl, { label:'“Load more” step (0 = site default)', min:0, max:24, value: parseInt(a.load_more,10)||0, onChange:num('load_more') }),
 						el(TextControl, { label:'Subscribe URL', value:a.subscribe_url||'', onChange:f('subscribe_url') })
@@ -2262,7 +2270,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 
 	if ( $is_edit ) {
 		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.1.0', true );
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.0.1a', true );
 		wp_enqueue_script( 'xrv-admin' );
 		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
@@ -2515,6 +2523,14 @@ function xrv_apply_youtube_meta( $pid, $id, $f ) {
 	if ( ! empty( $f['desc'] ) )     { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $f['desc'] ) ); }
 }
 
+/** Detect a Short. The Data API exposes no aspect ratio, so probe the canonical /shorts/ URL: YouTube
+ *  303-redirects a non-Short to /watch but serves a Short in place. One HEAD per NEW video, admin-side only.
+ *  ponytail: HEAD probe; replace with an API signal if YouTube ever ships one. */
+function xrv_yt_is_short( $id ) {
+	$r = wp_remote_head( 'https://www.youtube.com/shorts/' . rawurlencode( $id ), array( 'redirection' => 0, 'timeout' => 4 ) );
+	return ! is_wp_error( $r ) && 200 === (int) wp_remote_retrieve_response_code( $r );
+}
+
 function xrv_sync_perform() {
 	$s   = xrv_get_settings();
 	$key = (string) get_option( 'xrv_yt_api_key', '' );
@@ -2564,7 +2580,9 @@ function xrv_sync_perform() {
 
 			xrv_apply_youtube_meta( $pid, $id, $mv );
 
-			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube' );
+			$short = xrv_yt_is_short( $id );
+			if ( $short ) { update_post_meta( $pid, '_xrv_short', '1' ); }
+			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube', $short ? xrv_thumb_candidates( $id, 'youtube', true ) : null );
 			if ( ! is_wp_error( $att ) ) { update_post_meta( $pid, '_xrv_local_thumb_id', (int) $att ); set_post_thumbnail( $pid, (int) $att ); }
 
 			$added++; $titles[] = $title;
@@ -2668,11 +2686,11 @@ function xrv_render_settings_page() {
 		<p style="max-width:780px;color:#50575e">Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.</p>
 		<style>
 		/* Crossroad Media brand palette (admin chrome only; the front-end gallery stays per-tenant). */
-		.xrv-settings{--xr-purple:#342669;--xr-deep:#2A1F4F;--xr-blue:#6873B7;--xr-light:#E8E3F3;--xr-charcoal:#414042;--xr-warm:#F7F7F7;--xr-line:#e6e3ef}
+		.xrv-settings{--xr-purple:#342669;--xr-deep:#2A1F4F;--xr-blue:#6873B7;--xr-light:#E8E3F3;--xr-charcoal:#414042;--xr-warm:#F7F7F7;--xr-line:#e6e3ef;font-family:'DM Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
 		.xrv-settings h1{color:var(--xr-deep);font-weight:600;letter-spacing:-.01em}
 		.xrv-settings .form-table th{width:210px;color:var(--xr-charcoal)}
 		.xrv-settings .xrv-card{position:relative;background:#fff;border:1px solid var(--xr-line);border-radius:16px;margin:18px 0;box-shadow:0 1px 2px rgba(42,31,79,.05),0 10px 26px -14px rgba(42,31,79,.18)}
-		.xrv-settings .xrv-card::before{content:"";position:absolute;left:14px;top:16px;bottom:16px;width:16px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 100' preserveAspectRatio='none'%3E%3Cpath d='M14 1C10 1 9 3 9 8L9 42C9 47 8 50 3 50C8 50 9 53 9 58L9 92C9 97 10 99 14 99' fill='none' stroke='%23342669' stroke-width='2'/%3E%3C/svg%3E") no-repeat;background-size:16px 100%}
+		.xrv-settings .xrv-card::before{content:"";position:absolute;left:12px;top:0;bottom:0;width:26px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 120'%3E%3Cpath d='M18 3C13 3 13 7 13 12L13 50C13 56 12 60 6 60C12 60 13 64 13 70L13 108C13 113 13 117 18 117' fill='none' stroke='%23342669' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat left center;background-size:contain}
 		.xrv-settings .xrv-card>*{margin:0;padding-left:44px;padding-right:26px}
 		.xrv-settings .xrv-card>h2.title{padding-top:16px;padding-bottom:12px;border:0;border-bottom:1px solid var(--xr-light);border-radius:0;background:transparent;font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--xr-deep);scroll-margin-top:60px}
 		.xrv-settings .xrv-card>.form-table{padding-top:8px;padding-bottom:14px;border:0;background:transparent}
@@ -3264,8 +3282,10 @@ function xrv_ajax_import_run() {
 			if ( $term_ids ) { wp_set_object_terms( $pid, $term_ids, $tax, false ); }
 		}
 
+		$short = xrv_yt_is_short( $id );
+		if ( $short ) { update_post_meta( $pid, '_xrv_short', '1' ); }
 		if ( ! (int) get_post_meta( $pid, '_xrv_local_thumb_id', true ) ) {
-			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube' );
+			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube', $short ? xrv_thumb_candidates( $id, 'youtube', true ) : null );
 			if ( ! is_wp_error( $att ) ) { update_post_meta( $pid, '_xrv_local_thumb_id', (int) $att ); set_post_thumbnail( $pid, (int) $att ); }
 		}
 		$results[] = array( 'id' => $id, 'status' => $status );

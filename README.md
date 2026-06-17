@@ -151,6 +151,17 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.0.1a
+
+Finishes the Shorts story end-to-end and refines the admin UI. No new dependencies; the only front-end weight added is the swipe-shelf CSS.
+
+- **Admin brand accent fixed.** The card `{` accent is now uniformly scaled and vertically centered (`background-size:contain`) instead of stretched to full card height — stretching a stroked brace distorted it into a thin wobbly line.
+
+- **Synced/imported Shorts are auto-flagged.** The channel sync and the bulk importer now detect a Short for each *new* video (a one-time HEAD probe of the canonical `/shorts/` URL — the Data API exposes no aspect ratio) and store the flag, so Shorts pulled in automatically render vertical with a portrait poster instead of needing a manual `/shorts/` paste or re-save.
+- **Swipe shelf for `shorts="only"`.** A verticals-only gallery now lays out as a horizontal, thumb-swipeable scroll-snap strip (the familiar Shorts shelf) rather than a grid of tall cards. Pure CSS, scoped to that one layout.
+- **Block-editor Shorts control.** The Crossroad Videos block gains a *YouTube Shorts* selector (Site default / Show alongside / Only / Hide) in its Browse panel, mirroring the shortcode `shorts` attribute. Blank inherits the Settings default (the render now falls back to the site default rather than forcing `all`).
+- **DM Sans on the admin chrome.** The Settings UI now prefers DM Sans where it's present on the system, falling back to the native UI sans stack. Deliberately **not** bundled: Google Sans (the brand display face) is proprietary and not licensed for self-hosting, and shipping font binaries would contradict the plugin's zero-dependency, no-third-party-request posture. The palette and logo already carry the brand; this adds the typeface for anyone who has it at zero cost.
+
 ### 2.1.0
 
 Closes the gaps raised in a video-infrastructure review. All four additions reuse existing rendering; no new dependencies, front-end payload effectively unchanged.
