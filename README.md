@@ -151,6 +151,25 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.2.0
+
+Admin UX cleanup from a full review. No front-end behavior change; admin code got smaller, not bigger.
+
+- **Settings consolidated.** The separate *Default poster*, *Play button*, and *Shorts* cards are now one **Appearance** card (one nav pill instead of three).
+- **Consent copy de-scared.** "No Consent Integration" is now "Facade only (no prompt)," and the card leads with "all three modes are cookie-free until the click" so the safe option no longer reads as unsafe. The geo-source diagnostic is hidden unless the *Global* mode is selected (it is irrelevant otherwise).
+- **Block trimmed.** The block Inspector no longer duplicates site policy/look — filter style, card text, consent mode, and privacy URL now simply inherit the site defaults; the block keeps the genuinely per-instance controls (layout, columns, playback, heading, shorts, per-page, load-more, subscribe, pre-filter terms).
+- **Shortcode footgun fixed.** Using the singular `[xroad-video]` without a valid `id` now shows editors a visible hint pointing to the correct usage (and to the plural `[xroad-videos]` for galleries), instead of failing silently.
+- **Dead code removed.** Deleted the unreachable `light` consent mode and the vestigial write-once `locked` flag.
+- **URL safety upgraded.** Settings → *Video URLs* now shows how many published videos use the current base, warns prominently when any are live, and rewrite rules auto-flush on version change so a changed base resolves without a manual re-save. Menu label is now "XRV Video" for clarity.
+
+### 2.1.2
+
+Rebrands the product to **XRV (Xroad Video)** and makes the URL base editable. Admin-facing only; no breaking changes.
+
+- **Rebrand to XRV.** The admin menu, Settings title, plugin name, and block are now **XRV** (the maker, Crossroad Media, stays as author/logo). Internal identifiers are deliberately unchanged — the post type (`xroad_video`), shortcodes (`[xroad-videos]`, `[xroad-video]`), block name (`xroad/videos`), option keys, and text domain stay the same, so existing content, embeds, and URLs keep working.
+- **Default URL base is now `/video/`** (was `/xroad-video/`) for a cleaner single-video path. Fresh installs pick this up automatically.
+- **The video URL base is now editable** in Settings → *Video URLs*, rather than write-once. Each change is gated behind a confirmation box, an inline warning, and a **two-part test**: before changing a base that is already live, check (1) organic/search traffic to that path and (2) inbound or internal links to it. **If either exists, it is a showstopper** — don't change the base without a full 301-redirect migration first. (Also avoid a base that collides with an existing page slug.)
+
 ### 2.1.1
 
 Finishes the Shorts story end-to-end, refines the admin UI, and bounds bulk imports. No new dependencies; the only front-end weight added is the swipe-shelf CSS.

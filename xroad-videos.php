@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name:       Crossroad Videos
+ * Plugin Name:       XRV (Xroad Video)
  * Plugin URI:        https://crossroad.us
  * Description:        Privacy-first, click-to-load video gallery. A curated custom-post-type model
  *                     (editors add and order each video) that renders a server-side masonry grid of
@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.1.1
+ * Version:           2.2.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -65,13 +65,13 @@ if ( ! defined( 'ABSPATH' ) ) {
  *    only needs to feed the gallery rather than expose its own archive.
  * ================================================================================================= */
 
-/* Video URL structure (write-once). single = single-post base; archive = optional collection/archive
- * base (empty = no archive). Defaults preserve the historical /xroad-video/ base, so existing installs
- * are unchanged until an admin deliberately locks a structure — irreversible, since live URLs depend on it. */
+/* Video URL structure. single = single-post base (default "video" => /video/{slug}); archive = optional
+ * collection/archive base (empty = no archive). Editable in Settings, but changing a base that is already
+ * live is an SEO risk (see the in-UI warning + two-part test), so the form gates each change behind a
+ * confirmation checkbox. */
 function xrv_permalinks() {
 	return wp_parse_args( (array) get_option( 'xrv_permalinks', array() ), array(
-		'locked'  => false,
-		'single'  => 'xroad-video',
+		'single'  => 'video',
 		'archive' => '',
 	) );
 }
@@ -92,7 +92,7 @@ function xrv_register_data_model() {
 			'not_found'          => 'No videos found',
 			'not_found_in_trash' => 'No videos found in Trash',
 			'all_items'          => 'All Videos',
-			'menu_name'          => 'Crossroad Videos',
+			'menu_name'          => 'XRV Video',
 		),
 		'public'        => true,
 		'has_archive'   => ( '' !== $pl['archive'] ) ? $pl['archive'] : false, // optional collection archive (admin-selected, write-once)
@@ -174,27 +174,41 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.1.1' );
+	update_option( 'xrv_version', '2.2.0' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
 
-/* Write-once permalink lock. Sets the video URL structure and flushes rewrite rules ONCE; repeat attempts
- * are ignored so a live URL structure can't be silently changed out from under existing links/SEO. */
+/* On a plugin UPDATE (a fresh activation already flushes), re-flush rewrite rules once when the stored
+ * version changes, so a changed default base (e.g. /video/) starts resolving without a manual re-save. */
+add_action( 'admin_init', 'xrv_maybe_flush_on_update' );
+function xrv_maybe_flush_on_update() {
+	if ( get_option( 'xrv_version' ) !== '2.2.0' ) {
+		xrv_register_data_model();
+		flush_rewrite_rules();
+		update_option( 'xrv_version', '2.2.0' );
+	}
+}
+
+/* Set the video URL structure and flush rewrite rules. Editable, but each change is gated behind a
+ * confirmation box in Settings (the editor must run the two-part test) since live URLs depend on it. */
 add_action( 'admin_post_xrv_lock_urls', 'xrv_lock_urls_handler' );
 function xrv_lock_urls_handler() {
 	if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'forbidden' ); }
 	check_admin_referer( 'xrv_lock_urls' );
-	$pl = xrv_permalinks();
-	if ( empty( $pl['locked'] ) && ! empty( $_POST['xrv_confirm'] ) ) {
+	// Changeable, but every change is gated behind the confirmation box (the editor must have run the
+	// two-part test in the UI). On confirm we re-register the CPT with the new base and flush rewrite rules.
+	$saved = false;
+	if ( ! empty( $_POST['xrv_confirm'] ) ) {
 		$single  = isset( $_POST['xrv_single'] ) ? sanitize_title( wp_unslash( $_POST['xrv_single'] ) ) : '';
 		$archive = isset( $_POST['xrv_archive'] ) ? sanitize_title( wp_unslash( $_POST['xrv_archive'] ) ) : '';
-		if ( '' === $single ) { $single = 'xroad-video'; }
-		update_option( 'xrv_permalinks', array( 'locked' => true, 'single' => $single, 'archive' => $archive ) );
+		if ( '' === $single ) { $single = 'video'; }
+		update_option( 'xrv_permalinks', array( 'single' => $single, 'archive' => $archive ) );
 		xrv_register_data_model();   // re-register the CPT with the new base, then flush so the new rules are written now
 		flush_rewrite_rules();
+		$saved = true;
 	}
-	wp_safe_redirect( add_query_arg( 'xrv_urls', '1', admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) );
+	wp_safe_redirect( add_query_arg( 'xrv_urls', $saved ? '1' : '0', admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) );
 	exit;
 }
 
@@ -644,7 +658,7 @@ function xrv_render( $atts = array() ) {
 		'load_more' => $s['load_more'],   // how many more cards each "Load more" click reveals
 		'subscribe_url'   => $s['subscribe_url'],   // YouTube channel URL; when set, a "Subscribe" button shows under the grid
 		'subscribe_label' => $s['subscribe_label'],
-		'consent_notice'  => $s['consent_notice'],  // off | light | strict | geo  — informed-consent UI at the facade
+		'consent_notice'  => $s['consent_notice'],  // off | strict | geo  — informed-consent UI at the facade
 		'consent_text'    => $s['consent_text'],
 		'consent_button'  => $s['consent_button'],
 		'consent_decline' => $s['consent_decline'], // label for the decline/dismiss control on the prompt
@@ -657,7 +671,7 @@ function xrv_render( $atts = array() ) {
 	$controls = ! in_array( strtolower( (string) $atts['controls'] ), array( 'false', '0', 'no', 'off' ), true );
 	$filter_ui = ( 'chips' === strtolower( (string) $atts['filter_ui'] ) ) ? 'chips' : 'select';
 	$cn = strtolower( (string) $atts['consent_notice'] );
-	$consent_notice = in_array( $cn, array( 'light', 'strict', 'geo' ), true ) ? $cn : 'off';
+	$consent_notice = in_array( $cn, array( 'strict', 'geo' ), true ) ? $cn : 'off';
 	$card_meta = in_array( strtolower( (string) $atts['card_meta'] ), array( 'full', 'compact', 'title' ), true ) ? strtolower( (string) $atts['card_meta'] ) : 'full';
 	$privacy_url = '' !== $atts['privacy_url'] ? esc_url( $atts['privacy_url'] ) : esc_url( (string) get_privacy_policy_url() );
 	$per_page  = max( 1, (int) $atts['per_page'] );
@@ -1579,7 +1593,7 @@ function xrv_inline_js() {
 
 		var playbackMode = ROOT.getAttribute('data-playback') || 'lightbox';
 
-		// ---- Informed-consent notice (consent_notice = off | light | strict | geo) ----
+		// ---- Informed-consent notice (consent_notice = off | strict | geo) ----
 		// The facade still makes ZERO third-party requests until a click. This only governs whether an
 		// informed notice precedes that click, and (for geo) whether it shows based on the visitor's region.
 		var consentMode = ROOT.getAttribute('data-consent') || 'off';
@@ -1588,7 +1602,7 @@ function xrv_inline_js() {
 		var consentDeclineLabel = ROOT.getAttribute('data-consent-decline') || 'No thanks';
 		var privacyUrl = ROOT.getAttribute('data-privacy') || '';
 		function consentRequiredNow(){
-			if(consentMode === 'off' || consentMode === 'light') return false;
+			if(consentMode === 'off') return false;
 			if(consentMode === 'strict') return true;
 			return ROOT.dataset.consentRequired !== '0'; // geo: unknown/'1' => required (fail-safe)
 		}
@@ -1604,15 +1618,6 @@ function xrv_inline_js() {
 					ROOT.dataset.consentRequired = v;
 				}).catch(function(){});
 			}
-		}
-		if(consentMode === 'light' && consentText){
-			Array.prototype.forEach.call(ROOT.querySelectorAll('.xrv-card'), function(card){
-				if(card.querySelector('.xrv-consent-note')) return;
-				var cap = card.querySelector('.xrv-cap') || card;
-				var p = document.createElement('p'); p.className = 'xrv-consent-note'; p.textContent = consentText + ' ';
-				if(privacyUrl){ var a = document.createElement('a'); a.href = privacyUrl; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Privacy'; p.appendChild(a); }
-				cap.appendChild(p);
-			});
 		}
 		function closeOverlay(card){ var ov = card.querySelector('.xrv-consent'); if(ov && ov.parentNode){ ov.parentNode.removeChild(ov); } }
 		function showConsentOverlay(card){
@@ -1815,7 +1820,10 @@ function xrv_shortcode_single( $atts ) {
 	$id = (int) $a['id'];
 	if ( 'xroad_video' !== get_post_type( $id ) || 'publish' !== get_post_status( $id ) ) {
 		// ponytail: id only. video="https://..." URL resolve is the upgrade path if editors prefer pasting links.
-		return current_user_can( 'edit_posts' ) ? '<!-- xroad-video: no published video #' . $id . ' -->' : '';
+		// Visible hint for editors (not visitors): the singular tag is easy to confuse with the gallery [xroad-videos].
+		return current_user_can( 'edit_posts' )
+			? '<span style="display:inline-block;padding:8px 12px;border:1px dashed #f3d199;background:#fff8ef;border-radius:6px;font-size:13px;color:#7a4f00"><code>[xroad-video]</code> needs a published video <code>id</code>, e.g. <code>[xroad-video id="123"]</code>. For a gallery of videos, use <code>[xroad-videos]</code> (plural).</span>'
+			: '';
 	}
 	return xrv_render_single( $id, $a['playback'] ); // playback="lightbox" pops a modal (Divi-style); default plays in place
 }
@@ -1827,7 +1835,7 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.1.1', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.2.0', true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
@@ -1852,7 +1860,7 @@ function xrv_block_editor_js() {
 	var PanelBody = components.PanelBody, SelectControl = components.SelectControl, TextControl = components.TextControl, RangeControl = components.RangeControl, ToggleControl = components.ToggleControl;
 	blocks.registerBlockType('xroad/videos', {
 		apiVersion: 2,
-		title: 'Crossroad Videos',
+		title: 'XRV Video',
 		description: 'Privacy-first YouTube gallery (click-to-load facade).',
 		icon: 'video-alt3',
 		category: 'media',
@@ -1866,7 +1874,7 @@ function xrv_block_editor_js() {
 				el(InspectorControls, {},
 					el(PanelBody, { title:'Layout', initialOpen:true },
 						el(SelectControl, { label:'Layout', value:a.layout||'grid', options:[
-							{label:'Grid', value:'grid'}, {label:'Library (featured + grid)', value:'library'}, {label:'Carousel', value:'carousel'} ], onChange:f('layout') }),
+							{label:'Grid', value:'grid'}, {label:'Library (featured + grid)', value:'library'}, {label:'Carousel (featured row)', value:'carousel'} ], onChange:f('layout') }),
 						el(SelectControl, { label:'Playback', value:a.playback||'lightbox', options:[
 							{label:'Lightbox (pop-out)', value:'lightbox'}, {label:'Inline', value:'inline'} ], onChange:f('playback') }),
 						el(TextControl, { label:'Fixed columns (blank = responsive)', value:a.columns||'', onChange:f('columns') }),
@@ -1874,20 +1882,12 @@ function xrv_block_editor_js() {
 						el(ToggleControl, { label:'Show search / sort / filter bar', checked:controlsOn, onChange:function(v){ set({controls: v?'true':'false'}); } })
 					),
 					el(PanelBody, { title:'Browse', initialOpen:false },
-						el(SelectControl, { label:'Filter style (blank = site default)', value:a.filter_ui||'', options:[
-							{label:'Site default', value:''}, {label:'Dropdown selects', value:'select'}, {label:'Clickable chips', value:'chips'} ], onChange:f('filter_ui') }),
-						el(SelectControl, { label:'Card text (blank = site default)', value:a.card_meta||'', options:[
-							{label:'Site default', value:''}, {label:'Full (title + desc + tags)', value:'full'}, {label:'Compact (title + desc)', value:'compact'}, {label:'Title only', value:'title'} ], onChange:f('card_meta') }),
 						el(SelectControl, { label:'YouTube Shorts (blank = site default)', value:a.shorts||'', options:[
 							{label:'Site default', value:''}, {label:'Show alongside regular', value:'all'}, {label:'Only Shorts (swipe shelf)', value:'only'}, {label:'Hide Shorts', value:'hide'} ], onChange:f('shorts') }),
 						el(RangeControl, { label:'Show before “Load more” (0 = site default)', min:0, max:60, value: parseInt(a.per_page,10)||0, onChange:num('per_page') }),
 						el(RangeControl, { label:'“Load more” step (0 = site default)', min:0, max:24, value: parseInt(a.load_more,10)||0, onChange:num('load_more') }),
-						el(TextControl, { label:'Subscribe URL', value:a.subscribe_url||'', onChange:f('subscribe_url') })
-					),
-					el(PanelBody, { title:'Privacy & consent', initialOpen:false },
-						el(SelectControl, { label:'Consent mode (blank = site default)', value:a.consent_notice||'', options:[
-							{label:'Site default', value:''}, {label:'Global (GDPR + CCPA)', value:'geo'}, {label:'Strict GDPR (every visitor)', value:'strict'}, {label:'No consent integration', value:'off'} ], onChange:f('consent_notice') }),
-						el(TextControl, { label:'Privacy URL (blank = site default)', value:a.privacy_url||'', onChange:f('privacy_url') })
+						el(TextControl, { label:'Subscribe URL', value:a.subscribe_url||'', onChange:f('subscribe_url') }),
+						el('p', { style:{ fontSize:'11px', color:'#787c82', margin:'4px 0 0' } }, 'Look, consent, and privacy follow the site defaults in XRV → Settings.')
 					),
 					el(PanelBody, { title:'Pre-filter to terms (optional)', initialOpen:false },
 						el(TextControl, { label:'Series slugs (comma-separated)', value:a.series||'', onChange:f('series') }),
@@ -1897,9 +1897,9 @@ function xrv_block_editor_js() {
 				),
 				el('div', useBlockProps ? useBlockProps() : {},
 					el('div', { style:{ border:'1px dashed var(--xrv-border,#c4ccd6)', borderRadius:'6px', padding:'18px', textAlign:'center', color:'#50575e', background:'#f6f7f7' } },
-						el('strong', { style:{ color:'var(--xrv-primary,#013C60)' } }, '▶ Crossroad Videos'),
+						el('strong', { style:{ color:'var(--xrv-primary,#013C60)' } }, '▶ XRV'),
 						el('div', { style:{ fontSize:'12px', marginTop:'5px' } },
-							(a.layout||'grid') + ' · ' + (a.consent_notice ? ('consent: '+a.consent_notice) : 'consent: site default') + ' · ' + (controlsOn ? 'controls on' : 'controls off')),
+							(a.layout||'grid') + ' · ' + (controlsOn ? 'controls on' : 'controls off') + (a.shorts ? (' · shorts: '+a.shorts) : '')),
 						el('div', { style:{ fontSize:'11px', marginTop:'3px', color:'#787c82' } }, 'Rendered live on the front end.')
 					)
 				)
@@ -2270,7 +2270,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 
 	if ( $is_edit ) {
 		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.1.1', true );
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.2.0', true );
 		wp_enqueue_script( 'xrv-admin' );
 		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
@@ -2395,7 +2395,7 @@ JS;
 
 /* =================================================================================================
  * 9c. BULK IMPORTER  (native, zero-dependency — paste URLs / a file / a channel or playlist)
- *     A first-class admin tool under "Crossroad Videos > Import". Two tiers:
+ *     A first-class admin tool under "XRV > Import". Two tiers:
  *       Tier 1 (no setup): paste/upload YouTube video URLs. Title via oEmbed, thumbnail sideloaded.
  *       Tier 2 (optional free YouTube Data API key): pull an entire channel or playlist by URL AND
  *               fill rich metadata (duration, upload date, description) for full VideoObject schema.
@@ -2444,7 +2444,7 @@ function xrv_get_settings() {
 function xrv_sanitize_settings( $in ) {
 	$d = xrv_settings_defaults(); $in = (array) $in; $out = array();
 	$cn = isset( $in['consent_notice'] ) ? strtolower( $in['consent_notice'] ) : 'off';
-	$out['consent_notice']  = in_array( $cn, array( 'off', 'light', 'strict', 'geo' ), true ) ? $cn : 'off';
+	$out['consent_notice']  = in_array( $cn, array( 'off', 'strict', 'geo' ), true ) ? $cn : 'off';
 	$out['consent_text']    = isset( $in['consent_text'] ) ? sanitize_text_field( $in['consent_text'] ) : $d['consent_text'];
 	$out['consent_button']  = isset( $in['consent_button'] ) ? sanitize_text_field( $in['consent_button'] ) : $d['consent_button'];
 	$out['consent_decline'] = isset( $in['consent_decline'] ) ? sanitize_text_field( $in['consent_decline'] ) : $d['consent_decline'];
@@ -2482,7 +2482,7 @@ function xrv_register_settings() {
 }
 add_action( 'admin_menu', 'xrv_register_settings_page' );
 function xrv_register_settings_page() {
-	$GLOBALS['xrv_settings_hook'] = add_submenu_page( 'edit.php?post_type=xroad_video', 'Crossroad Videos Settings', 'Settings', 'manage_options', 'xrv-settings', 'xrv_render_settings_page' );
+	$GLOBALS['xrv_settings_hook'] = add_submenu_page( 'edit.php?post_type=xroad_video', 'XRV Settings', 'Settings', 'manage_options', 'xrv-settings', 'xrv_render_settings_page' );
 }
 
 /* =================================================================================================
@@ -2682,7 +2682,7 @@ function xrv_render_settings_page() {
 	$wp_priv = get_privacy_policy_url();
 	?>
 	<div class="wrap xrv-settings">
-		<h1 style="display:flex;align-items:center;gap:14px;font-weight:600;margin-bottom:2px"><?php echo xrv_brand_logo( 30 ); ?> <span style="color:var(--xr-deep)">Videos <span style="color:var(--xr-blue);font-weight:500">— Settings</span></span></h1>
+		<h1 style="display:flex;align-items:center;gap:14px;font-weight:600;margin-bottom:2px"><?php echo xrv_brand_logo( 30 ); ?> <span style="color:var(--xr-deep)">XRV <span style="color:var(--xr-blue);font-weight:500">Settings</span></span></h1>
 		<p style="max-width:780px;color:#50575e">Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.</p>
 		<style>
 		/* Crossroad Media brand palette (admin chrome only; the front-end gallery stays per-tenant). */
@@ -2692,6 +2692,9 @@ function xrv_render_settings_page() {
 		.xrv-settings .xrv-card{position:relative;background:#fff;border:1px solid var(--xr-line);border-radius:16px;margin:18px 0;box-shadow:0 1px 2px rgba(42,31,79,.05),0 10px 26px -14px rgba(42,31,79,.18)}
 		.xrv-settings .xrv-card::before{content:"";position:absolute;left:12px;top:0;bottom:0;width:26px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 120'%3E%3Cpath d='M18 3C13 3 13 7 13 12L13 50C13 56 12 60 6 60C12 60 13 64 13 70L13 108C13 113 13 117 18 117' fill='none' stroke='%23342669' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat left center;background-size:contain}
 		.xrv-settings .xrv-card>*{margin:0;padding-left:44px;padding-right:26px}
+		.xrv-settings .xrv-card>.xrv-warn{margin:14px 26px 6px 44px;padding:13px 16px;background:#fff8ef;border:1px solid #f3d199;border-left:4px solid #F7941D;border-radius:10px;font-size:13px;line-height:1.5;color:#5a4a2a}
+		.xrv-settings .xrv-warn code{background:#fdeccc;color:#7a4f00}
+		.xrv-settings .xrv-warn ol{padding-left:0}
 		.xrv-settings .xrv-card>h2.title{padding-top:16px;padding-bottom:12px;border:0;border-bottom:1px solid var(--xr-light);border-radius:0;background:transparent;font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--xr-deep);scroll-margin-top:60px}
 		.xrv-settings .xrv-card>.form-table{padding-top:8px;padding-bottom:14px;border:0;background:transparent}
 		.xrv-settings .xrv-card>p,.xrv-settings .xrv-card>form{padding-top:6px;padding-bottom:14px}
@@ -2712,9 +2715,7 @@ function xrv_render_settings_page() {
 			<a href="#xrv-sec-privacy">Privacy &amp; consent</a>
 			<a href="#xrv-sec-browse">Browse</a>
 			<a href="#xrv-sec-api">API key</a>
-			<a href="#xrv-sec-poster">Default poster</a>
-			<a href="#xrv-sec-color">Play button</a>
-				<a href="#xrv-sec-shorts">Shorts</a>
+			<a href="#xrv-sec-appearance">Appearance</a>
 			<a href="#xrv-sec-sync">Auto-sync</a>
 				<a href="#xrv-sec-urls">URLs</a>
 		</nav>
@@ -2723,6 +2724,7 @@ function xrv_render_settings_page() {
 
 			<div class="xrv-card"><h2 class="title" id="xrv-sec-privacy">Privacy &amp; consent</h2>
 			<table class="form-table" role="presentation">
+				<?php if ( 'geo' === $s['consent_notice'] ) : // region diagnostic is only relevant in Global mode ?>
 				<tr>
 					<th scope="row">Geo source</th>
 					<td>
@@ -2745,16 +2747,17 @@ function xrv_render_settings_page() {
 						<p class="description"><a href="<?php echo esc_url( rest_url( 'xrv/v1/region' ) ); ?>" target="_blank" rel="noopener">Test the live region endpoint &rarr;</a></p>
 					</td>
 				</tr>
+				<?php endif; ?>
 				<tr>
 					<th scope="row"><label for="xrv-consent">Consent mode</label></th>
 					<td>
 						<select id="xrv-consent" name="xrv_settings[consent_notice]">
 							<option value="geo"    <?php selected( $s['consent_notice'], 'geo' ); ?>>Global (respects regional privacy laws including GDPR and CCPA) - recommended</option>
 							<option value="strict" <?php selected( $s['consent_notice'], 'strict' ); ?>>Strict GDPR (opt-in prompt for every visitor)</option>
-							<option value="off"    <?php selected( $s['consent_notice'], 'off' ); ?>>No Consent Integration</option>
+							<option value="off"    <?php selected( $s['consent_notice'], 'off' ); ?>>Facade only (no prompt)</option>
 						</select>
 						<p class="description" style="max-width:760px">
-							Every mode uses the click-to-load facade: the player makes no request, cookie, or connection to YouTube until a visitor clicks play. These options set the consent layer on top of that.
+							<strong>All three modes are cookie-free until the click</strong> &mdash; the player makes no request, cookie, or connection to YouTube until a visitor presses play. This setting only adds an extra consent prompt on top of that, so &ldquo;Facade only&rdquo; is still privacy-safe; it just skips the prompt.
 						</p>
 						<details class="xrv-help">
 							<summary>How the modes differ (GDPR / CCPA)</summary>
@@ -2841,7 +2844,7 @@ function xrv_render_settings_page() {
 			</table>
 
 			</div>
-				<div class="xrv-card"><h2 class="title" id="xrv-sec-poster">Default poster image</h2>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-appearance">Appearance</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">Default poster</th>
@@ -2859,13 +2862,8 @@ function xrv_render_settings_page() {
 						</div>
 					</td>
 				</tr>
-			</table>
-
-			</div>
-				<div class="xrv-card"><h2 class="title" id="xrv-sec-color">Play button color</h2>
-			<table class="form-table" role="presentation">
 				<tr>
-					<th scope="row">Brand color combo</th>
+					<th scope="row">Play button color</th>
 					<td>
 						<?php
 						$icon_on = ( '' !== $s['icon_color'] || '' !== $s['icon_hover'] );
@@ -2878,12 +2876,7 @@ function xrv_render_settings_page() {
 						<p class="description">Colors the click-to-load play button (the YouTube icon) for its idle and hover states. Leave the box unticked to inherit your theme's brand colors (defaults: navy <code>#013C60</code> / green <code>#007A53</code>). The white play triangle is unchanged. Applies to every gallery and single embed on the site.</p>
 					</td>
 				</tr>
-			</table>
-
-			</div>
-				<div class="xrv-card"><h2 class="title" id="xrv-sec-shorts">Shorts</h2>
-					<table class="form-table" role="presentation">
-						<tr>
+				<tr>
 							<th scope="row"><label for="xrv-shorts">Shorts in galleries</label></th>
 							<td>
 								<select id="xrv-shorts" name="xrv_settings[shorts_default]">
@@ -2943,40 +2936,48 @@ function xrv_render_settings_page() {
 		// Video URLs — write-once permalink structure (its own form; not a Settings-API save).
 		$pl = xrv_permalinks();
 		if ( isset( $_GET['xrv_urls'] ) ) {
-			echo $pl['locked']
-				? '<div class="notice notice-success is-dismissible"><p>Video URL structure locked in &mdash; rewrite rules flushed.</p></div>'
-				: '<div class="notice notice-warning is-dismissible"><p>Tick the confirmation box to set the URL structure.</p></div>';
+			echo ( '1' === $_GET['xrv_urls'] )
+				? '<div class="notice notice-success is-dismissible"><p>Video URLs saved. Rewrite rules flushed.</p></div>'
+				: '<div class="notice notice-warning is-dismissible"><p>Nothing changed. Tick the confirmation box to apply a new URL structure.</p></div>';
 		}
 		?>
 		<div class="xrv-card">
 			<h2 class="title" id="xrv-sec-urls">Video URLs</h2>
-			<?php if ( $pl['locked'] ) : ?>
-				<p><span style="color:#007a53;font-weight:600">&#128274; Locked.</span> Single video: <code><?php echo esc_html( '/' . $pl['single'] . '/{slug}' ); ?></code><?php if ( '' !== $pl['archive'] ) { echo ' &nbsp;&middot;&nbsp; Collection: <code>' . esc_html( '/' . $pl['archive'] . '/' ) . '</code>'; } ?></p>
-				<p class="description">The video URL structure is permanent, so existing links and SEO stay intact. Changing it later means a deliberate URL migration (with redirects).</p>
-			<?php else : ?>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-					<input type="hidden" name="action" value="xrv_lock_urls">
-					<?php wp_nonce_field( 'xrv_lock_urls' ); ?>
-					<p class="description" style="margin:.5em 0 0">Choose the URL structure for your videos. <strong>This is set once and cannot be changed later</strong> (live links depend on it), so decide deliberately.</p>
-					<table class="form-table" role="presentation">
-						<tr>
-							<th scope="row"><label for="xrv-single">Single video base</label></th>
-							<td><code>/</code> <input type="text" id="xrv-single" name="xrv_single" value="<?php echo esc_attr( $pl['single'] ); ?>" style="width:200px"> <code>/{slug}</code>
-							<p class="description">A single video's own page. e.g. <code>video</code> &rarr; <code>/video/my-clip/</code>.</p></td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="xrv-archive">Collection base</label></th>
-							<td><code>/</code> <input type="text" id="xrv-archive" name="xrv_archive" value="<?php echo esc_attr( $pl['archive'] ); ?>" style="width:200px" placeholder="(none)"> <code>/</code>
-							<p class="description">Optional archive listing every video. e.g. <code>videos</code> &rarr; <code>/videos/</code>. Blank = videos via shortcode/block only.</p></td>
-						</tr>
-						<tr>
-							<th scope="row">Confirm</th>
-							<td><label><input type="checkbox" name="xrv_confirm" value="1"> I understand this sets the video URL structure <strong>permanently</strong> &mdash; it cannot be changed later without breaking existing links.</label></td>
-						</tr>
-					</table>
-					<p><?php submit_button( 'Set permanent URLs', 'primary', 'submit', false ); ?></p>
-				</form>
-			<?php endif; ?>
+			<?php $pub_count = (int) wp_count_posts( 'xroad_video' )->publish; ?>
+			<p style="margin:.2em 0 0">Active now: <code><?php echo esc_html( '/' . $pl['single'] . '/{slug}' ); ?></code><?php if ( '' !== $pl['archive'] ) { echo ' &nbsp;&middot;&nbsp; Collection <code>' . esc_html( '/' . $pl['archive'] . '/' ) . '</code>'; } ?> &nbsp;&middot;&nbsp; <strong><?php echo (int) $pub_count; ?></strong> published video<?php echo 1 === $pub_count ? '' : 's'; ?> using it.</p>
+
+			<div class="xrv-warn">
+				<?php if ( $pub_count > 0 ) : ?><p style="margin:0 0 .5em"><strong>&#9888; <?php echo (int) $pub_count; ?> published video URL<?php echo 1 === $pub_count ? ' is' : 's are'; ?> already live under <code><?php echo esc_html( '/' . $pl['single'] . '/' ); ?></code>.</strong> Run the two-part test below before you change the base.</p><?php endif; ?>
+				<p style="margin:0 0 .5em"><strong>Changing a URL that is already live is a one-way SEO risk.</strong> The default <code>/video/</code> is safe for a fresh setup. Once a video URL has been published, changing its base breaks every existing link to it and can drop its search rankings. (Also pick a base that is not already a page slug on this site, or they will collide.)</p>
+				<p style="margin:0 0 .35em"><strong>Run this two-part test before changing a base that is in use. If EITHER is true, do not change it. It is a showstopper:</strong></p>
+				<ol style="margin:0 0 .5em 1.4em">
+					<li><strong>Organic traffic.</strong> Is any URL under this base getting search or organic visits? Check Search Console or analytics, filtered to the path.</li>
+					<li><strong>Inbound links.</strong> Does any external site, or an internal link, point to a URL under this base? Check your backlink tool, or a site search for the path.</li>
+				</ol>
+				<p style="margin:0">If both come back clean, changing is low-risk. If not, treat it as a migration: put 301 redirects from every old URL to the new one in place first, then change the base here.</p>
+			</div>
+
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<input type="hidden" name="action" value="xrv_lock_urls">
+				<?php wp_nonce_field( 'xrv_lock_urls' ); ?>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="xrv-single">Single video base</label></th>
+						<td><code>/</code> <input type="text" id="xrv-single" name="xrv_single" value="<?php echo esc_attr( $pl['single'] ); ?>" style="width:200px"> <code>/{slug}</code>
+						<p class="description">A single video's own page. e.g. <code>video</code> &rarr; <code>/video/my-clip/</code>.</p></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="xrv-archive">Collection base</label></th>
+						<td><code>/</code> <input type="text" id="xrv-archive" name="xrv_archive" value="<?php echo esc_attr( $pl['archive'] ); ?>" style="width:200px" placeholder="(none)"> <code>/</code>
+						<p class="description">Optional archive listing every video. e.g. <code>videos</code> &rarr; <code>/videos/</code>. Blank = videos via shortcode/block only.</p></td>
+					</tr>
+					<tr>
+						<th scope="row">Confirm</th>
+						<td><label><input type="checkbox" name="xrv_confirm" value="1"> I have run the two-part test (organic traffic + inbound links) for any base already in use, or this is a fresh setup with no published video URLs yet.</label></td>
+					</tr>
+				</table>
+				<p><?php submit_button( 'Save video URLs', 'primary', 'submit', false ); ?></p>
+			</form>
 		</div>
 
 		<?php
