@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.0.1.beta
+ * Version:           2.1.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -65,8 +65,20 @@ if ( ! defined( 'ABSPATH' ) ) {
  *    only needs to feed the gallery rather than expose its own archive.
  * ================================================================================================= */
 
+/* Video URL structure (write-once). single = single-post base; archive = optional collection/archive
+ * base (empty = no archive). Defaults preserve the historical /xroad-video/ base, so existing installs
+ * are unchanged until an admin deliberately locks a structure — irreversible, since live URLs depend on it. */
+function xrv_permalinks() {
+	return wp_parse_args( (array) get_option( 'xrv_permalinks', array() ), array(
+		'locked'  => false,
+		'single'  => 'xroad-video',
+		'archive' => '',
+	) );
+}
+
 add_action( 'init', 'xrv_register_data_model' );
 function xrv_register_data_model() {
+	$pl = xrv_permalinks();
 
 	register_post_type( 'xroad_video', array(
 		'labels' => array(
@@ -83,10 +95,10 @@ function xrv_register_data_model() {
 			'menu_name'          => 'Crossroad Videos',
 		),
 		'public'        => true,
-		'has_archive'   => false,                 // the curated source for the grid; cards link out via _xrv_dedicated_url
+		'has_archive'   => ( '' !== $pl['archive'] ) ? $pl['archive'] : false, // optional collection archive (admin-selected, write-once)
 		'show_in_rest'  => true,
 		'menu_icon'     => 'dashicons-video-alt3',
-		'rewrite'       => array( 'slug' => 'xroad-video' ),
+		'rewrite'       => array( 'slug' => $pl['single'] ),  // single-post base (admin-selected, write-once)
 		'supports'      => array( 'title', 'editor', 'thumbnail', 'page-attributes' ), // page-attributes => menu_order for manual drag-ordering
 	) );
 
@@ -162,10 +174,29 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.0.1.beta' );
+	update_option( 'xrv_version', '2.1.0' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
+
+/* Write-once permalink lock. Sets the video URL structure and flushes rewrite rules ONCE; repeat attempts
+ * are ignored so a live URL structure can't be silently changed out from under existing links/SEO. */
+add_action( 'admin_post_xrv_lock_urls', 'xrv_lock_urls_handler' );
+function xrv_lock_urls_handler() {
+	if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'forbidden' ); }
+	check_admin_referer( 'xrv_lock_urls' );
+	$pl = xrv_permalinks();
+	if ( empty( $pl['locked'] ) && ! empty( $_POST['xrv_confirm'] ) ) {
+		$single  = isset( $_POST['xrv_single'] ) ? sanitize_title( wp_unslash( $_POST['xrv_single'] ) ) : '';
+		$archive = isset( $_POST['xrv_archive'] ) ? sanitize_title( wp_unslash( $_POST['xrv_archive'] ) ) : '';
+		if ( '' === $single ) { $single = 'xroad-video'; }
+		update_option( 'xrv_permalinks', array( 'locked' => true, 'single' => $single, 'archive' => $archive ) );
+		xrv_register_data_model();   // re-register the CPT with the new base, then flush so the new rules are written now
+		flush_rewrite_rules();
+	}
+	wp_safe_redirect( add_query_arg( 'xrv_urls', '1', admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) );
+	exit;
+}
 
 /* =================================================================================================
  * 2. PROVIDER ROUTING  (the additive seam for Vimeo in 2.0)
@@ -267,12 +298,21 @@ function xrv_extract_video_id( $url, $provider = 'youtube' ) {
 }
 
 /** Ordered list of candidate thumbnail source URLs to try when sideloading the local poster. */
-function xrv_thumb_candidates( $id, $provider = 'youtube' ) {
+function xrv_thumb_candidates( $id, $provider = 'youtube', $is_short = false ) {
 	// Only YouTube has stable ID-derived poster URLs. Every other host's poster comes from its oEmbed
 	// thumbnail_url, which the save / import path passes to xrv_sideload_thumbnail() explicitly, so this
 	// returns an empty list for them (no third-party thumbnail relay, no broken ID guesses).
 	if ( 'youtube' !== $provider ) {
 		return array();
+	}
+	// Shorts are vertical: oardefault.jpg is the ORIGINAL-aspect-ratio (9:16) poster, so the local thumbnail
+	// fills the vertical card instead of a letterboxed 16:9 maxres frame. Falls back to hqdefault.
+	if ( $is_short ) {
+		return array(
+			'https://i.ytimg.com/vi/' . $id . '/oardefault.jpg',
+			'https://i.ytimg.com/vi/' . $id . '/oar2.jpg',
+			'https://i.ytimg.com/vi/' . $id . '/hqdefault.jpg',
+		);
 	}
 	// maxres is absent on older uploads and YouTube serves a valid-looking 404 BODY, so the sideload
 	// routine must check HTTP status, not image bytes. hqdefault always exists.
@@ -573,6 +613,14 @@ function xrv_poster_srcset( $thumb_id ) {
  *    here references Divi. Shortcode attributes pre-filter the query and set the column width.
  * ================================================================================================= */
 
+/* A YouTube Short = a vertical (9:16) video at /shorts/{id}. Flagged on save (_xrv_short); we also sniff
+ * the stored source URL so shorts added before this feature still render vertically. */
+function xrv_is_short( $post_id, $source_url = '' ) {
+	if ( '1' === (string) get_post_meta( $post_id, '_xrv_short', true ) ) { return true; }
+	if ( '' === $source_url ) { $source_url = (string) get_post_meta( $post_id, '_xrv_source_url', true ); }
+	return false !== strpos( $source_url, '/shorts/' );
+}
+
 function xrv_render( $atts = array() ) {
 
 	// Drop empty attrs so a blank shortcode value OR an unset/"site default" block control falls through to
@@ -601,6 +649,7 @@ function xrv_render( $atts = array() ) {
 		'consent_button'  => $s['consent_button'],
 		'consent_decline' => $s['consent_decline'], // label for the decline/dismiss control on the prompt
 		'privacy_url'     => $s['privacy_url'],      // privacy policy link in the notice; defaults to the WP privacy page
+		'shorts'   => $s['shorts_default'],          // all | only | hide — YouTube Shorts (vertical 9:16) handling for this gallery
 	), $atts, 'xroad-videos' );
 
 	$playback = ( 'inline' === $atts['playback'] ) ? 'inline' : 'lightbox';
@@ -634,6 +683,11 @@ function xrv_render( $atts = array() ) {
 		$query_args['tax_query'] = $tax_query;
 	}
 
+	// Shorts filter: only = just verticals; hide = exclude them; all = mix (default).
+	$shorts = in_array( $atts['shorts'], array( 'all', 'only', 'hide' ), true ) ? $atts['shorts'] : 'all';
+	if ( 'only' === $shorts )     { $query_args['meta_query'] = array( array( 'key' => '_xrv_short', 'compare' => 'EXISTS' ) ); }
+	elseif ( 'hide' === $shorts ) { $query_args['meta_query'] = array( array( 'key' => '_xrv_short', 'compare' => 'NOT EXISTS' ) ); }
+
 	$q = new WP_Query( $query_args );
 	if ( ! $q->have_posts() ) {
 		return '<p>No videos found.</p>';
@@ -646,6 +700,10 @@ function xrv_render( $atts = array() ) {
 
 	foreach ( $q->posts as $p ) {
 		$id = $p->ID;
+
+		// ponytail: a video with no platform ID can't play and would render a dead card; keep it out of the grid.
+		$vid = (string) get_post_meta( $id, '_xrv_video_id', true );
+		if ( '' === $vid ) { continue; }
 
 		// Pull slugs for each filterable taxonomy once; tally facet counts from the live result set.
 		$term_map = array();
@@ -663,7 +721,6 @@ function xrv_render( $atts = array() ) {
 		}
 		$provider  = (string) get_post_meta( $id, '_xrv_provider', true );
 		$provider  = $provider !== '' ? $provider : 'youtube';
-		$vid       = (string) get_post_meta( $id, '_xrv_video_id', true );
 		$desc      = (string) get_post_meta( $id, '_xrv_description', true );
 		$dedicated = (string) get_post_meta( $id, '_xrv_dedicated_url', true );
 		$dur_iso   = (string) get_post_meta( $id, '_xrv_duration_iso', true );
@@ -692,6 +749,7 @@ function xrv_render( $atts = array() ) {
 			'topic'      => $groups['topic'],
 			'date_key'   => $upload !== '' ? (int) preg_replace( '/\D/', '', $upload ) : 0,
 			'search'     => xrv_build_search_index( $id, $term_map, $desc ),
+			'is_short'   => xrv_is_short( $id ),
 		);
 	}
 	wp_reset_postdata();
@@ -860,7 +918,7 @@ function xrv_render_card( $r, $meta = 'full' ) {
 
 	ob_start();
 	?>
-	<figure class="xrv-card"
+	<figure class="xrv-card"<?php if ( ! empty( $r['is_short'] ) ) echo ' data-short="1"'; ?>
 		data-vid="<?php echo esc_attr( $r['vid'] ); ?>"
 		data-provider="<?php echo esc_attr( $r['provider'] ); ?>"
 		data-hash="<?php echo esc_attr( $r['hash'] ?? '' ); ?>"
@@ -1239,7 +1297,20 @@ function xrv_head_assets_once() {
 	static $done = false;
 	if ( $done ) { return ''; }
 	$done = true;
-	return xrv_icon_sprite() . "\n" . xrv_inline_css();
+	return xrv_icon_sprite() . "\n" . xrv_inline_css() . xrv_dynamic_css();
+}
+
+/* Per-site brand override for the play-button color combo (Settings -> Play button color). Emits the two
+ * CSS vars only when set; otherwise the button inherits --xrv-primary / --xrv-action (the brand tokens).
+ * Values are sanitize_hex_color'd on save, so they are safe to inline here. */
+function xrv_dynamic_css() {
+	$s    = xrv_get_settings();
+	$base = isset( $s['icon_color'] ) ? $s['icon_color'] : '';
+	$hov  = isset( $s['icon_hover'] ) ? $s['icon_hover'] : '';
+	if ( '' === $base && '' === $hov ) { return ''; }
+	$v  = '' !== $base ? '--xrv-play:' . $base . ';' : '';
+	$v .= '' !== $hov ? '--xrv-play-hover:' . $hov . ';' : '';
+	return "\n" . '<style id="xrv-dynamic">#xroad-videos-app{' . $v . '}</style>';
 }
 function xrv_footer_js_once() {
 	static $done = false;
@@ -1299,15 +1370,17 @@ function xrv_inline_css() {
 .xrv-card{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin:0 0 24px;display:inline-block;width:100%;content-visibility:auto;contain-intrinsic-size:auto 320px}
 .xrv-frame{position:relative;width:100%}
 .xrv-facade{display:block;position:relative;width:100%;padding:0;margin:0;border:none;background:#0a1622;border-radius:6px;overflow:hidden;cursor:pointer;aspect-ratio:16/9;line-height:0}
+.xrv-card[data-short]{max-width:300px;margin-left:auto;margin-right:auto}
+.xrv-card[data-short] .xrv-facade,.xrv-card[data-short] .xrv-iframe{aspect-ratio:9/16}
 .xrv-facade:focus-visible{outline:3px solid var(--xrv-accent,#019AB3);outline-offset:3px}
 .xrv-thumb{display:block;width:100%;height:100%;object-fit:cover;border:0;transition:transform .3s ease,opacity .2s ease}
 .xrv-thumb--ph{background:linear-gradient(135deg,var(--xrv-primary,#013C60),var(--xrv-link,#017A8E))}
 .xrv-facade:hover .xrv-thumb{transform:scale(1.04);opacity:.92}
 .xrv-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:64px;height:46px;display:flex;align-items:center;justify-content:center;transition:transform .15s ease}
 .xrv-play svg{width:100%;height:100%;display:block}
-.xrv-play__bg{fill:var(--xrv-primary,#013C60);fill-opacity:.92;transition:fill .15s ease}
+.xrv-play__bg{fill:var(--xrv-play,var(--xrv-primary,#013C60));fill-opacity:.92;transition:fill .15s ease}
 .xrv-facade:hover .xrv-play{transform:translate(-50%,-50%) scale(1.08)}
-.xrv-facade:hover .xrv-play__bg{fill:var(--xrv-action,#007A53);fill-opacity:1}
+.xrv-facade:hover .xrv-play__bg{fill:var(--xrv-play-hover,var(--xrv-action,#007A53));fill-opacity:1}
 .xrv-dur{position:absolute;right:8px;bottom:8px;background:rgba(10,22,34,.85);color:#fff;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:3px;font-variant-numeric:tabular-nums}
 .xrv-iframe,.xrv-video{display:block;width:100%;aspect-ratio:16/9;border:0;border-radius:6px}
 .xrv-video{background:#000;object-fit:contain}
@@ -1328,6 +1401,7 @@ function xrv_inline_css() {
 .xrv-title{font-size:16px !important;font-weight:700;color:var(--xrv-primary,#013C60) !important;margin:0 0 6px !important;line-height:1.2 !important}
 /* Match the production carousel caption (13px / 1.3) and cap the blurb at ~5 lines so cards stay uniform. */
 .xrv-desc{font-size:13px;color:var(--xrv-desc,#4a5663);line-height:1.3;margin:0 0 9px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;line-clamp:5;overflow:hidden}
+.xrv--single .xrv-desc{-webkit-line-clamp:unset;line-clamp:unset;display:block;overflow:visible;font-size:14px;margin-bottom:14px}
 .xrv-tags{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11.5px;color:var(--xrv-muted,#5a6573);margin:0 0 9px}
 .xrv-tags span::before{content:"#";color:var(--xrv-border,#c4ccd6);margin-right:1px}
 .xrv-page-link{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:700;letter-spacing:.02em;color:var(--xrv-link,#017A8E) !important}
@@ -1402,6 +1476,9 @@ function xrv_inline_css() {
 .xrv-modal__backdrop{position:absolute;inset:0;background:rgba(8,16,28,.85)}
 .xrv-modal__dialog{position:relative;width:100%;max-width:1100px}
 .xrv-modal__frame{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.xrv-modal__frame .xrv-iframe,.xrv-modal__frame .xrv-video{position:absolute;inset:0;width:100%;height:100%;aspect-ratio:auto;border-radius:8px}
+.xrv-modal--short .xrv-modal__dialog{max-width:none;width:auto;display:flex;justify-content:center}
+.xrv-modal--short .xrv-modal__frame{aspect-ratio:9/16;width:auto;height:min(86vh,760px);max-width:94vw}
 .xrv-modal__frame iframe,.xrv-modal__frame video{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}
 .xrv-modal__close{position:absolute;top:-46px;right:0;width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.55);color:#fff;border-radius:50%;cursor:pointer;font-size:18px;line-height:1;padding:0}
 .xrv-modal__close:hover{background:rgba(255,255,255,.28)}
@@ -1435,8 +1512,9 @@ function xrv_inline_js() {
 		return m;
 	}
 	var xrvLastFocus = null;
-	function xrvOpenModal(node, title){
+	function xrvOpenModal(node, title, isShort){
 		var m = xrvGetModal();
+		m.classList.toggle('xrv-modal--short', !!isShort);
 		var frame = m.querySelector('.xrv-modal__frame');
 		frame.innerHTML = '';
 		frame.appendChild(node);
@@ -1456,7 +1534,7 @@ function xrv_inline_js() {
 	}
 	document.addEventListener('keydown', function(e){ if(e.key === 'Escape' || e.keyCode === 27) xrvCloseModal(); });
 
-	function xrvEmbedSrc(provider, id, hash){
+	function xrvEmbedSrc(provider, id, hash, isShort){
 		switch(provider){
 			case 'vimeo':
 				return 'https://player.vimeo.com/video/' + encodeURIComponent(id) + '?autoplay=1&dnt=1&title=0&byline=0&portrait=0' + (hash ? '&h=' + encodeURIComponent(hash) : '');
@@ -1467,11 +1545,11 @@ function xrv_inline_js() {
 			case 'dailymotion':
 				return 'https://www.dailymotion.com/embed/video/' + encodeURIComponent(id) + '?autoplay=1';
 			default:
-				return 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&modestbranding=1';
+				return 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&modestbranding=1&playsinline=1' + (isShort ? '&loop=1&playlist=' + encodeURIComponent(id) : '');
 		}
 	}
 	// Build the element injected on click: a <video> for self-hosted files, an <iframe> for every host.
-	function xrvEmbedNode(provider, id, hash, title){
+	function xrvEmbedNode(provider, id, hash, title, isShort){
 		if(provider === 'file'){
 			var v = document.createElement('video');
 			v.className = 'xrv-video';
@@ -1485,7 +1563,7 @@ function xrv_inline_js() {
 		iframe.setAttribute('allowfullscreen', '');
 		iframe.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture';
 		iframe.title = title || 'Video player';
-		iframe.src = xrvEmbedSrc(provider, id, hash);
+		iframe.src = xrvEmbedSrc(provider, id, hash, isShort);
 		return iframe;
 	}
 
@@ -1553,13 +1631,14 @@ function xrv_inline_js() {
 			var hash = card.getAttribute('data-hash') || '';
 			var titleEl = card.querySelector('.xrv-title');
 			var title = titleEl ? titleEl.textContent.trim() : 'Video player';
-			var node = xrvEmbedNode(provider, id, hash, title);
+			var short = !!card.dataset.short;
+			var node = xrvEmbedNode(provider, id, hash, title, short);
 			if(playbackMode === 'inline'){
 				var frame = (btn && btn.closest) ? (btn.closest('.xrv-frame') || btn.parentNode) : card.querySelector('.xrv-frame');
 				if(btn && btn.replaceWith){ btn.replaceWith(node); } else if(frame){ frame.appendChild(node); }
 				if(frame && frame.style){ frame.style.lineHeight = '0'; }
 			} else {
-				xrvOpenModal(node, title);
+				xrvOpenModal(node, title, short); /* shorts pop in a 9:16 portrait modal */
 			}
 			window.dataLayer = window.dataLayer || [];
 			window.dataLayer.push({ event:'video_play', video_provider:provider, video_id:id, video_title:title, video_series:(card.getAttribute('data-series') || '').split(' ')[0] });
@@ -1721,6 +1800,20 @@ JS;
 
 add_shortcode( 'xroad-videos', 'xrv_render' );
 
+/* Single-video embed: [xroad-video id="123"] drops ONE video inline (same privacy-first facade +
+ * VideoObject schema as its dedicated page) by reusing xrv_render_single() — for editorial placements
+ * like /about/ that sit a specific video in the page flow. Provider-agnostic via the 2.0 sources. */
+add_shortcode( 'xroad-video', 'xrv_shortcode_single' );
+function xrv_shortcode_single( $atts ) {
+	$a  = shortcode_atts( array( 'id' => 0, 'playback' => 'inline' ), $atts, 'xroad-video' );
+	$id = (int) $a['id'];
+	if ( 'xroad_video' !== get_post_type( $id ) || 'publish' !== get_post_status( $id ) ) {
+		// ponytail: id only. video="https://..." URL resolve is the upgrade path if editors prefer pasting links.
+		return current_user_can( 'edit_posts' ) ? '<!-- xroad-video: no published video #' . $id . ' -->' : '';
+	}
+	return xrv_render_single( $id, $a['playback'] ); // playback="lightbox" pops a modal (Divi-style); default plays in place
+}
+
 add_action( 'init', 'xrv_register_block' );
 function xrv_register_block() {
 	if ( ! function_exists( 'register_block_type' ) ) {
@@ -1728,7 +1821,7 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '1.0.9', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.1.0', true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
@@ -1844,7 +1937,8 @@ function xrv_single_content( $content ) {
 }
 
 /** Render one video as a self-contained facade block (reusing the grid's assets, card, and schema). */
-function xrv_render_single( $post_id ) {
+function xrv_render_single( $post_id, $playback = 'inline' ) {
+	$playback = ( 'lightbox' === $playback ) ? 'lightbox' : 'inline';
 	$provider = (string) get_post_meta( $post_id, '_xrv_provider', true );
 	$provider = $provider !== '' ? $provider : 'youtube';
 	$vid      = (string) get_post_meta( $post_id, '_xrv_video_id', true );
@@ -1881,11 +1975,12 @@ function xrv_render_single( $post_id ) {
 		'topic'      => is_wp_error( $topic ) ? array() : $topic,
 		'date_key'   => $upload !== '' ? (int) preg_replace( '/\D/', '', $upload ) : 0,
 		'search'     => '',
+		'is_short'   => xrv_is_short( $post_id ),
 	);
 
 	ob_start();
 	?>
-<div id="xroad-videos-app" class="xrv xrv--single" data-playback="inline">
+<div id="xroad-videos-app" class="xrv xrv--single" data-playback="<?php echo esc_attr( $playback ); ?>">
 	<?php echo xrv_head_assets_once(); ?>
 	<div class="xrv-grid" style="column-count:1">
 		<?php echo xrv_render_card( $r ); ?>
@@ -1998,7 +2093,8 @@ function xrv_render_meta_box( $post ) {
 	$row( 'Duration (ISO 8601, optional — auto where available)', '_xrv_duration_iso', $dur, 'e.g. PT12M30S' );
 	$row( 'Upload date (YYYY-MM-DD, optional — auto where available)', '_xrv_upload_date', $upload, 'e.g. 2025-09-15' );
 
-	echo '<hr style="margin:18px 0;border:none;border-top:1px solid #e2e6eb"><p style="margin:0 0 10px;font-weight:600">Rich video schema <span style="font-weight:400;color:#666">(optional — fills out the VideoObject on the video\'s own page for richer Google results and AI citations)</span></p>';
+	echo '<details class="xrv-adv" style="margin:14px 0 4px;border-top:1px solid #e2e6eb;padding-top:12px">'
+		. '<summary style="cursor:pointer;font-weight:600;color:#6873B7">Rich video schema <span style="font-weight:400;color:#666">(optional — transcript &amp; key moments for richer Google results / AI citations)</span></summary>';
 
 	echo '<p style="margin:0 0 14px"><label for="_xrv_transcript" style="display:block;font-weight:600;margin-bottom:4px">Transcript</label>'
 		. '<textarea id="_xrv_transcript" name="_xrv_transcript" rows="6" class="widefat" placeholder="Paste the full transcript. Powers VideoObject.transcript — strong signal for accessibility, Google, and AI answer engines.">'
@@ -2008,6 +2104,7 @@ function xrv_render_meta_box( $post ) {
 		. '<textarea id="_xrv_chapters" name="_xrv_chapters" rows="5" class="widefat" placeholder="One per line:&#10;0:00 Introduction&#10;2:15 The diagnosis&#10;9:40 Treatment options">'
 		. esc_textarea( $chapters ) . '</textarea></p>';
 	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">One per line as <code>M:SS Label</code> (or <code>H:MM:SS Label</code>). Emits <code>Clip</code> markup so the video can show "key moments" in Google search.</p>';
+	echo '</details>';
 
 	echo '</div>';
 	echo '<p style="margin-top:6px;color:#666;font-size:12px">Series, Audience, and Topic are set in the taxonomy boxes in the sidebar. Drag videos in <strong>All Videos</strong> (or set the Order field under Page Attributes) to control the grid sequence. The keyword search index is built automatically.</p>';
@@ -2030,6 +2127,11 @@ function xrv_save_meta( $post_id, $post ) {
 	$dedicated  = isset( $_POST['_xrv_dedicated_url'] ) ? esc_url_raw( wp_unslash( $_POST['_xrv_dedicated_url'] ) ) : '';
 	update_post_meta( $post_id, '_xrv_source_url', $source_url );
 	update_post_meta( $post_id, '_xrv_dedicated_url', $dedicated );
+
+	// Flag YouTube Shorts (vertical) from the /shorts/ URL so galleries can render/filter them. Delete when
+	// not a short, so the EXISTS / NOT EXISTS meta queries stay clean.
+	if ( false !== strpos( $source_url, '/shorts/' ) ) { update_post_meta( $post_id, '_xrv_short', '1' ); }
+	else { delete_post_meta( $post_id, '_xrv_short' ); }
 
 	// Provider: an explicit selector choice wins; "auto" (or any unknown value) is detected from the URL.
 	$provider = isset( $_POST['_xrv_provider'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_provider'] ) ) : 'auto';
@@ -2128,7 +2230,7 @@ function xrv_save_meta( $post_id, $post ) {
 			// oEmbed (no third-party thumbnail relay). Self-hosted files have no remote poster, so the
 			// editor's uploaded poster (or the site default) stands in.
 			$cands  = ( 'youtube' === $provider )
-				? xrv_thumb_candidates( $id, 'youtube' )
+				? xrv_thumb_candidates( $id, 'youtube', false !== strpos( $source_url, '/shorts/' ) )
 				: ( ! empty( $oembed['thumbnail_url'] ) ? array( $oembed['thumbnail_url'] ) : array() );
 			$attach = xrv_sideload_thumbnail( $post_id, $id, $provider, $cands );
 			if ( ! is_wp_error( $attach ) ) {
@@ -2160,7 +2262,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 
 	if ( $is_edit ) {
 		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '1.0.9', true );
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.1.0', true );
 		wp_enqueue_script( 'xrv-admin' );
 		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
@@ -2318,7 +2420,10 @@ function xrv_settings_defaults() {
 		'load_more'       => 3,
 		'subscribe_url'   => '',
 		'subscribe_label' => 'Subscribe to our YouTube channel',
+		'shorts_default'  => 'all',
 		'default_thumb_id' => 0,
+		'icon_color'      => '',
+		'icon_hover'      => '',
 		'sync_url'        => '',
 		'sync_freq'       => 'off',
 		'sync_status'     => 'publish',
@@ -2343,7 +2448,18 @@ function xrv_sanitize_settings( $in ) {
 	$out['load_more']       = max( 1, (int) ( isset( $in['load_more'] ) ? $in['load_more'] : $d['load_more'] ) );
 	$out['subscribe_url']   = isset( $in['subscribe_url'] ) ? esc_url_raw( $in['subscribe_url'] ) : '';
 	$out['subscribe_label'] = isset( $in['subscribe_label'] ) ? sanitize_text_field( $in['subscribe_label'] ) : $d['subscribe_label'];
+	$sd = isset( $in['shorts_default'] ) ? strtolower( $in['shorts_default'] ) : 'all';
+	$out['shorts_default']  = in_array( $sd, array( 'all', 'only', 'hide' ), true ) ? $sd : 'all';
 	$out['default_thumb_id'] = max( 0, (int) ( isset( $in['default_thumb_id'] ) ? $in['default_thumb_id'] : 0 ) );
+	// Play-button color combo: only stored when the override box is ticked, so an unrelated save never
+	// pins a color and clobbers a theme's --xrv-primary/--xrv-action brand tokens. (Admin-context fn.)
+	if ( empty( $in['icon_override'] ) ) {
+		$out['icon_color'] = '';
+		$out['icon_hover'] = '';
+	} else {
+		$out['icon_color'] = isset( $in['icon_color'] ) ? (string) sanitize_hex_color( $in['icon_color'] ) : '';
+		$out['icon_hover'] = isset( $in['icon_hover'] ) ? (string) sanitize_hex_color( $in['icon_hover'] ) : '';
+	}
 	$out['sync_url']        = isset( $in['sync_url'] ) ? esc_url_raw( trim( $in['sync_url'] ) ) : '';
 	$sf = isset( $in['sync_freq'] ) ? strtolower( $in['sync_freq'] ) : 'off';
 	$out['sync_freq']       = in_array( $sf, array( 'off', 'hourly', 'daily', 'weekly', 'monthly' ), true ) ? $sf : 'off';
@@ -2388,6 +2504,17 @@ function xrv_sync_run() {
 }
 
 /* The sync engine. Returns (and stores in option xrv_sync_last) a small result array. */
+/* Shared YouTube provider-meta write for the importer and channel sync (both key duration/upload/desc
+ * identically). ponytail: was a 6-line copy in each; one field set, one place to change. */
+function xrv_apply_youtube_meta( $pid, $id, $f ) {
+	update_post_meta( $pid, '_xrv_provider', 'youtube' );
+	update_post_meta( $pid, '_xrv_video_id', $id );
+	update_post_meta( $pid, '_xrv_source_url', 'https://www.youtube.com/watch?v=' . $id );
+	if ( ! empty( $f['duration'] ) ) { update_post_meta( $pid, '_xrv_duration_iso', sanitize_text_field( $f['duration'] ) ); }
+	if ( ! empty( $f['upload'] ) )   { update_post_meta( $pid, '_xrv_upload_date', sanitize_text_field( $f['upload'] ) ); }
+	if ( ! empty( $f['desc'] ) )     { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $f['desc'] ) ); }
+}
+
 function xrv_sync_perform() {
 	$s   = xrv_get_settings();
 	$key = (string) get_option( 'xrv_yt_api_key', '' );
@@ -2435,12 +2562,7 @@ function xrv_sync_perform() {
 			$pid = wp_insert_post( array( 'post_type' => 'xroad_video', 'post_status' => $status, 'post_title' => $title, 'menu_order' => $max_order ) );
 			if ( is_wp_error( $pid ) ) { continue; }
 
-			update_post_meta( $pid, '_xrv_provider', 'youtube' );
-			update_post_meta( $pid, '_xrv_video_id', $id );
-			update_post_meta( $pid, '_xrv_source_url', 'https://www.youtube.com/watch?v=' . $id );
-			if ( ! empty( $mv['duration'] ) ) { update_post_meta( $pid, '_xrv_duration_iso', sanitize_text_field( $mv['duration'] ) ); }
-			if ( ! empty( $mv['upload'] ) )   { update_post_meta( $pid, '_xrv_upload_date', sanitize_text_field( $mv['upload'] ) ); }
-			if ( ! empty( $mv['desc'] ) )     { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $mv['desc'] ) ); }
+			xrv_apply_youtube_meta( $pid, $id, $mv );
 
 			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube' );
 			if ( ! is_wp_error( $att ) ) { update_post_meta( $pid, '_xrv_local_thumb_id', (int) $att ); set_post_thumbnail( $pid, (int) $att ); }
@@ -2504,19 +2626,84 @@ function xrv_sync_clear_cron() {
 	if ( $ts ) { wp_unschedule_event( $ts, 'xrv_sync_event' ); }
 	wp_clear_scheduled_hook( 'xrv_sync_event' );
 }
+/* Crossroad Media horizontal logo, inline so it needs no asset request. Fills are inlined and the
+ * gradient IDs are namespaced (xrvlg*) so the markup can't collide with other inline SVGs on the page.
+ * Admin chrome only. */
+function xrv_brand_logo( $h = 30 ) {
+	$h = (int) $h;
+	return '<svg viewBox="0 0 413.92 74.44" role="img" aria-label="Crossroad Media" style="height:' . $h . 'px;width:auto;flex:none;display:block" xmlns="http://www.w3.org/2000/svg">'
+		. '<defs>'
+		. '<linearGradient id="xrvlg1" x1="57.47" y1="118.81" x2="57.47" y2="81.59" gradientTransform="translate(0 118.81) scale(1 -1)" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#f7941d"/><stop offset="1" stop-color="#f15a29"/></linearGradient>'
+		. '<linearGradient id="xrvlg2" x1="11.79" y1="118.81" x2="11.79" y2="81.57" gradientTransform="translate(0 118.81) scale(1 -1)" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#f7941d"/><stop offset="1" stop-color="#f15a29"/></linearGradient>'
+		. '</defs>'
+		. '<g fill="#424142">'
+		. '<path d="M126.15,50.11c-4.36,4.97-9.55,7.49-15.46,7.49s-10.39-1.92-14.17-5.7-5.61-8.66-5.61-14.67,1.89-10.94,5.61-14.67c3.78-3.78,8.55-5.7,14.17-5.7s10.37,2.23,14.02,6.61l.11.15,4.99-4.84-.1-.13c-4.84-5.61-11.25-8.45-19.01-8.45s-14.13,2.63-19.21,7.81c-5.08,5.08-7.66,11.55-7.66,19.21s2.58,14.17,7.66,19.3c5.13,5.13,11.6,7.73,19.21,7.73,4.07,0,7.94-.81,11.49-2.42,3.55-1.61,6.58-3.9,9.03-6.82l.1-.11-5.05-4.9-.13.11Z"/>'
+		. '<path d="M155.64,26.57c-2.03,0-4.13.68-6.23,2-2.07,1.31-3.47,2.9-4.16,4.74v-5.74h-6.66v35.53h6.94v-19.55c0-2.63.92-4.95,2.73-6.92s3.94-2.95,6.37-2.95c1.74,0,3.02.16,3.81.48l.18.06,2.11-6.71-.15-.06c-1.34-.58-3-.87-4.94-.87Z"/>'
+		. '<path d="M180.55,26.43c-5.24,0-9.65,1.81-13.12,5.37-3.42,3.57-5.15,8.12-5.15,13.54s1.73,9.99,5.15,13.55c3.47,3.57,7.87,5.36,13.12,5.36s9.63-1.81,13.04-5.36c3.47-3.5,5.21-8.07,5.21-13.55s-1.76-9.99-5.21-13.54c-3.4-3.57-7.79-5.37-13.04-5.37ZM191.88,45.33c0,3.73-1.1,6.78-3.26,9.07-2.16,2.29-4.87,3.47-8.07,3.47s-5.9-1.16-8.07-3.47-3.26-5.36-3.26-9.07,1.1-6.7,3.26-9c2.21-2.34,4.92-3.53,8.07-3.53s5.86,1.19,8.07,3.53c2.16,2.31,3.26,5.32,3.26,9Z"/>'
+		. '<path d="M222.59,42.45l-5.32-1.37c-3.68-.84-5.53-2.23-5.53-4.15,0-1.18.66-2.19,1.97-3.02,1.34-.84,2.86-1.26,4.55-1.26,1.82,0,3.5.42,4.99,1.24,1.47.82,2.55,1.97,3.19,3.4l.06.15,6.2-2.57-.06-.16c-1.02-2.52-2.82-4.55-5.34-6.03-2.53-1.5-5.39-2.24-8.52-2.24-4.1,0-7.49.98-10.12,2.94-2.65,1.97-3.98,4.6-3.98,7.86,0,4.95,3.5,8.34,10.39,10.07l6.02,1.5c3.36,1.02,5.05,2.63,5.05,4.79,0,1.18-.69,2.21-2.03,3.08-1.37.89-3.11,1.34-5.18,1.34-1.92,0-3.71-.58-5.32-1.73-1.61-1.15-2.87-2.77-3.71-4.84l-.06-.16-6.2,2.65.06.15c1.16,3.03,3.11,5.52,5.81,7.37,2.69,1.86,5.87,2.79,9.44,2.79,4.08,0,7.53-1.08,10.23-3.19,2.71-2.13,4.08-4.78,4.08-7.89-.03-5.37-3.6-8.99-10.65-10.71Z"/>'
+		. '<path d="M257.05,42.45l-5.32-1.37c-3.68-.84-5.53-2.23-5.53-4.15,0-1.18.66-2.19,1.97-3.02,1.34-.84,2.86-1.26,4.53-1.26,1.82,0,3.5.42,4.99,1.24,1.47.82,2.55,1.97,3.19,3.4l.06.15,6.2-2.57-.06-.16c-1.02-2.52-2.82-4.55-5.34-6.03-2.53-1.5-5.39-2.24-8.52-2.24-4.08,0-7.49.98-10.12,2.94-2.65,1.97-3.98,4.6-3.98,7.86,0,4.95,3.5,8.34,10.39,10.07l6.02,1.5c3.36,1.02,5.05,2.63,5.05,4.79,0,1.18-.69,2.21-2.03,3.08-1.37.89-3.11,1.34-5.18,1.34-1.92,0-3.71-.58-5.32-1.73-1.61-1.15-2.87-2.77-3.71-4.84l-.06-.16-6.2,2.65.06.15c1.16,3.03,3.11,5.52,5.81,7.37,2.69,1.86,5.87,2.79,9.42,2.79,4.08,0,7.53-1.08,10.23-3.19,2.71-2.13,4.08-4.78,4.08-7.89,0-5.37-3.57-8.99-10.62-10.71Z"/>'
+		. '<path d="M291.55,26.57c-2.03,0-4.13.68-6.23,2-2.07,1.31-3.45,2.9-4.15,4.74v-5.74h-6.66v35.53h6.94v-19.55c0-2.63.92-4.95,2.73-6.92s3.94-2.95,6.37-2.95c1.74,0,3.02.16,3.81.48l.18.06,2.11-6.71-.15-.06c-1.36-.58-3.02-.87-4.95-.87Z"/>'
+		. '<path d="M316.46,26.43c-5.24,0-9.65,1.81-13.12,5.37-3.42,3.57-5.15,8.12-5.15,13.54s1.73,9.99,5.15,13.55c3.47,3.57,7.87,5.36,13.12,5.36s9.63-1.81,13.04-5.36c3.47-3.5,5.21-8.07,5.21-13.55s-1.76-9.99-5.21-13.54c-3.4-3.57-7.79-5.37-13.04-5.37ZM327.78,45.33c0,3.73-1.1,6.78-3.26,9.07-2.16,2.29-4.87,3.47-8.07,3.47s-5.9-1.16-8.07-3.47-3.26-5.36-3.26-9.07,1.1-6.7,3.26-9c2.21-2.34,4.92-3.53,8.07-3.53s5.86,1.19,8.07,3.53c2.16,2.31,3.26,5.32,3.26,9Z"/>'
+		. '<path d="M355.73,26.43c-6.31,0-11.13,2.34-14.36,6.97l-.1.15,6.1,3.84.1-.13c2.11-3.05,5.02-4.6,8.62-4.6,2.39,0,4.5.79,6.28,2.36s2.68,3.48,2.68,5.73v1.23c-2.52-1.36-5.71-2.03-9.52-2.03-4.61,0-8.36,1.1-11.13,3.26-2.77,2.18-4.19,5.15-4.19,8.83,0,3.48,1.34,6.42,3.97,8.74,2.63,2.31,5.94,3.48,9.84,3.48,4.57,0,8.26-2.03,11-6.03h.03v4.89h6.66v-21.84c0-4.57-1.45-8.23-4.29-10.86-2.84-2.63-6.78-3.97-11.68-3.97ZM365.04,47.93c-.02,2.68-1.1,5.05-3.21,7.05-2.13,2.02-4.6,3.03-7.31,3.03-1.92,0-3.61-.56-5.03-1.69-1.42-1.11-2.13-2.52-2.13-4.18,0-1.86.89-3.42,2.61-4.68,1.76-1.26,3.98-1.9,6.61-1.9,3.6.02,6.44.81,8.45,2.37Z"/>'
+		. '<path d="M406.97,11.36v16.41l.27,4.69h-.02c-1.16-1.79-2.82-3.26-4.94-4.36-2.15-1.11-4.55-1.68-7.15-1.68-4.61,0-8.65,1.86-11.97,5.52-3.28,3.69-4.92,8.21-4.92,13.39s1.66,9.7,4.92,13.39c3.32,3.66,7.34,5.52,11.97,5.52,2.6,0,5-.56,7.15-1.68,2.11-1.1,3.78-2.57,4.94-4.36h.03v4.89h6.66V11.36h-6.95ZM407.26,45.33c0,3.73-1.06,6.78-3.19,9.08-2.02,2.29-4.65,3.47-7.84,3.47s-5.73-1.19-7.84-3.53c-2.11-2.31-3.18-5.32-3.18-9s1.06-6.65,3.19-9c2.11-2.34,4.74-3.53,7.84-3.53s5.78,1.19,7.84,3.53c2.11,2.34,3.18,5.36,3.18,8.99Z"/>'
+		. '</g>'
+		. '<g>'
+		. '<polygon fill="url(#xrvlg1)" points="69.21 0 48.42 0 45.72 7.65 56.11 37.22 69.21 0"/>'
+		. '<polygon fill="#6873b7" points="69.21 74.44 56.11 37.22 45.63 67.05 48.17 74.42 69.21 74.44"/>'
+		. '<polygon fill="#342669" points="45.72 7.65 42.09 17.91 35.28 37.22 45.01 65.29 45.63 67.05 56.11 37.22 45.72 7.65"/>'
+		. '<polygon fill="#6873b7" points="0 74.44 20.8 74.44 23.49 66.79 13.1 37.24 0 74.44"/>'
+		. '<polygon fill="url(#xrvlg2)" points="0 0 13.1 37.24 23.59 7.39 21.04 .02 0 0"/>'
+		. '<polygon fill="#342669" points="23.49 66.79 27.12 56.53 33.93 37.24 24.2 9.15 23.59 7.39 13.1 37.24 23.49 66.79"/>'
+		. '</g></svg>';
+}
+
 function xrv_render_settings_page() {
 	if ( ! current_user_can( 'manage_options' ) ) { return; }
 	$s       = xrv_get_settings();
 	$key     = (string) get_option( 'xrv_yt_api_key', '' );
 	$wp_priv = get_privacy_policy_url();
 	?>
-	<div class="wrap">
-		<h1>Crossroad Videos — Settings</h1>
+	<div class="wrap xrv-settings">
+		<h1 style="display:flex;align-items:center;gap:14px;font-weight:600;margin-bottom:2px"><?php echo xrv_brand_logo( 30 ); ?> <span style="color:var(--xr-deep)">Videos <span style="color:var(--xr-blue);font-weight:500">— Settings</span></span></h1>
 		<p style="max-width:780px;color:#50575e">Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.</p>
+		<style>
+		/* Crossroad Media brand palette (admin chrome only; the front-end gallery stays per-tenant). */
+		.xrv-settings{--xr-purple:#342669;--xr-deep:#2A1F4F;--xr-blue:#6873B7;--xr-light:#E8E3F3;--xr-charcoal:#414042;--xr-warm:#F7F7F7;--xr-line:#e6e3ef}
+		.xrv-settings h1{color:var(--xr-deep);font-weight:600;letter-spacing:-.01em}
+		.xrv-settings .form-table th{width:210px;color:var(--xr-charcoal)}
+		.xrv-settings .xrv-card{position:relative;background:#fff;border:1px solid var(--xr-line);border-radius:16px;margin:18px 0;box-shadow:0 1px 2px rgba(42,31,79,.05),0 10px 26px -14px rgba(42,31,79,.18)}
+		.xrv-settings .xrv-card::before{content:"";position:absolute;left:14px;top:16px;bottom:16px;width:16px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 100' preserveAspectRatio='none'%3E%3Cpath d='M14 1C10 1 9 3 9 8L9 42C9 47 8 50 3 50C8 50 9 53 9 58L9 92C9 97 10 99 14 99' fill='none' stroke='%23342669' stroke-width='2'/%3E%3C/svg%3E") no-repeat;background-size:16px 100%}
+		.xrv-settings .xrv-card>*{margin:0;padding-left:44px;padding-right:26px}
+		.xrv-settings .xrv-card>h2.title{padding-top:16px;padding-bottom:12px;border:0;border-bottom:1px solid var(--xr-light);border-radius:0;background:transparent;font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--xr-deep);scroll-margin-top:60px}
+		.xrv-settings .xrv-card>.form-table{padding-top:8px;padding-bottom:14px;border:0;background:transparent}
+		.xrv-settings .xrv-card>p,.xrv-settings .xrv-card>form{padding-top:6px;padding-bottom:14px}
+		.xrv-settings h2.title{margin:24px 0 6px;font-size:15px;font-weight:600;color:var(--xr-deep)}
+		.xrv-settings .xrv-nav{position:sticky;top:46px;z-index:9;display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 6px;padding:10px;background:var(--xr-warm);border:1px solid var(--xr-line);border-radius:12px}
+		.xrv-settings .xrv-nav a{text-decoration:none;font-size:12px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--xr-purple);background:#fff;border:1px solid var(--xr-line);border-radius:999px;padding:6px 14px;transition:background .12s ease,color .12s ease,border-color .12s ease}
+		.xrv-settings .xrv-nav a:hover,.xrv-settings .xrv-nav a:focus{background:var(--xr-purple);color:#fff;border-color:var(--xr-purple)}
+		.xrv-settings details.xrv-help{margin:.5em 0 0;max-width:760px}
+		.xrv-settings details.xrv-help>summary{cursor:pointer;color:var(--xr-blue);font-weight:600;font-size:13px;list-style:none}
+		.xrv-settings details.xrv-help>summary::-webkit-details-marker{display:none}
+		.xrv-settings details.xrv-help>summary::before{content:"\25b8\00a0";color:var(--xr-blue)}
+		.xrv-settings details.xrv-help[open]>summary::before{content:"\25be\00a0"}
+		.xrv-settings .button-primary{background:var(--xr-purple);border-color:var(--xr-deep);box-shadow:none;text-shadow:none}
+		.xrv-settings .button-primary:hover,.xrv-settings .button-primary:focus{background:var(--xr-deep);border-color:var(--xr-deep);color:#fff}
+		.xrv-settings a{color:var(--xr-blue)}
+		</style>
+		<nav class="xrv-nav" aria-label="Settings sections">
+			<a href="#xrv-sec-privacy">Privacy &amp; consent</a>
+			<a href="#xrv-sec-browse">Browse</a>
+			<a href="#xrv-sec-api">API key</a>
+			<a href="#xrv-sec-poster">Default poster</a>
+			<a href="#xrv-sec-color">Play button</a>
+				<a href="#xrv-sec-shorts">Shorts</a>
+			<a href="#xrv-sec-sync">Auto-sync</a>
+				<a href="#xrv-sec-urls">URLs</a>
+		</nav>
 		<form method="post" action="options.php">
 			<?php settings_fields( 'xrv_settings_group' ); ?>
 
-			<h2 class="title">Privacy &amp; consent</h2>
+			<div class="xrv-card"><h2 class="title" id="xrv-sec-privacy">Privacy &amp; consent</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">Geo source</th>
@@ -2551,6 +2738,8 @@ function xrv_render_settings_page() {
 						<p class="description" style="max-width:760px">
 							Every mode uses the click-to-load facade: the player makes no request, cookie, or connection to YouTube until a visitor clicks play. These options set the consent layer on top of that.
 						</p>
+						<details class="xrv-help">
+							<summary>How the modes differ (GDPR / CCPA)</summary>
 						<ul class="description" style="max-width:760px;list-style:disc;margin-left:1.4em">
 							<li><strong>Global</strong> (recommended): adapts to the visitor's region. Visitors in the EU, UK, EEA, or Switzerland get a dismissible opt-in "Load video" prompt before anything loads (GDPR / ePrivacy), and their browser makes <strong>zero</strong> contact with any Google domain (the background preconnect is suppressed too) until they accept. Everyone else, including US / California visitors, plays in one click; because the facade shares no data with YouTube until that click, this meets the US notice-and-opt-out model (CCPA / CPRA) without adding friction. Region is detected from an edge country header (see <strong>Geo source</strong> above).</li>
 							<li><strong>Strict GDPR</strong>: the dismissible opt-in prompt and zero-contact guarantee for <strong>every</strong> visitor worldwide, regardless of region. The most defensible posture; slightly slower first play.</li>
@@ -2560,6 +2749,7 @@ function xrv_render_settings_page() {
 							The opt-in prompt is declinable (× or "No thanks"), so refusing is as easy as accepting, and the click is the consent that loads the embed. Global mode reads a visitor-country header from your edge/CDN; if none is present it fails safe by prompting everyone, and the <code>xrv_consent_required</code> filter can override the region logic.<br>
 							<em>Informational only, not legal advice. Cookies and tags from your analytics, ads, and consent manager are governed by those tools, not this plugin.</em>
 						</p>
+						</details>
 					</td>
 				</tr>
 				<tr>
@@ -2582,7 +2772,8 @@ function xrv_render_settings_page() {
 				</tr>
 			</table>
 
-			<h2 class="title">Browse defaults</h2>
+			</div>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-browse">Browse defaults</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">Filter style</th>
@@ -2621,7 +2812,8 @@ function xrv_render_settings_page() {
 				</tr>
 			</table>
 
-			<h2 class="title">YouTube Data API key (optional)</h2>
+			</div>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-api">YouTube Data API key (optional)</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row"><label for="xrv-key">API key</label></th>
@@ -2630,7 +2822,8 @@ function xrv_render_settings_page() {
 				</tr>
 			</table>
 
-			<h2 class="title">Default poster image</h2>
+			</div>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-poster">Default poster image</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">Default poster</th>
@@ -2650,7 +2843,42 @@ function xrv_render_settings_page() {
 				</tr>
 			</table>
 
-			<h2 class="title">Automatic channel sync</h2>
+			</div>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-color">Play button color</h2>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Brand color combo</th>
+					<td>
+						<?php
+						$icon_on = ( '' !== $s['icon_color'] || '' !== $s['icon_hover'] );
+						$ic = '' !== $s['icon_color'] ? $s['icon_color'] : '#013C60';
+						$ih = '' !== $s['icon_hover'] ? $s['icon_hover'] : '#007A53';
+						?>
+						<label style="display:block;margin-bottom:10px"><input type="checkbox" name="xrv_settings[icon_override]" value="1" <?php checked( $icon_on ); ?>> Override the play-button color</label>
+						<label style="display:inline-flex;align-items:center;gap:8px;margin-right:24px">Idle <input type="color" name="xrv_settings[icon_color]" value="<?php echo esc_attr( $ic ); ?>"></label>
+						<label style="display:inline-flex;align-items:center;gap:8px">Hover <input type="color" name="xrv_settings[icon_hover]" value="<?php echo esc_attr( $ih ); ?>"></label>
+						<p class="description">Colors the click-to-load play button (the YouTube icon) for its idle and hover states. Leave the box unticked to inherit your theme's brand colors (defaults: navy <code>#013C60</code> / green <code>#007A53</code>). The white play triangle is unchanged. Applies to every gallery and single embed on the site.</p>
+					</td>
+				</tr>
+			</table>
+
+			</div>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-shorts">Shorts</h2>
+					<table class="form-table" role="presentation">
+						<tr>
+							<th scope="row"><label for="xrv-shorts">Shorts in galleries</label></th>
+							<td>
+								<select id="xrv-shorts" name="xrv_settings[shorts_default]">
+									<option value="all"  <?php selected( $s['shorts_default'], 'all' ); ?>>Show alongside regular videos</option>
+									<option value="only" <?php selected( $s['shorts_default'], 'only' ); ?>>Shorts only (vertical shelf)</option>
+									<option value="hide" <?php selected( $s['shorts_default'], 'hide' ); ?>>Hide Shorts</option>
+								</select>
+								<p class="description">Default for a bare <code>[xroad-videos]</code>. A YouTube <strong>Short</strong> is auto-detected from its <code>/shorts/</code> URL, rendered vertical (9:16), and plays inline in its card. Override per gallery with <code>[xroad-videos shorts="only"]</code>, <code>"hide"</code>, or <code>"all"</code>.</p>
+							</td>
+						</tr>
+					</table>
+				</div>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-sync">Automatic channel sync</h2>
 			<p class="description" style="max-width:780px">Poll a YouTube channel or playlist and add any <strong>new</strong> uploads to the library automatically. Videos already in the library (matched by video ID) are skipped, so it is always safe to run. Needs the YouTube Data API key above.<?php if ( '' === $key ) { echo ' <strong style="color:#b32d2e">Add an API key to enable it.</strong>'; } ?></p>
 			<table class="form-table" role="presentation">
 				<tr>
@@ -2688,9 +2916,50 @@ function xrv_render_settings_page() {
 					<p class="description">How many of the channel's most recent uploads to scan each run (1&ndash;50).</p></td>
 				</tr>
 			</table>
+			</div>
 
 			<?php submit_button(); ?>
 		</form>
+
+		<?php
+		// Video URLs — write-once permalink structure (its own form; not a Settings-API save).
+		$pl = xrv_permalinks();
+		if ( isset( $_GET['xrv_urls'] ) ) {
+			echo $pl['locked']
+				? '<div class="notice notice-success is-dismissible"><p>Video URL structure locked in &mdash; rewrite rules flushed.</p></div>'
+				: '<div class="notice notice-warning is-dismissible"><p>Tick the confirmation box to set the URL structure.</p></div>';
+		}
+		?>
+		<div class="xrv-card">
+			<h2 class="title" id="xrv-sec-urls">Video URLs</h2>
+			<?php if ( $pl['locked'] ) : ?>
+				<p><span style="color:#007a53;font-weight:600">&#128274; Locked.</span> Single video: <code><?php echo esc_html( '/' . $pl['single'] . '/{slug}' ); ?></code><?php if ( '' !== $pl['archive'] ) { echo ' &nbsp;&middot;&nbsp; Collection: <code>' . esc_html( '/' . $pl['archive'] . '/' ) . '</code>'; } ?></p>
+				<p class="description">The video URL structure is permanent, so existing links and SEO stay intact. Changing it later means a deliberate URL migration (with redirects).</p>
+			<?php else : ?>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="xrv_lock_urls">
+					<?php wp_nonce_field( 'xrv_lock_urls' ); ?>
+					<p class="description" style="margin:.5em 0 0">Choose the URL structure for your videos. <strong>This is set once and cannot be changed later</strong> (live links depend on it), so decide deliberately.</p>
+					<table class="form-table" role="presentation">
+						<tr>
+							<th scope="row"><label for="xrv-single">Single video base</label></th>
+							<td><code>/</code> <input type="text" id="xrv-single" name="xrv_single" value="<?php echo esc_attr( $pl['single'] ); ?>" style="width:200px"> <code>/{slug}</code>
+							<p class="description">A single video's own page. e.g. <code>video</code> &rarr; <code>/video/my-clip/</code>.</p></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="xrv-archive">Collection base</label></th>
+							<td><code>/</code> <input type="text" id="xrv-archive" name="xrv_archive" value="<?php echo esc_attr( $pl['archive'] ); ?>" style="width:200px" placeholder="(none)"> <code>/</code>
+							<p class="description">Optional archive listing every video. e.g. <code>videos</code> &rarr; <code>/videos/</code>. Blank = videos via shortcode/block only.</p></td>
+						</tr>
+						<tr>
+							<th scope="row">Confirm</th>
+							<td><label><input type="checkbox" name="xrv_confirm" value="1"> I understand this sets the video URL structure <strong>permanently</strong> &mdash; it cannot be changed later without breaking existing links.</label></td>
+						</tr>
+					</table>
+					<p><?php submit_button( 'Set permanent URLs', 'primary', 'submit', false ); ?></p>
+				</form>
+			<?php endif; ?>
+		</div>
 
 		<?php
 		// On-demand sync (separate form: it performs an action, not a settings save).
@@ -2980,12 +3249,7 @@ function xrv_ajax_import_run() {
 			$status = 'created';
 		}
 
-		update_post_meta( $pid, '_xrv_provider', 'youtube' );
-		update_post_meta( $pid, '_xrv_video_id', $id );
-		update_post_meta( $pid, '_xrv_source_url', 'https://www.youtube.com/watch?v=' . $id );
-		if ( ! empty( $v['duration'] ) ) { update_post_meta( $pid, '_xrv_duration_iso', sanitize_text_field( $v['duration'] ) ); }
-		if ( ! empty( $v['upload'] ) )   { update_post_meta( $pid, '_xrv_upload_date', sanitize_text_field( $v['upload'] ) ); }
-		if ( isset( $v['desc'] ) && '' !== $v['desc'] ) { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $v['desc'] ) ); }
+		xrv_apply_youtube_meta( $pid, $id, $v );
 
 		// Taxonomies (Series / Audience / Topic): assign by NAME, creating any term that doesn't exist yet.
 		foreach ( array( 'series' => 'xrv_series', 'audience' => 'xrv_audience', 'topic' => 'xrv_topic' ) as $field => $tax ) {
@@ -3015,7 +3279,7 @@ function xrv_render_import_page() {
 	$key = (string) get_option( 'xrv_yt_api_key', '' );
 	?>
 	<div class="wrap xrv-import">
-		<h1>Import Videos</h1>
+		<h1 style="display:flex;align-items:center;gap:14px;font-weight:600"><?php echo xrv_brand_logo( 28 ); ?> <span style="color:#2A1F4F">Import Videos</span></h1>
 		<p style="max-width:760px;color:#50575e">Paste YouTube video links (one per line) or upload a list. With an optional free
 		<a href="https://developers.google.com/youtube/v3/getting-started" target="_blank" rel="noopener">YouTube Data API key</a>
 		you can also paste a whole <strong>channel</strong> or <strong>playlist</strong> URL and pull duration, date, and description for richer schema.</p>
@@ -3210,6 +3474,7 @@ function xrv_uninstall_cleanup() {
 	delete_option( 'xrv_version' );
 	delete_option( 'xrv_yt_api_key' );
 	delete_option( 'xrv_settings' );
+	delete_option( 'xrv_permalinks' );
 	delete_option( 'xrv_sync_last' );
 	delete_option( 'xrv_delete_data_on_uninstall' );
 	delete_option( 'xrv_delete_thumbs_on_uninstall' );
