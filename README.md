@@ -151,10 +151,11 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
-### 2.0.1a
+### 2.1.1
 
-Finishes the Shorts story end-to-end and refines the admin UI. No new dependencies; the only front-end weight added is the swipe-shelf CSS.
+Finishes the Shorts story end-to-end, refines the admin UI, and bounds bulk imports. No new dependencies; the only front-end weight added is the swipe-shelf CSS.
 
+- **Import is capped to 50 videos per run.** A pasted playlist or channel of thousands no longer fires thousands of metadata + Shorts-probe + thumbnail requests at once — the preview reports the overflow ("N more found — capped to 50 per import") and the run step enforces it server-side. Run the import again to add the rest. Self-hosted MP4/WebM stays one file at a time (one video per post).
 - **Admin brand accent fixed.** The card `{` accent is now uniformly scaled and vertically centered (`background-size:contain`) instead of stretched to full card height — stretching a stroked brace distorted it into a thin wobbly line.
 
 - **Synced/imported Shorts are auto-flagged.** The channel sync and the bulk importer now detect a Short for each *new* video (a one-time HEAD probe of the canonical `/shorts/` URL — the Data API exposes no aspect ratio) and store the flag, so Shorts pulled in automatically render vertical with a portrait poster instead of needing a manual `/shorts/` paste or re-save.

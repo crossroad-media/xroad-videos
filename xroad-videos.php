@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.0.1a
+ * Version:           2.1.1
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -174,7 +174,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.0.1a' );
+	update_option( 'xrv_version', '2.1.1' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -1827,7 +1827,7 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.0.1a', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.1.1', true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
@@ -2270,7 +2270,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 
 	if ( $is_edit ) {
 		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.0.1a', true );
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.1.1', true );
 		wp_enqueue_script( 'xrv-admin' );
 		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
@@ -2319,7 +2319,7 @@ function xrv_media_picker_js() {
 			if(btn.dataset.xrvBound) return; btn.dataset.xrvBound = '1';
 			btn.addEventListener('click', function(e){
 				e.preventDefault();
-				var frame = wp.media({ title:'Choose a video file', button:{ text:'Use this video' }, multiple:false, library:{ type:'video' } });
+				var frame = wp.media({ title:'Choose a video file', button:{ text:'Use this video' }, multiple:false, library:{ type:'video' } }); // self-hosted MP4/WebM: one file at a time (multiple:false) — one video per post
 				frame.on('select', function(){
 					var a = frame.state().get('selection').first().toJSON();
 					var u = document.getElementById('_xrv_source_url'); if(u){ u.value = a.url; }
@@ -3195,6 +3195,12 @@ function xrv_ajax_import_preview() {
 	}
 	$ids = array_values( array_unique( $ids ) );
 	if ( empty( $ids ) ) { wp_send_json_error( array( 'msg' => $errors ? implode( ' ', $errors ) : 'No YouTube videos found in the input.' ) ); }
+	// Cap each import run to 50 videos so a pasted playlist/channel of thousands can't fire thousands of
+	// metadata + HEAD (Shorts probe) + thumbnail requests at once. Run the import again to add the rest.
+	if ( count( $ids ) > 50 ) {
+		$errors[] = sprintf( '%d more found — capped to 50 per import. Run the import again to add the rest.', count( $ids ) - 50 );
+		$ids = array_slice( $ids, 0, 50 );
+	}
 
 	// Metadata: start from any JSON-provided fields, then fill gaps from the API when a key is present.
 	$meta = $json_meta;
@@ -3243,6 +3249,7 @@ function xrv_ajax_import_run() {
 	$overwrite = isset( $_POST['overwrite'] ) && '1' === $_POST['overwrite'];
 	$items     = json_decode( isset( $_POST['items'] ) ? wp_unslash( $_POST['items'] ) : '[]', true );
 	if ( ! is_array( $items ) ) { wp_send_json_error( array( 'msg' => 'Bad payload.' ) ); }
+	$items = array_slice( $items, 0, 50 ); // hard server-side cap: 50 per run, bounding metadata/HEAD/thumbnail requests
 
 	global $wpdb;
 	$max_order = (int) $wpdb->get_var( "SELECT MAX(menu_order) FROM {$wpdb->posts} WHERE post_type = 'xroad_video'" );
