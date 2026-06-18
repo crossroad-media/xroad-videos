@@ -89,16 +89,17 @@ For each imported video:
 - **Auth:** AJAX endpoints require the `xrv_import` nonce and the `edit_others_posts` capability (editors/admins).
 - **No destructive ops:** the importer only creates/updates; it never deletes posts, terms, or media.
 
-## 7. Example — a foundation seed
+## 7. Example: seeding a library from a classified file
 
-`tools/classify.js` merges a proposed Series/Audience/Topic map into the
-harvested `videos.json` to produce `videos-classified.json` (52 videos).
-Uploading that file (Mode 3, Overwrite) seeds the whole library — rich schema +
-taxonomy — with no API key. Proposed clusters:
+A local classify script merges a proposed Series/Audience/Topic map into a
+harvested `videos.json` to produce `videos-classified.json`. Uploading that file
+(Mode 3, Overwrite) seeds the whole library, rich schema and taxonomy together,
+with no API key required. The taxonomy is entirely yours to define; a typical map
+might look like:
 
-- **Series:** TRACK & Molecular Tumor Board · Think Tank · Lunch & Learn · Rare Cancer Day · Community Voices · Galas & Events · Foundation Story · Research Spotlights
-- **Audience:** Patients & Caregivers · Clinicians & Researchers · Advocates & Supporters
-- **Topic:** Precision Medicine & Genomics · Clinical Trials · Genetic & Molecular Testing · Advocacy & Awareness · Research Funding & Policy · Patient Stories · Rare Cancer Education
+- **Series:** Webinars · Tutorials · Events · Interviews
+- **Audience:** General · Practitioners · Supporters
+- **Topic:** Getting Started · Deep Dives · Announcements · Case Studies
 
-These are **suggestions** — terms are editable in wp-admin afterward, and
+These are starting suggestions only. Terms stay editable in wp-admin afterward, and
 re-importing with an edited map (Overwrite) re-syncs them.
