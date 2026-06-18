@@ -1,0 +1,128 @@
+name: Bug report
+description: Something in Crossroad Videos is not working as documented.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a clear report. The more of the stack details you fill in below, the faster this gets fixed.
+
+        **Security note:** if this is a vulnerability (anything that exposes data, bypasses a permission check, or lets a third-party request fire that should not), do **not** post it here. Follow [SECURITY.md](https://github.com/crossroad-media/xroad-videos/blob/main/SECURITY.md) instead.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched [existing issues](https://github.com/crossroad-media/xroad-videos/issues?q=is%3Aissue) and this has not already been reported.
+          required: true
+        - label: This is a bug report, not a security vulnerability (those go through SECURITY.md).
+          required: true
+        - label: I am running the latest released version, or have confirmed the bug still happens on it.
+          required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: From Plugins, or the Version header in xroad-videos.php.
+      placeholder: e.g. 2.2.0
+    validations:
+      required: true
+  - type: input
+    id: wp-version
+    attributes:
+      label: WordPress version
+      placeholder: e.g. 6.5.2
+    validations:
+      required: true
+  - type: input
+    id: php-version
+    attributes:
+      label: PHP version
+      placeholder: e.g. 8.1
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Affected provider(s)
+      description: Which video source is involved?
+      multiple: true
+      options:
+        - YouTube
+        - Vimeo
+        - Wistia
+        - Loom
+        - Dailymotion
+        - Self-hosted MP4 / WebM
+        - Mixed sources in one gallery
+        - Not provider-specific
+    validations:
+      required: true
+  - type: dropdown
+    id: consent-mode
+    attributes:
+      label: Consent mode
+      description: Videos to Settings, or the consent_notice attribute.
+      options:
+        - Global (geo)
+        - Strict GDPR (strict)
+        - No consent integration (off)
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: consent-manager
+    attributes:
+      label: Consent / cookie manager in use
+      description: The plugin or service managing consent on the site, if any.
+      placeholder: e.g. CookieYes, Cookiebot, Complianz, none
+  - type: input
+    id: environment
+    attributes:
+      label: Theme, page builder, and host
+      description: Anything that might interact with rendering or caching.
+      placeholder: e.g. Divi child theme, no page builder, WP Engine
+  - type: dropdown
+    id: privacy-regression
+    attributes:
+      label: Did any third-party request fire BEFORE you clicked play?
+      description: The core guarantee is zero contact with any video host until a click. Check DevTools to Network, hard-reload, and look before clicking. A "yes" is the highest-priority class of bug.
+      options:
+        - "No: the pre-click network was clean"
+        - "Yes: a request fired before any click (privacy regression)"
+        - "Did not check"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you do, exactly? Include the shortcode or block settings used.
+      placeholder: |
+        1. Added a gallery with [xroad-videos layout="library" consent_notice="geo"]
+        2. Loaded the page in an EU region
+        3. Clicked play on the first card
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include any console errors and relevant Network-tab entries. Screenshots or a short screen recording help a lot.
+    validations:
+      required: true
+  - type: checkboxes
+    id: coc
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/crossroad-media/xroad-videos/blob/main/CODE_OF_CONDUCT.md).
+          required: true

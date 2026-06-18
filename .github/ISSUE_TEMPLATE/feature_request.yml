@@ -1,0 +1,67 @@
+name: Feature request
+description: Suggest an enhancement or a new capability for Crossroad Videos.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. The plugin has a deliberately tight scope: a privacy-first, single-file, no-build, dependency-free curated video library. Proposals that keep that shape and never break the click-to-load facade are the easiest to accept.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched [existing issues](https://github.com/crossroad-media/xroad-videos/issues?q=is%3Aissue) and this has not already been suggested.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the use case, not just the feature. Who is it for and what are they unable to do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to see? Shortcode attributes, settings, filters, block controls, and so on.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Layouts and rendering
+        - Providers and embedding
+        - Privacy, consent, and GDPR
+        - Importer and channel/playlist sync
+        - Schema, SEO, and AI citation
+        - Settings and admin
+        - Block editor
+        - Internationalization
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing attributes, filters, or other plugins you have already tried.
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Scope check
+      options:
+        - label: This does not require a third-party request before a visitor clicks play (it preserves the facade).
+          required: true
+        - label: I understand the project favors no build step and no new runtime dependencies.
+          required: false
+  - type: checkboxes
+    id: coc
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/crossroad-media/xroad-videos/blob/main/CODE_OF_CONDUCT.md).
+          required: true
