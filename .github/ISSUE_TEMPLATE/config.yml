@@ -6,6 +6,6 @@ contact_links:
   - name: Questions and discussion
     url: https://github.com/crossroad-media/xroad-videos/discussions
     about: Ask a question, share how you are using the plugin, or float an idea before filing a formal request.
-  - name: Email Crossroad Media
-    url: mailto:https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos
+  - name: Contact Crossroad Media
+    url: "https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos"
     about: For private or commercial inquiries that do not belong in a public issue.

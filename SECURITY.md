@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos** (subject: "xroad-videos security") or open a private
+Report it through the [Crossroad Media contact form](https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos) or open a private
 GitHub security advisory. Please do not file public issues for vulnerabilities.
 We aim to acknowledge within 3 business days.
 

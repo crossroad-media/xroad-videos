@@ -14,7 +14,7 @@ Most questions are answered in the [README](README.md): the full shortcode and b
 | Report a reproducible bug | [Open an issue](https://github.com/crossroad-media/xroad-videos/issues/new/choose) |
 | Request a feature | [Open an issue](https://github.com/crossroad-media/xroad-videos/issues/new/choose) |
 | Report a security vulnerability | [SECURITY.md](SECURITY.md) (never a public issue) |
-| Private or commercial inquiry | Email **https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos** |
+| Private or commercial inquiry | [Crossroad Media contact form](https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos) |
 
 ## Filing a good bug report
 

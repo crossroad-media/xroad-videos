@@ -6,7 +6,7 @@ By contributing you agree that your work is licensed under the project's [GPL-2.
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By participating you are expected to uphold it. Report unacceptable behavior to **https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos**.
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By participating you are expected to uphold it. Report unacceptable behavior through the [Crossroad Media contact form](https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos).
 
 ## The one rule: never break the facade
 
@@ -65,4 +65,4 @@ Reviews focus first on the privacy guarantee and security posture, then on corre
 
 ## Questions
 
-Open a [discussion or issue](https://github.com/crossroad-media/xroad-videos/issues) for anything that is not a vulnerability, or email **https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos**. Thanks for helping keep curated video private by default.
+Open a [discussion or issue](https://github.com/crossroad-media/xroad-videos/issues) for anything that is not a vulnerability, or reach us through the [Crossroad Media contact form](https://crossroad.us/contact-us/?utm_source=github&utm_medium=repo&utm_campaign=xroad-videos). Thanks for helping keep curated video private by default.
