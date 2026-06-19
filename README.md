@@ -152,6 +152,13 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.5.1
+
+Reworks the per-video "dedicated page" control into a clearer **watch page** toggle.
+
+- **Watch page toggle (on by default).** Each video can have its own standalone watch page — its own URL, with the embedded player and VideoObject schema — and the gallery card **title** links to it. The card still plays in place in the modal; the title link is a separate affordance, not a bypass. Untick to keep a video gallery-only: its title stops linking and its standalone URL redirects home (filterable via `xrv_watch_page_off_url` / `xrv_watch_page_off_status`).
+- The old free-text "dedicated page URL" field is retired from the editor. Any URL already saved on a video is still honored as the title's link target, so nothing breaks.
+
 ### 2.5.0
 
 Two new front-end capabilities plus a per-video editor pass.

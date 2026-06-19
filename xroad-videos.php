@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.5.0
+ * Version:           2.5.1
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +60,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.5.0' );
+	define( 'XRV_VERSION', '2.5.1' );
 }
 
 /* =================================================================================================
@@ -150,7 +150,8 @@ function xrv_register_meta() {
 		'_xrv_video_hash'    => 'string',  // optional privacy hash (Vimeo unlisted / domain-private videos)
 		'_xrv_video_id'      => 'string',  // the platform video ID (11 chars for YouTube)
 		'_xrv_source_url'    => 'string',  // canonical watch URL
-		'_xrv_dedicated_url' => 'string',  // optional: a dedicated page for this video the card links to
+		'_xrv_dedicated_url' => 'string',  // legacy optional: a custom page the title links to (still honored)
+		'_xrv_watch_page'    => 'string',  // '0' = no standalone watch page; default (absent/'1') = on
 		'_xrv_duration_iso'  => 'string',  // ISO 8601, e.g. PT12M30S
 		'_xrv_upload_date'   => 'string',  // YYYY-MM-DD
 		'_xrv_description'    => 'string', // plain-language summary
@@ -791,7 +792,10 @@ function xrv_render( $atts = array() ) {
 		$provider  = (string) get_post_meta( $id, '_xrv_provider', true );
 		$provider  = $provider !== '' ? $provider : 'youtube';
 		$desc      = (string) get_post_meta( $id, '_xrv_description', true );
-		$dedicated = (string) get_post_meta( $id, '_xrv_dedicated_url', true );
+		// Title link target: a legacy custom URL wins; else the video's own watch page when on; else none.
+		$custom_url = (string) get_post_meta( $id, '_xrv_dedicated_url', true );
+		$watch_on   = '0' !== (string) get_post_meta( $id, '_xrv_watch_page', true ); // default on
+		$dedicated  = '' !== $custom_url ? $custom_url : ( $watch_on ? (string) get_permalink( $id ) : '' );
 		$dur_iso   = (string) get_post_meta( $id, '_xrv_duration_iso', true );
 		$upload    = (string) get_post_meta( $id, '_xrv_upload_date', true );
 		$thumb_id  = (int) get_post_meta( $id, '_xrv_local_thumb_id', true );
@@ -1016,12 +1020,9 @@ function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 			</button>
 		</div>
 		<figcaption class="xrv-cap">
-			<h3 class="xrv-title"><?php echo esc_html( $title ); ?></h3>
+			<h3 class="xrv-title"><?php if ( $dedicated !== '' ) : ?><a class="xrv-title-link" href="<?php echo esc_url( $dedicated ); ?>"><?php echo esc_html( $title ); ?></a><?php else : echo esc_html( $title ); endif; ?></h3>
 			<?php if ( 'title' !== $meta && $r['desc'] !== '' ) : ?><p class="xrv-desc"><?php echo esc_html( $r['desc'] ); ?></p><?php endif; ?>
 			<?php if ( 'full' === $meta && $tags_html !== '' ) : ?><p class="xrv-tags"><?php echo $tags_html; ?></p><?php endif; ?>
-			<?php if ( $dedicated !== '' ) : ?>
-				<a class="xrv-page-link" href="<?php echo esc_url( $dedicated ); ?>">Watch on its page <svg class="xrv-ic"><use href="#xrv-i-arrow"/></svg></a>
-			<?php endif; ?>
 		</figcaption>
 	</figure>
 	<?php
@@ -1472,6 +1473,8 @@ function xrv_inline_css() {
 .xrv-consent-x:hover{color:#fff}
 .xrv-consent-link{color:#cfe9e0;font-size:12px}
 .xrv-title{font-size:16px !important;font-weight:700;color:var(--xrv-primary,#013C60) !important;margin:0 0 6px !important;line-height:1.2 !important}
+.xrv-title-link{color:inherit !important;text-decoration:none !important}
+.xrv-title-link:hover,.xrv-title-link:focus{text-decoration:underline !important}
 /* Match the production carousel caption (13px / 1.3) and cap the blurb at ~5 lines so cards stay uniform. */
 .xrv-desc{font-size:13px;color:var(--xrv-desc,#4a5663);line-height:1.3;margin:0 0 9px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;line-clamp:5;overflow:hidden}
 .xrv--single .xrv-desc{-webkit-line-clamp:unset;line-clamp:unset;display:block;overflow:visible;font-size:14px;margin-bottom:14px}
@@ -1992,10 +1995,18 @@ function xrv_single_redirect() {
 	if ( ! is_singular( 'xroad_video' ) ) {
 		return;
 	}
-	$dest = (string) get_post_meta( get_queried_object_id(), '_xrv_dedicated_url', true );
+	$pid  = get_queried_object_id();
+	$dest = (string) get_post_meta( $pid, '_xrv_dedicated_url', true );
 	if ( $dest !== '' ) {
 		$status = (int) apply_filters( 'xrv_dedicated_redirect_status', 301 );
 		wp_redirect( esc_url_raw( $dest ), $status );
+		exit;
+	}
+	// Watch page turned off (explicit '0'): there is no standalone page for this video, so a direct hit
+	// goes home rather than serving a thin orphan. Default (absent/'1') renders the watch page as normal.
+	// ponytail: 302 to home is the lazy "no page"; switch the filter to a 404 if you'd rather de-index hard.
+	if ( '0' === (string) get_post_meta( $pid, '_xrv_watch_page', true ) ) {
+		wp_redirect( apply_filters( 'xrv_watch_page_off_url', home_url( '/' ), $pid ), (int) apply_filters( 'xrv_watch_page_off_status', 302 ) );
 		exit;
 	}
 }
@@ -2283,13 +2294,12 @@ function xrv_render_meta_box( $post ) {
 		. '<textarea id="_xrv_description" name="_xrv_description" rows="3" class="widefat" placeholder="A short, plain-language summary of the video.">'
 		. esc_textarea( $desc ) . '</textarea></p>';
 
-	// Dedicated page URL — opt-in: the field only appears when the editor wants this behavior.
-	$use_ded = '' !== $dedicated;
-	echo '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:600;margin:0 0 6px;cursor:pointer">'
-		. '<input type="checkbox" id="xrv-ded-toggle" name="_xrv_use_dedicated" value="1" style="margin-top:3px"' . checked( $use_ded, true, false ) . '>'
-		. '<span>Link this card to a dedicated page <span style="font-weight:400;color:#787c82">&mdash; optional. Sends viewers to a page you choose instead of playing in place.</span></span></label>';
-	echo '<p id="xrv-ded-field" style="margin:0 0 16px 26px;' . ( $use_ded ? '' : 'display:none' ) . '">'
-		. '<input type="url" id="_xrv_dedicated_url" name="_xrv_dedicated_url" value="' . esc_attr( $dedicated ) . '" placeholder="https://example.com/videos/example/" class="widefat"></p>';
+	// Watch page — a per-video standalone page (this video's own permalink) with the embedded player and
+	// VideoObject schema. On by default: the card title links to it, and the card still plays in the modal.
+	$watch_on = '0' !== (string) get_post_meta( $post->ID, '_xrv_watch_page', true ); // default on
+	echo '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:600;margin:0 0 16px;cursor:pointer">'
+		. '<input type="checkbox" name="_xrv_watch_page" value="1" style="margin-top:3px"' . checked( $watch_on, true, false ) . '>'
+		. '<span>Give this video its own watch page <span style="font-weight:400;color:#787c82">&mdash; a standalone page at this video&rsquo;s own URL with the embedded player and VideoObject schema, for SEO and sharing. The card <strong>title</strong> links to it; the card still plays in place. Untick to keep this video gallery-only (its title won&rsquo;t link and its URL won&rsquo;t serve a page).</span></span></label>';
 
 	// Duration — keep the schema-accurate ISO field, but add a friendly minutes:seconds converter + help.
 	$dur_human = xrv_iso_to_clock( $dur );
@@ -2341,7 +2351,6 @@ function xrv_render_meta_box( $post ) {
 	var human=document.getElementById('xrv-dur-human'), iso=document.getElementById('_xrv_duration_iso');
 	if(human&&iso){ human.addEventListener('input',function(){ var v=toIso(human.value); if(v) iso.value=v; }); }
 	function toggle(cbId, fieldId){ var cb=document.getElementById(cbId), f=document.getElementById(fieldId); if(cb&&f){ cb.addEventListener('change',function(){ f.style.display=cb.checked?'':'none'; }); } }
-	toggle('xrv-ded-toggle','xrv-ded-field');
 	toggle('xrv-mob-toggle','xrv-mob-field');
 })();
 </script>
@@ -2363,12 +2372,10 @@ function xrv_save_meta( $post_id, $post ) {
 
 	// URLs (read first so provider auto-detection can key off the source URL).
 	$source_url = isset( $_POST['_xrv_source_url'] ) ? esc_url_raw( wp_unslash( $_POST['_xrv_source_url'] ) ) : '';
-	// The dedicated URL is opt-in: only stored when its enabling checkbox is ticked, so unchecking it
-	// cleanly removes the out-link even if the (now hidden) field still holds a stale value.
-	$use_ded    = ! empty( $_POST['_xrv_use_dedicated'] );
-	$dedicated  = ( $use_ded && isset( $_POST['_xrv_dedicated_url'] ) ) ? esc_url_raw( wp_unslash( $_POST['_xrv_dedicated_url'] ) ) : '';
 	update_post_meta( $post_id, '_xrv_source_url', $source_url );
-	update_post_meta( $post_id, '_xrv_dedicated_url', $dedicated );
+	// Watch page: store '0' only when explicitly unticked; absent meta = on. A legacy _xrv_dedicated_url is
+	// left untouched (no field posts it anymore) and still wins as the title link where one was set.
+	update_post_meta( $post_id, '_xrv_watch_page', isset( $_POST['_xrv_watch_page'] ) ? '1' : '0' );
 
 	// Flag YouTube Shorts (vertical) from the /shorts/ URL so galleries can render/filter them. Delete when
 	// not a short, so the EXISTS / NOT EXISTS meta queries stay clean.
