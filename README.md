@@ -151,6 +151,12 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.2.2
+
+Improved UI aesthetics. Admin-facing only; no front-end or behavior change.
+
+- **Settings cards de-cluttered.** Removed the decorative `{` brace accent that ran down the left edge of every Settings card and tightened the reclaimed left gutter so card content now aligns symmetrically with the right edge.
+
 ### 2.2.0
 
 Admin UX cleanup from a full review. No front-end behavior change; admin code got smaller, not bigger.

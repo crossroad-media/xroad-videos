@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.2.0
+ * Version:           2.2.2
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -174,7 +174,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.2.0' );
+	update_option( 'xrv_version', '2.2.2' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -183,10 +183,10 @@ register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
  * version changes, so a changed default base (e.g. /video/) starts resolving without a manual re-save. */
 add_action( 'admin_init', 'xrv_maybe_flush_on_update' );
 function xrv_maybe_flush_on_update() {
-	if ( get_option( 'xrv_version' ) !== '2.2.0' ) {
+	if ( get_option( 'xrv_version' ) !== '2.2.2' ) {
 		xrv_register_data_model();
 		flush_rewrite_rules();
-		update_option( 'xrv_version', '2.2.0' );
+		update_option( 'xrv_version', '2.2.2' );
 	}
 }
 
@@ -1835,7 +1835,7 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.2.0', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.2.2', true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
@@ -2270,7 +2270,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 
 	if ( $is_edit ) {
 		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.2.0', true );
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.2.2', true );
 		wp_enqueue_script( 'xrv-admin' );
 		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
@@ -2690,9 +2690,8 @@ function xrv_render_settings_page() {
 		.xrv-settings h1{color:var(--xr-deep);font-weight:600;letter-spacing:-.01em}
 		.xrv-settings .form-table th{width:210px;color:var(--xr-charcoal)}
 		.xrv-settings .xrv-card{position:relative;background:#fff;border:1px solid var(--xr-line);border-radius:16px;margin:18px 0;box-shadow:0 1px 2px rgba(42,31,79,.05),0 10px 26px -14px rgba(42,31,79,.18)}
-		.xrv-settings .xrv-card::before{content:"";position:absolute;left:12px;top:0;bottom:0;width:26px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 120'%3E%3Cpath d='M18 3C13 3 13 7 13 12L13 50C13 56 12 60 6 60C12 60 13 64 13 70L13 108C13 113 13 117 18 117' fill='none' stroke='%23342669' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat left center;background-size:contain}
-		.xrv-settings .xrv-card>*{margin:0;padding-left:44px;padding-right:26px}
-		.xrv-settings .xrv-card>.xrv-warn{margin:14px 26px 6px 44px;padding:13px 16px;background:#fff8ef;border:1px solid #f3d199;border-left:4px solid #F7941D;border-radius:10px;font-size:13px;line-height:1.5;color:#5a4a2a}
+		.xrv-settings .xrv-card>*{margin:0;padding-left:26px;padding-right:26px}
+		.xrv-settings .xrv-card>.xrv-warn{margin:14px 26px 6px 26px;padding:13px 16px;background:#fff8ef;border:1px solid #f3d199;border-left:4px solid #F7941D;border-radius:10px;font-size:13px;line-height:1.5;color:#5a4a2a}
 		.xrv-settings .xrv-warn code{background:#fdeccc;color:#7a4f00}
 		.xrv-settings .xrv-warn ol{padding-left:0}
 		.xrv-settings .xrv-card>h2.title{padding-top:16px;padding-bottom:12px;border:0;border-bottom:1px solid var(--xr-light);border-radius:0;background:transparent;font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--xr-deep);scroll-margin-top:60px}
