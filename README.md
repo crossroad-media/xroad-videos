@@ -151,6 +151,17 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.4.0
+
+A full admin polish pass. One shared design system now brands every screen, and a bold-carat Q&A accordion puts answers one click away. Admin-facing only; no front-end or behavior change.
+
+- **One design system across every screen.** A single, scoped admin stylesheet (Crossroad palette, card system, buttons, badges, line-icons) is now shared by *Settings*, *Import*, and the per-video editor, so the whole plugin reads as one finished product. The *Import* screen, previously stock WordPress chrome, now matches *Settings* — branded header lockup, cards, and a 1-2-3 step indicator for the import workflow.
+- **Bold-carat Q&A accordions.** Each screen gains a *Questions & answers* card: common admin questions (consent mode, API key, URL/SEO, thumbnails, Shorts, duplicates) expand inline with a bold rotating carat. The per-video editor's *Rich video schema* disclosure and contextual help use the same pattern.
+- **Premium page headers.** Every screen opens with a logo-locked hero (eyebrow, title, one-line summary, version chip) instead of a bare `<h1>`.
+- **Sharper navigation.** The Settings pill nav gains section icons and a scroll-spy active state that tracks the section in view.
+- **Tidied structure.** The on-demand *Run a sync now* control is now its own card (it previously floated outside the card grid), and section headers carry consistent icon chips.
+- **Single source of version truth.** A new `XRV_VERSION` constant feeds the script handles and update check.
+
 ### 2.3.0
 
 Faster first paint and a live edge-region check. The front-end gains an LCP optimization; the new diagnostic is admin-only.

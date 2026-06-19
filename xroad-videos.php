@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.3.0
+ * Version:           2.4.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -56,6 +56,11 @@
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit; // No direct access.
+}
+
+// Single source of truth for the version (header above stays literal for WordPress to read).
+if ( ! defined( 'XRV_VERSION' ) ) {
+	define( 'XRV_VERSION', '2.4.0' );
 }
 
 /* =================================================================================================
@@ -174,7 +179,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.3.0' );
+	update_option( 'xrv_version', XRV_VERSION );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -183,10 +188,10 @@ register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
  * version changes, so a changed default base (e.g. /video/) starts resolving without a manual re-save. */
 add_action( 'admin_init', 'xrv_maybe_flush_on_update' );
 function xrv_maybe_flush_on_update() {
-	if ( get_option( 'xrv_version' ) !== '2.3.0' ) {
+	if ( get_option( 'xrv_version' ) !== XRV_VERSION ) {
 		xrv_register_data_model();
 		flush_rewrite_rules();
-		update_option( 'xrv_version', '2.3.0' );
+		update_option( 'xrv_version', XRV_VERSION );
 	}
 }
 
@@ -1835,7 +1840,7 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.3.0', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), XRV_VERSION, true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
@@ -2052,7 +2057,8 @@ function xrv_render_meta_box( $post ) {
 		);
 	};
 
-	echo '<div style="max-width:760px">';
+	echo xrv_admin_css(); // phpcs:ignore WordPress.Security.EscapeOutput -- brand the editor to match Settings & Import (prints once)
+	echo '<div class="xrv-admin xrv-metabox" style="max-width:760px">';
 
 	$provider_opts = array(
 		'auto'        => 'Auto-detect from URL (recommended)',
@@ -2101,8 +2107,9 @@ function xrv_render_meta_box( $post ) {
 	$row( 'Duration (ISO 8601, optional — auto where available)', '_xrv_duration_iso', $dur, 'e.g. PT12M30S' );
 	$row( 'Upload date (YYYY-MM-DD, optional — auto where available)', '_xrv_upload_date', $upload, 'e.g. 2025-09-15' );
 
-	echo '<details class="xrv-adv" style="margin:14px 0 4px;border-top:1px solid #e2e6eb;padding-top:12px">'
-		. '<summary style="cursor:pointer;font-weight:600;color:#6873B7">Rich video schema <span style="font-weight:400;color:#666">(optional — transcript &amp; key moments for richer Google results / AI citations)</span></summary>';
+	echo '<details class="xrv-help xrv-help--form" style="margin:16px 0 4px">'
+		. '<summary>Rich video schema <span style="font-weight:400;color:#787c82">(optional &mdash; transcript &amp; key moments for richer Google results / AI citations)</span></summary>'
+		. '<div class="xrv-help-body">';
 
 	echo '<p style="margin:0 0 14px"><label for="_xrv_transcript" style="display:block;font-weight:600;margin-bottom:4px">Transcript</label>'
 		. '<textarea id="_xrv_transcript" name="_xrv_transcript" rows="6" class="widefat" placeholder="Paste the full transcript. Powers VideoObject.transcript — strong signal for accessibility, Google, and AI answer engines.">'
@@ -2111,11 +2118,12 @@ function xrv_render_meta_box( $post ) {
 	echo '<p style="margin:0 0 6px"><label for="_xrv_chapters" style="display:block;font-weight:600;margin-bottom:4px">Key moments / chapters</label>'
 		. '<textarea id="_xrv_chapters" name="_xrv_chapters" rows="5" class="widefat" placeholder="One per line:&#10;0:00 Introduction&#10;2:15 The diagnosis&#10;9:40 Treatment options">'
 		. esc_textarea( $chapters ) . '</textarea></p>';
-	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">One per line as <code>M:SS Label</code> (or <code>H:MM:SS Label</code>). Emits <code>Clip</code> markup so the video can show "key moments" in Google search.</p>';
-	echo '</details>';
+	echo '<p style="margin:0 0 6px;color:#646970;font-size:12px">One per line as <code>M:SS Label</code> (or <code>H:MM:SS Label</code>). Emits <code>Clip</code> markup so the video can show "key moments" in Google search.</p>';
+	echo '</div></details>';
 
-	echo '</div>';
-	echo '<p style="margin-top:6px;color:#666;font-size:12px">Series, Audience, and Topic are set in the taxonomy boxes in the sidebar. Drag videos in <strong>All Videos</strong> (or set the Order field under Page Attributes) to control the grid sequence. The keyword search index is built automatically.</p>';
+	echo '<p class="xrv-hint" style="margin:14px 0 2px;color:#646970;font-size:12px">Series, Audience, and Topic are set in the taxonomy boxes in the sidebar. The keyword search index is built automatically.</p>';
+	echo xrv_help( 'How do I control the order videos appear in galleries?', '<p>Drag videos in <strong>All Videos</strong>, or set the <em>Order</em> field under <em>Page Attributes</em>. Galleries render in that sequence.</p>' ); // phpcs:ignore WordPress.Security.EscapeOutput
+	echo '</div>'; // close .xrv-metabox wrapper
 }
 
 add_action( 'save_post_xroad_video', 'xrv_save_meta', 10, 2 );
@@ -2270,7 +2278,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 
 	if ( $is_edit ) {
 		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.3.0', true );
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), XRV_VERSION, true );
 		wp_enqueue_script( 'xrv-admin' );
 		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
@@ -2675,67 +2683,205 @@ function xrv_brand_logo( $h = 30 ) {
 		. '</g></svg>';
 }
 
+/* =================================================================================================
+ * 9c. ADMIN UI KIT  (shared Crossroad-brand chrome for every XRV admin screen)
+ *     One palette, one card system, one bold-carat Q&A accordion — printed on Settings, Import, and the
+ *     per-video editor so the whole plugin reads as one finished product. Admin-only: the front-end
+ *     gallery keeps its own per-tenant tokens and never loads any of this. Each admin request renders at
+ *     most one of these screens, so printing the stylesheet inline (vs. enqueuing) stays cheap and keeps
+ *     every page self-contained.
+ * ================================================================================================= */
+
+/* Inline line-icon set (~17px, inherits color). Gives each section header a glanceable anchor. */
+function xrv_admin_icon( $name ) {
+	$paths = array(
+		'shield'  => '<path d="M12 2l8 3v6c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V5l8-3z"/><path d="M9 12l2 2 4-4"/>',
+		'sliders' => '<line x1="4" y1="8" x2="20" y2="8"/><circle cx="9" cy="8" r="2.3"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="15" cy="16" r="2.3"/>',
+		'key'     => '<circle cx="7.6" cy="15.4" r="4"/><path d="M10.4 12.6L20 3M16 3h4v4"/>',
+		'image'   => '<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.4" cy="9.6" r="1.7"/><path d="M21 15.5l-5-5L5 21"/>',
+		'sync'    => '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/>',
+		'link'    => '<path d="M10 14a4 4 0 0 0 5.66 0l2.83-2.83a4 4 0 1 0-5.66-5.66L11.5 7"/><path d="M14 10a4 4 0 0 0-5.66 0L5.5 12.83a4 4 0 1 0 5.66 5.66L12.5 17"/>',
+		'upload'  => '<path d="M12 15V4M7.5 8.5L12 4l4.5 4.5"/><path d="M5 20h14"/>',
+		'help'    => '<circle cx="12" cy="12" r="9.2"/><path d="M9.4 9.3a2.6 2.6 0 1 1 3.7 2.4c-1 .5-1.6 1-1.6 2.1"/><circle cx="11.6" cy="16.7" r=".7" fill="currentColor" stroke="none"/>',
+		'play'    => '<circle cx="12" cy="12" r="9.2"/><path d="M10 8.4l6 3.6-6 3.6z" fill="currentColor" stroke="none"/>',
+	);
+	$d = isset( $paths[ $name ] ) ? $paths[ $name ] : $paths['help'];
+	return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' . $d . '</svg>';
+}
+
+/* Card section header: icon chip + title, with an optional one-line subtitle below it. */
+function xrv_card_head( $id, $icon, $title, $sub = '' ) {
+	$h = '<h2 class="title" id="' . esc_attr( $id ) . '"><span class="xrv-ico">' . xrv_admin_icon( $icon ) . '</span>' . esc_html( $title ) . '</h2>';
+	if ( '' !== $sub ) { $h .= '<p class="xrv-card-sub">' . wp_kses_post( $sub ) . '</p>'; }
+	return $h;
+}
+
+/* A bold-carat Q&A accordion. $answer is trusted, admin-authored HTML. */
+function xrv_help( $question, $answer, $open = false ) {
+	return '<details class="xrv-help"' . ( $open ? ' open' : '' ) . '><summary>' . esc_html( $question )
+		. '</summary><div class="xrv-help-body">' . $answer . '</div></details>';
+}
+
+/* Render a whole "Questions & answers" card from a [question => answer-html] map. */
+function xrv_faq_card( $id, $title, array $items ) {
+	echo '<div class="xrv-card xrv-faq">' . xrv_card_head( $id, 'help', $title, 'Click a question to expand the answer.' );
+	foreach ( $items as $q => $a ) { echo xrv_help( $q, $a ); } // phpcs:ignore WordPress.Security.EscapeOutput -- helper escapes the question; answers are static admin copy.
+	echo '</div>';
+}
+
+/* The premium page lockup: logo + eyebrow + title + subtitle + version chip. */
+function xrv_admin_header( $eyebrow, $title_html, $subtitle ) {
+	echo '<div class="xrv-hero"><div class="xrv-hero-logo">' . xrv_brand_logo( 34 ) . '</div>' // phpcs:ignore WordPress.Security.EscapeOutput
+		. '<div class="xrv-hero-txt"><span class="xrv-eyebrow">' . esc_html( $eyebrow ) . '</span>'
+		. '<h1>' . wp_kses_post( $title_html ) . '</h1>'
+		. '<p>' . wp_kses_post( $subtitle ) . '</p></div>'
+		. '<span class="xrv-badge">v' . esc_html( XRV_VERSION ) . '</span>'
+		. '</div>'
+		. '<hr class="wp-header-end">'; // WP relocates admin notices to just after this marker.
+}
+
+/* The one stylesheet that brands every XRV admin screen. Scoped to .xrv-admin so it can never touch the
+ * rest of wp-admin or the front-end gallery (which reuses some of the same class names under .xrv). */
+function xrv_admin_css() {
+	static $printed = false;
+	if ( $printed ) { return ''; }
+	$printed = true;
+	return <<<'CSS'
+<style id="xrv-admin-css">
+/* ---- Tokens (Crossroad Media palette) ---- */
+.xrv-admin{--xr-purple:#342669;--xr-deep:#2A1F4F;--xr-blue:#6873B7;--xr-light:#E8E3F3;--xr-charcoal:#414042;--xr-warm:#F7F7F7;--xr-line:#e6e3ef;--xr-orange:#F7941D;--xr-orange2:#F15A29;--xr-green:#1a9d57;font-family:'DM Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.xrv-admin{max-width:1040px}
+.xrv-admin ::selection{background:var(--xr-light)}
+/* ---- Hero lockup ---- */
+.xrv-admin .xrv-hero{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin:8px 0 2px;padding:20px 24px;background:linear-gradient(120deg,#fbfaff 0%,#f4f1fb 58%,#efeaf8 100%);border:1px solid var(--xr-line);border-radius:18px;box-shadow:0 1px 2px rgba(42,31,79,.05),0 18px 40px -28px rgba(42,31,79,.45)}
+.xrv-admin .xrv-hero-logo{flex:none}
+.xrv-admin .xrv-hero-txt{flex:1 1 280px;min-width:0}
+.xrv-admin .xrv-eyebrow{display:block;font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--xr-blue);margin:0 0 1px}
+.xrv-admin .xrv-hero h1{margin:0;padding:0;font-size:24px;line-height:1.12;font-weight:700;letter-spacing:-.02em;color:var(--xr-deep)}
+.xrv-admin .xrv-hero h1 b{color:var(--xr-blue);font-weight:600}
+.xrv-admin .xrv-hero p{margin:7px 0 0;max-width:680px;color:#50575e;font-size:13.5px;line-height:1.5}
+.xrv-admin .xrv-badge{flex:none;align-self:flex-start;font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--xr-purple);background:#fff;border:1px solid var(--xr-line);border-radius:999px;padding:5px 12px}
+/* ---- Sticky pill nav ---- */
+.xrv-admin .xrv-nav{position:sticky;top:42px;z-index:9;display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 6px;padding:9px 10px;background:rgba(247,247,250,.85);-webkit-backdrop-filter:saturate(1.5) blur(7px);backdrop-filter:saturate(1.5) blur(7px);border:1px solid var(--xr-line);border-radius:14px}
+.xrv-admin .xrv-nav a{text-decoration:none;font-size:12px;font-weight:600;letter-spacing:.01em;color:var(--xr-purple);background:#fff;border:1px solid var(--xr-line);border-radius:999px;padding:6px 13px;display:inline-flex;align-items:center;gap:6px;transition:background .14s ease,color .14s ease,border-color .14s ease,transform .14s ease}
+.xrv-admin .xrv-nav a:hover,.xrv-admin .xrv-nav a:focus{background:var(--xr-purple);color:#fff;border-color:var(--xr-purple);transform:translateY(-1px)}
+.xrv-admin .xrv-nav a.is-active{background:var(--xr-purple);color:#fff;border-color:var(--xr-purple)}
+.xrv-admin .xrv-nav svg{width:13px;height:13px;flex:none}
+/* ---- Card system ---- */
+.xrv-admin .xrv-card{position:relative;background:#fff;border:1px solid var(--xr-line);border-radius:16px;margin:18px 0;box-shadow:0 1px 2px rgba(42,31,79,.05),0 12px 28px -18px rgba(42,31,79,.22)}
+.xrv-admin .xrv-card>*{margin:0;padding-left:26px;padding-right:26px}
+.xrv-admin .xrv-card>h2.title{display:flex;align-items:center;gap:11px;padding-top:18px;padding-bottom:14px;margin:0;border:0;border-bottom:1px solid var(--xr-light);border-radius:0;background:transparent;font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--xr-deep);scroll-margin-top:66px}
+.xrv-admin .xrv-card>h2.title .xrv-ico{flex:none;display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;border-radius:9px;background:var(--xr-light);color:var(--xr-purple)}
+.xrv-admin .xrv-card>h2.title .xrv-ico svg{width:17px;height:17px}
+.xrv-admin .xrv-card>.xrv-card-sub{padding-top:13px;padding-bottom:0;color:#50575e;font-size:13px;line-height:1.55;max-width:780px}
+.xrv-admin .xrv-card>.form-table{padding-top:8px;padding-bottom:16px;border:0;background:transparent}
+.xrv-admin .xrv-card>p,.xrv-admin .xrv-card>form{padding-top:8px;padding-bottom:14px}
+.xrv-admin .xrv-card>.xrv-warn{margin:14px 26px 8px;padding:13px 16px;background:#fff8ef;border:1px solid #f3d199;border-left:4px solid var(--xr-orange);border-radius:10px;font-size:13px;line-height:1.5;color:#5a4a2a}
+.xrv-admin .xrv-warn code{background:#fdeccc;color:#7a4f00}
+.xrv-admin .xrv-warn ol{padding-left:0}
+/* ---- Forms ---- */
+.xrv-admin .form-table th{width:220px;color:var(--xr-charcoal);font-weight:600}
+.xrv-admin .form-table td .description,.xrv-admin .description{color:#646970}
+.xrv-admin h2.title{margin:24px 0 6px;font-size:15px;font-weight:700;color:var(--xr-deep)}
+.xrv-admin input[type=text],.xrv-admin input[type=url],.xrv-admin input[type=number],.xrv-admin select,.xrv-admin textarea{border-radius:7px}
+.xrv-admin input[type=text]:focus,.xrv-admin input[type=url]:focus,.xrv-admin input[type=number]:focus,.xrv-admin select:focus,.xrv-admin textarea:focus{border-color:var(--xr-blue);box-shadow:0 0 0 1px var(--xr-blue)}
+.xrv-admin .button,.xrv-admin .button-secondary{border-radius:7px}
+.xrv-admin .button-primary{background:var(--xr-purple);border-color:var(--xr-deep);box-shadow:none;text-shadow:none;border-radius:7px;font-weight:600}
+.xrv-admin .button-primary:hover,.xrv-admin .button-primary:focus{background:var(--xr-deep);border-color:var(--xr-deep);color:#fff}
+.xrv-admin a{color:var(--xr-blue)}
+.xrv-admin a:hover{color:var(--xr-purple)}
+.xrv-admin .submit{padding-left:0}
+/* ---- Bold-carat Q&A accordion ---- */
+.xrv-admin details.xrv-help{margin:12px 0 0;max-width:820px;border:1px solid var(--xr-line);border-radius:12px;background:#fff;transition:border-color .15s ease,box-shadow .15s ease}
+.xrv-admin details.xrv-help+details.xrv-help{margin-top:8px}
+.xrv-admin details.xrv-help>summary{cursor:pointer;list-style:none;display:flex;align-items:flex-start;gap:11px;padding:12px 16px;font-weight:600;font-size:13px;color:var(--xr-deep);user-select:none}
+.xrv-admin details.xrv-help>summary::-webkit-details-marker{display:none}
+.xrv-admin details.xrv-help>summary::before{content:"\25BA";font-size:11px;line-height:1.5;color:var(--xr-purple);transition:transform .18s ease;flex:none}
+.xrv-admin details.xrv-help[open]>summary::before{transform:rotate(90deg)}
+.xrv-admin details.xrv-help>summary:hover{color:var(--xr-purple)}
+.xrv-admin details.xrv-help[open]{border-color:var(--xr-blue);box-shadow:0 1px 2px rgba(42,31,79,.05),0 16px 30px -22px rgba(42,31,79,.40)}
+.xrv-admin details.xrv-help[open]>summary{border-bottom:1px solid var(--xr-light);color:var(--xr-purple)}
+.xrv-admin details.xrv-help>summary~*{padding-left:38px;padding-right:18px;font-size:13px;line-height:1.6;color:#3c4257}
+.xrv-admin details.xrv-help>summary+*{padding-top:13px}
+.xrv-admin details.xrv-help>*:last-child{padding-bottom:15px}
+.xrv-admin .xrv-help-body p{margin:0 0 9px}
+.xrv-admin .xrv-help-body p:last-child{margin-bottom:0}
+.xrv-admin .xrv-help-body ul{margin:0 0 9px;list-style:disc;padding-left:18px}
+.xrv-admin .xrv-help-body code{background:var(--xr-light);color:var(--xr-purple);border-radius:4px;padding:1px 5px;font-size:12px}
+.xrv-admin .xrv-faq>details.xrv-help{max-width:none;margin-left:24px;margin-right:24px;padding-left:0;padding-right:0}
+.xrv-admin .xrv-faq>details.xrv-help:first-of-type{margin-top:6px}
+.xrv-admin .xrv-faq>details.xrv-help:last-of-type{margin-bottom:20px}
+.xrv-admin details.xrv-help.xrv-help--form>summary~*{padding-left:16px;padding-right:16px;color:inherit;font-size:13px}
+.xrv-admin details.xrv-help.xrv-help--form .description{color:#646970}
+/* ---- Edge-check diagnostic ---- */
+.xrv-admin #xrv-edge-out{margin-top:12px}
+.xrv-admin .xrv-edge-result{border:1px solid var(--xr-line);border-radius:12px;padding:14px 16px;background:#fff;max-width:640px}
+.xrv-admin .xrv-edge-flag{font-size:28px;line-height:1;vertical-align:-3px}
+.xrv-admin .xrv-edge-ms{font-size:30px;font-weight:700;color:var(--xr-purple);font-variant-numeric:tabular-nums}
+.xrv-admin .xrv-edge-duel{margin:12px 0 4px;display:grid;gap:8px;max-width:600px}
+.xrv-admin .xrv-edge-row{display:grid;grid-template-columns:140px 1fr;align-items:center;gap:10px;font-size:12px;color:var(--xr-charcoal)}
+.xrv-admin .xrv-edge-bar{display:inline-block;height:13px;border-radius:7px;vertical-align:-2px;margin-right:7px}
+.xrv-admin .xrv-edge-bar--xrv{background:var(--xr-green);width:8px}
+.xrv-admin .xrv-edge-bar--them{background:#d98324;width:300px;max-width:60%}
+.xrv-admin .xrv-edge-chips{margin:10px 0 0;display:flex;flex-wrap:wrap;gap:6px}
+.xrv-admin .xrv-edge-chip{font-size:11px;font-weight:600;color:#0a6b3c;background:#e7f6ee;border:1px solid #b6e3c8;border-radius:999px;padding:3px 10px}
+.xrv-admin .xrv-edge-chip--warn{color:#7a4f00;background:#fff8ef;border-color:#f3d199}
+.xrv-admin .xrv-edge-guess button{margin:0 6px 6px 0}
+/* ---- Import workflow ---- */
+.xrv-admin .xrv-steps{display:flex;flex-wrap:wrap;gap:8px;margin:0;padding:0;list-style:none}
+.xrv-admin .xrv-steps li{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:600;color:#646970;background:#fff;border:1px solid var(--xr-line);border-radius:999px;padding:6px 14px 6px 7px}
+.xrv-admin .xrv-steps li b{display:inline-flex;width:21px;height:21px;align-items:center;justify-content:center;border-radius:50%;background:var(--xr-light);color:var(--xr-purple);font-size:11px;font-weight:700}
+.xrv-admin #xrv-imp-results table{max-width:none;border-radius:10px;overflow:hidden}
+.xrv-admin .xrv-badge-new{color:#0a6b3c;font-weight:700}
+.xrv-admin .xrv-badge-exists{color:#8a6a2a;font-weight:700}
+.xrv-admin fieldset{border:1px solid var(--xr-line);border-radius:10px;padding:12px 16px;max-width:none;background:#fbfbfd}
+.xrv-admin .xrv-bar-wrap{max-width:none;background:var(--xr-light);border-radius:8px;height:14px;overflow:hidden}
+.xrv-admin .xrv-bar{height:100%;width:0;background:linear-gradient(90deg,var(--xr-purple),var(--xr-blue));transition:width .3s}
+.xrv-admin .xrv-tag{display:inline-block;margin:2px 4px 2px 0;padding:1px 8px;border-radius:10px;font-size:11px;line-height:1.7;white-space:nowrap}
+.xrv-admin .xrv-tag.is-series{background:#e6f4ee;color:#0a6b48}
+.xrv-admin .xrv-tag.is-aud{background:#eef1fb;color:#3a4a8c}
+.xrv-admin .xrv-tag.is-topic{background:#f3eefb;color:#6b3a8c}
+/* ---- Per-video editor (meta box) ---- */
+.xrv-admin.xrv-metabox{max-width:760px}
+.xrv-admin.xrv-metabox .xrv-media-field{border:1px solid var(--xr-line);border-radius:10px;background:#fbfbfd}
+.xrv-admin.xrv-metabox label[for]{color:var(--xr-charcoal)}
+@media (max-width:782px){.xrv-admin .xrv-hero{padding:18px}.xrv-admin .form-table th{width:auto}}
+</style>
+CSS;
+}
+
 function xrv_render_settings_page() {
 	if ( ! current_user_can( 'manage_options' ) ) { return; }
 	$s       = xrv_get_settings();
 	$key     = (string) get_option( 'xrv_yt_api_key', '' );
 	$wp_priv = get_privacy_policy_url();
 	?>
-	<div class="wrap xrv-settings">
-		<h1 style="display:flex;align-items:center;gap:14px;font-weight:600;margin-bottom:2px"><?php echo xrv_brand_logo( 30 ); ?> <span style="color:var(--xr-deep)">XRV <span style="color:var(--xr-blue);font-weight:500">Settings</span></span></h1>
-		<p style="max-width:780px;color:#50575e">Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.</p>
-		<style>
-		/* Crossroad Media brand palette (admin chrome only; the front-end gallery stays per-tenant). */
-		.xrv-settings{--xr-purple:#342669;--xr-deep:#2A1F4F;--xr-blue:#6873B7;--xr-light:#E8E3F3;--xr-charcoal:#414042;--xr-warm:#F7F7F7;--xr-line:#e6e3ef;font-family:'DM Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
-		.xrv-settings h1{color:var(--xr-deep);font-weight:600;letter-spacing:-.01em}
-		.xrv-settings .form-table th{width:210px;color:var(--xr-charcoal)}
-		.xrv-settings .xrv-card{position:relative;background:#fff;border:1px solid var(--xr-line);border-radius:16px;margin:18px 0;box-shadow:0 1px 2px rgba(42,31,79,.05),0 10px 26px -14px rgba(42,31,79,.18)}
-		.xrv-settings .xrv-card>*{margin:0;padding-left:26px;padding-right:26px}
-		.xrv-settings .xrv-card>.xrv-warn{margin:14px 26px 6px 26px;padding:13px 16px;background:#fff8ef;border:1px solid #f3d199;border-left:4px solid #F7941D;border-radius:10px;font-size:13px;line-height:1.5;color:#5a4a2a}
-		.xrv-settings .xrv-warn code{background:#fdeccc;color:#7a4f00}
-		.xrv-settings .xrv-warn ol{padding-left:0}
-		/* Edge check (the live region demo) */
-		#xrv-edge-out{margin-top:12px}
-		.xrv-edge-result{border:1px solid var(--xr-line);border-radius:12px;padding:14px 16px;background:#fff;max-width:640px}
-		.xrv-edge-flag{font-size:28px;line-height:1;vertical-align:-3px}
-		.xrv-edge-ms{font-size:30px;font-weight:700;color:var(--xr-purple);font-variant-numeric:tabular-nums}
-		.xrv-edge-duel{margin:12px 0 4px;display:grid;gap:8px;max-width:600px}
-		.xrv-edge-row{display:grid;grid-template-columns:140px 1fr;align-items:center;gap:10px;font-size:12px;color:var(--xr-charcoal)}
-		.xrv-edge-bar{display:inline-block;height:13px;border-radius:7px;vertical-align:-2px;margin-right:7px}
-		.xrv-edge-bar--xrv{background:#1a9d57;width:8px}
-		.xrv-edge-bar--them{background:#d98324;width:300px;max-width:60%}
-		.xrv-edge-chips{margin:10px 0 0;display:flex;flex-wrap:wrap;gap:6px}
-		.xrv-edge-chip{font-size:11px;font-weight:600;color:#0a6b3c;background:#e7f6ee;border:1px solid #b6e3c8;border-radius:999px;padding:3px 10px}
-		.xrv-edge-chip--warn{color:#7a4f00;background:#fff8ef;border-color:#f3d199}
-		.xrv-edge-guess button{margin:0 6px 6px 0}
-		.xrv-settings .xrv-card>h2.title{padding-top:16px;padding-bottom:12px;border:0;border-bottom:1px solid var(--xr-light);border-radius:0;background:transparent;font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--xr-deep);scroll-margin-top:60px}
-		.xrv-settings .xrv-card>.form-table{padding-top:8px;padding-bottom:14px;border:0;background:transparent}
-		.xrv-settings .xrv-card>p,.xrv-settings .xrv-card>form{padding-top:6px;padding-bottom:14px}
-		.xrv-settings h2.title{margin:24px 0 6px;font-size:15px;font-weight:600;color:var(--xr-deep)}
-		.xrv-settings .xrv-nav{position:sticky;top:46px;z-index:9;display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 6px;padding:10px;background:var(--xr-warm);border:1px solid var(--xr-line);border-radius:12px}
-		.xrv-settings .xrv-nav a{text-decoration:none;font-size:12px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--xr-purple);background:#fff;border:1px solid var(--xr-line);border-radius:999px;padding:6px 14px;transition:background .12s ease,color .12s ease,border-color .12s ease}
-		.xrv-settings .xrv-nav a:hover,.xrv-settings .xrv-nav a:focus{background:var(--xr-purple);color:#fff;border-color:var(--xr-purple)}
-		.xrv-settings details.xrv-help{margin:.5em 0 0;max-width:760px}
-		.xrv-settings details.xrv-help>summary{cursor:pointer;color:var(--xr-blue);font-weight:600;font-size:13px;list-style:none}
-		.xrv-settings details.xrv-help>summary::-webkit-details-marker{display:none}
-		.xrv-settings details.xrv-help>summary::before{content:"\25b8\00a0";color:var(--xr-blue)}
-		.xrv-settings details.xrv-help[open]>summary::before{content:"\25be\00a0"}
-		.xrv-settings .button-primary{background:var(--xr-purple);border-color:var(--xr-deep);box-shadow:none;text-shadow:none}
-		.xrv-settings .button-primary:hover,.xrv-settings .button-primary:focus{background:var(--xr-deep);border-color:var(--xr-deep);color:#fff}
-		.xrv-settings a{color:var(--xr-blue)}
-		</style>
+	<div class="wrap xrv-admin xrv-settings">
+		<?php echo xrv_admin_css(); // phpcs:ignore WordPress.Security.EscapeOutput -- static, controlled CSS ?>
+		<?php xrv_admin_header( 'Privacy-first video gallery', 'XRV <b>Settings</b>', 'Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.' ); ?>
 		<nav class="xrv-nav" aria-label="Settings sections">
-			<a href="#xrv-sec-privacy">Privacy &amp; consent</a>
-			<a href="#xrv-sec-browse">Browse</a>
-			<a href="#xrv-sec-api">API key</a>
-			<a href="#xrv-sec-appearance">Appearance</a>
-			<a href="#xrv-sec-sync">Auto-sync</a>
-				<a href="#xrv-sec-urls">URLs</a>
+			<a href="#xrv-sec-privacy"><?php echo xrv_admin_icon( 'shield' ); ?> Privacy &amp; consent</a>
+			<a href="#xrv-sec-browse"><?php echo xrv_admin_icon( 'sliders' ); ?> Browse</a>
+			<a href="#xrv-sec-api"><?php echo xrv_admin_icon( 'key' ); ?> API key</a>
+			<a href="#xrv-sec-appearance"><?php echo xrv_admin_icon( 'image' ); ?> Appearance</a>
+			<a href="#xrv-sec-sync"><?php echo xrv_admin_icon( 'sync' ); ?> Auto-sync</a>
+			<a href="#xrv-sec-urls"><?php echo xrv_admin_icon( 'link' ); ?> URLs</a>
+			<a href="#xrv-sec-faq"><?php echo xrv_admin_icon( 'help' ); ?> Help</a>
 		</nav>
+		<script>
+		/* Scroll-spy: highlight the nav pill for the section currently in view. */
+		(function(){
+			var nav=document.querySelector('.xrv-settings .xrv-nav'); if(!nav||!('IntersectionObserver' in window)) return;
+			var links={}, secs=[];
+			nav.querySelectorAll('a[href^="#"]').forEach(function(a){ var id=a.getAttribute('href').slice(1); links[id]=a; var s=document.getElementById(id); if(s) secs.push(s); });
+			var io=new IntersectionObserver(function(es){ es.forEach(function(e){ if(e.isIntersecting){ Object.keys(links).forEach(function(k){ links[k].classList.toggle('is-active', k===e.target.id); }); } }); }, { rootMargin:'-55% 0px -42% 0px', threshold:0 });
+			secs.forEach(function(s){ io.observe(s); });
+		})();
+		</script>
 		<form method="post" action="options.php">
 			<?php settings_fields( 'xrv_settings_group' ); ?>
 
-			<div class="xrv-card"><h2 class="title" id="xrv-sec-privacy">Privacy &amp; consent</h2>
+			<div class="xrv-card"><h2 class="title" id="xrv-sec-privacy"><span class="xrv-ico"><?php echo xrv_admin_icon( 'shield' ); ?></span>Privacy &amp; consent</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">Edge check</th>
@@ -2864,7 +3010,7 @@ function xrv_render_settings_page() {
 			</table>
 
 			</div>
-				<div class="xrv-card"><h2 class="title" id="xrv-sec-browse">Browse defaults</h2>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-browse"><span class="xrv-ico"><?php echo xrv_admin_icon( 'sliders' ); ?></span>Browse defaults</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">Filter style</th>
@@ -2904,7 +3050,7 @@ function xrv_render_settings_page() {
 			</table>
 
 			</div>
-				<div class="xrv-card"><h2 class="title" id="xrv-sec-api">YouTube Data API key (optional)</h2>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-api"><span class="xrv-ico"><?php echo xrv_admin_icon( 'key' ); ?></span>YouTube Data API key <span style="font-weight:500;color:#787c82;letter-spacing:0">(optional)</span></h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row"><label for="xrv-key">API key</label></th>
@@ -2914,7 +3060,7 @@ function xrv_render_settings_page() {
 			</table>
 
 			</div>
-				<div class="xrv-card"><h2 class="title" id="xrv-sec-appearance">Appearance</h2>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-appearance"><span class="xrv-ico"><?php echo xrv_admin_icon( 'image' ); ?></span>Appearance</h2>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">Default poster</th>
@@ -2959,7 +3105,7 @@ function xrv_render_settings_page() {
 						</tr>
 					</table>
 				</div>
-				<div class="xrv-card"><h2 class="title" id="xrv-sec-sync">Automatic channel sync</h2>
+				<div class="xrv-card"><h2 class="title" id="xrv-sec-sync"><span class="xrv-ico"><?php echo xrv_admin_icon( 'sync' ); ?></span>Automatic channel sync</h2>
 			<p class="description" style="max-width:780px">Poll a YouTube channel or playlist and add any <strong>new</strong> uploads to the library automatically. Videos already in the library (matched by video ID) are skipped, so it is always safe to run. Needs the YouTube Data API key above.<?php if ( '' === $key ) { echo ' <strong style="color:#b32d2e">Add an API key to enable it.</strong>'; } ?></p>
 			<table class="form-table" role="presentation">
 				<tr>
@@ -3012,7 +3158,7 @@ function xrv_render_settings_page() {
 		}
 		?>
 		<div class="xrv-card">
-			<h2 class="title" id="xrv-sec-urls">Video URLs</h2>
+			<h2 class="title" id="xrv-sec-urls"><span class="xrv-ico"><?php echo xrv_admin_icon( 'link' ); ?></span>Video URLs</h2>
 			<?php $pub_count = (int) wp_count_posts( 'xroad_video' )->publish; ?>
 			<p style="margin:.2em 0 0">Active now: <code><?php echo esc_html( '/' . $pl['single'] . '/{slug}' ); ?></code><?php if ( '' !== $pl['archive'] ) { echo ' &nbsp;&middot;&nbsp; Collection <code>' . esc_html( '/' . $pl['archive'] . '/' ) . '</code>'; } ?> &nbsp;&middot;&nbsp; <strong><?php echo (int) $pub_count; ?></strong> published video<?php echo 1 === $pub_count ? '' : 's'; ?> using it.</p>
 
@@ -3063,18 +3209,38 @@ function xrv_render_settings_page() {
 			}
 		}
 		?>
-		<h2 class="title">Run a sync now</h2>
-		<p class="description" style="max-width:780px">Check the channel immediately, using the settings above. Save your changes first if you just edited them.</p>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-			<input type="hidden" name="action" value="xrv_sync_now">
-			<?php wp_nonce_field( 'xrv_sync_now' ); ?>
-			<?php submit_button( 'Sync now', 'secondary', 'submit', false, '' === $key || empty( $s['sync_url'] ) ? array( 'disabled' => 'disabled' ) : array() ); ?>
-		</form>
+		<div class="xrv-card">
+			<?php echo xrv_card_head( 'xrv-sec-syncnow', 'play', 'Run a sync now', 'Check the channel immediately using the settings above. Save your changes first if you just edited them.' ); ?>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<input type="hidden" name="action" value="xrv_sync_now">
+				<?php wp_nonce_field( 'xrv_sync_now' ); ?>
+				<?php submit_button( 'Sync now', 'primary', 'submit', false, '' === $key || empty( $s['sync_url'] ) ? array( 'disabled' => 'disabled' ) : array() ); ?>
+				<?php if ( '' === $key || empty( $s['sync_url'] ) ) { echo '<span class="description" style="margin-left:10px">Add an API key and a channel URL above to enable this.</span>'; } ?>
+			</form>
+			<?php
+			$last = get_option( 'xrv_sync_last', array() );
+			if ( ! empty( $last['time'] ) ) {
+				echo '<p class="description" style="margin:0;padding-bottom:16px">Last run: <strong>' . esc_html( get_date_from_gmt( get_gmt_from_date( $last['time'] ), 'M j, Y g:i a' ) ) . '</strong> &mdash; ' . ( ! empty( $last['ok'] ) ? esc_html( sprintf( 'checked %d, added %d.', (int) $last['checked'], (int) $last['added'] ) ) : esc_html( $last['msg'] ) ) . '</p>';
+			}
+			?>
+		</div>
+
 		<?php
-		$last = get_option( 'xrv_sync_last', array() );
-		if ( ! empty( $last['time'] ) ) {
-			echo '<p class="description" style="margin-top:8px">Last run: <strong>' . esc_html( get_date_from_gmt( get_gmt_from_date( $last['time'] ), 'M j, Y g:i a' ) ) . '</strong> &mdash; ' . ( ! empty( $last['ok'] ) ? esc_html( sprintf( 'checked %d, added %d.', (int) $last['checked'], (int) $last['added'] ) ) : esc_html( $last['msg'] ) ) . '</p>';
-		}
+		// Help / FAQ — the same bold-carat accordion used throughout, gathered as a quick-reference card.
+		xrv_faq_card( 'xrv-sec-faq', 'Questions & answers', array(
+			'Which consent mode should I choose?' =>
+				'<p><strong>Global</strong> fits almost everyone: EU / UK / EEA / Swiss visitors get a one-time opt-in prompt, everyone else plays in one click, and nobody contacts YouTube until they act. Pick <strong>Strict GDPR</strong> to prompt every visitor worldwide (the most defensible posture), or <strong>Facade only</strong> to drop the prompt entirely &mdash; still cookie-free until the click, just with no extra notice.</p>',
+			'Do I need the YouTube Data API key?' =>
+				'<p>No, for everyday use. Pasting video links or uploading a list works with no key (you get the title and thumbnail). You only need a free key to pull a <strong>whole channel or playlist</strong> with durations and descriptions, and to run <strong>automatic sync</strong>.</p>',
+			'Will changing a video URL hurt my SEO?' =>
+				'<p>It can, once URLs are live. Changing the base breaks every existing link and can drop rankings. The default <code>/video/</code> is safe for a fresh site. If videos are already published, run the two-part test in the <em>Video URLs</em> card first and add 301 redirects before changing anything.</p>',
+			'What if a video has no thumbnail?' =>
+				'<p>Hosted videos (YouTube, Vimeo, etc.) download their poster automatically when you save the video. <strong>Self-hosted files</strong> have no poster to fetch, so upload one in the video editor. Until a poster exists, the <em>Default poster</em> set under Appearance is shown.</p>',
+			'How do I show only Shorts, or hide them?' =>
+				'<p>Set the site default under <em>Appearance &rsaquo; Shorts in galleries</em>. To override a single gallery, add an attribute: <code>[xroad-videos shorts="only"]</code>, <code>shorts="hide"</code>, or <code>shorts="all"</code>.</p>',
+			'Do shortcode or block settings override these?' =>
+				'<p>Yes. Everything here is a <strong>site-wide default</strong>. Any attribute set directly on a <code>[xroad-videos]</code> shortcode or on the block always wins for that one gallery.</p>',
+		) );
 		?>
 	</div>
 	<?php
@@ -3376,13 +3542,17 @@ function xrv_render_import_page() {
 	if ( ! current_user_can( 'edit_others_posts' ) ) { return; }
 	$key = (string) get_option( 'xrv_yt_api_key', '' );
 	?>
-	<div class="wrap xrv-import">
-		<h1 style="display:flex;align-items:center;gap:14px;font-weight:600"><?php echo xrv_brand_logo( 28 ); ?> <span style="color:#2A1F4F">Import Videos</span></h1>
-		<p style="max-width:760px;color:#50575e">Paste YouTube video links (one per line) or upload a list. With an optional free
-		<a href="https://developers.google.com/youtube/v3/getting-started" target="_blank" rel="noopener">YouTube Data API key</a>
-		you can also paste a whole <strong>channel</strong> or <strong>playlist</strong> URL and pull duration, date, and description for richer schema.</p>
-
-		<table class="form-table" role="presentation"><tbody>
+	<div class="wrap xrv-admin xrv-import">
+		<?php echo xrv_admin_css(); // phpcs:ignore WordPress.Security.EscapeOutput -- static, controlled CSS ?>
+		<?php xrv_admin_header( 'Bulk add to your library', 'Import <b>Videos</b>', 'Paste video links (one per line) or upload a list. With an optional free <a href="https://developers.google.com/youtube/v3/getting-started" target="_blank" rel="noopener">YouTube Data API key</a> you can pull a whole <strong>channel</strong> or <strong>playlist</strong> with durations, dates, and descriptions for richer schema.' ); ?>
+		<ol class="xrv-steps" aria-label="How importing works">
+			<li><b>1</b> Add links or a file</li>
+			<li><b>2</b> Preview &amp; pick</li>
+			<li><b>3</b> Import to library</li>
+		</ol>
+		<div class="xrv-card">
+			<?php echo xrv_card_head( 'xrv-imp-add', 'upload', 'Add videos', 'Paste links, list a channel&rsquo;s playlists, or choose a file. Nothing is imported until you preview and confirm.' ); ?>
+			<table class="form-table" role="presentation"><tbody>
 			<tr><th scope="row"><label for="xrv-imp-key">YouTube Data API key</label><br><span style="font-weight:400;color:#787c82;font-size:12px">optional</span></th>
 				<td><input type="text" id="xrv-imp-key" class="regular-text" value="<?php echo esc_attr( $key ); ?>" placeholder="Leave blank to import by URL (title + thumbnail only)" autocomplete="off"></td></tr>
 <tr><th scope="row"><label for="xrv-imp-pl-ch">Pick a playlist</label><br><span style="font-weight:400;color:#787c82;font-size:12px">optional &middot; needs API key</span></th>
@@ -3400,22 +3570,26 @@ function xrv_render_import_page() {
 				</td></tr>
 		</tbody></table>
 
-		<p><button id="xrv-imp-preview" class="button button-primary">Preview import</button> <span id="xrv-imp-status" style="margin-left:8px"></span></p>
-		<div id="xrv-imp-results"></div>
-		<div id="xrv-imp-progress"></div>
+			<p style="padding-bottom:18px"><button id="xrv-imp-preview" class="button button-primary button-hero">Preview import</button> <span id="xrv-imp-status" style="margin-left:10px"></span></p>
+			<div id="xrv-imp-results"></div>
+			<div id="xrv-imp-progress"></div>
+		</div>
+
+		<?php
+		xrv_faq_card( 'xrv-imp-faq', 'Questions & answers', array(
+			'What can I paste in the Videos box?' =>
+				'<p>One link per line. YouTube <code>watch</code> or <code>youtu.be</code> links work with no key. With an API key you can also paste a <strong>channel</strong> URL (<code>/@handle</code>, <code>/channel/UC…</code>) or a <code>playlist?list=…</code> URL and the whole list resolves.</p>',
+			'Do I need the API key to import?' =>
+				'<p>No. Without a key you import by URL and get the title and thumbnail. A free key adds duration, upload date, and description, and unlocks channel / playlist imports and the playlist picker above.</p>',
+			'What file types can I upload?' =>
+				'<p>A <code>.txt</code> or <code>.csv</code> of URLs (one per line), or a <code>.json</code> metadata file with <code>id, title, duration, upload, desc</code> fields for a rich import with no API key.</p>',
+			'What happens to videos already in my library?' =>
+				'<p>The preview flags each as <span class="xrv-badge-new">NEW</span> or <span class="xrv-badge-exists">EXISTS</span>. Before importing you choose whether existing videos are <strong>skipped</strong> (the default) or <strong>overwritten</strong> with a refreshed title, metadata, and thumbnail.</p>',
+			'Will importing publish the videos right away?' =>
+				'<p>Yes &mdash; imported videos are added as published and appear in your galleries immediately. Reorder them under <strong>All Videos</strong>, or open any one to fine-tune its details.</p>',
+		) );
+		?>
 	</div>
-	<style>
-		.xrv-import #xrv-imp-results table{max-width:920px}
-		.xrv-import td .xrv-badge-new{color:#007a53;font-weight:600}
-		.xrv-import td .xrv-badge-exists{color:#8a6a2a;font-weight:600}
-		.xrv-import fieldset{border:1px solid #dcdcde;border-radius:4px;padding:10px 14px;max-width:920px}
-		.xrv-import .xrv-bar-wrap{max-width:920px;background:#e2e6eb;border-radius:6px;height:16px;overflow:hidden}
-		.xrv-import .xrv-bar{height:100%;width:0;background:#007a53;transition:width .3s}
-		.xrv-import .xrv-tag{display:inline-block;margin:2px 4px 2px 0;padding:1px 8px;border-radius:10px;font-size:11px;line-height:1.7;white-space:nowrap}
-		.xrv-import .xrv-tag.is-series{background:#e6f4ee;color:#0a6b48}
-		.xrv-import .xrv-tag.is-aud{background:#eef1fb;color:#3a4a8c}
-		.xrv-import .xrv-tag.is-topic{background:#f3eefb;color:#6b3a8c}
-	</style>
 	<script>window.XRV_IMP = { ajax: <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, nonce: <?php echo wp_json_encode( wp_create_nonce( 'xrv_import' ) ); ?> };</script>
 	<?php
 	echo xrv_import_inline_js();
