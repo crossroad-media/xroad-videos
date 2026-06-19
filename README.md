@@ -53,6 +53,7 @@ Editors never pick a provider by hand: paste a URL and the host is detected auto
 | Wistia | a `wistia.com/medias/...` URL | title, poster, duration |
 | Loom | `loom.com/share/...` | title, poster, duration |
 | Dailymotion | `dailymotion.com/video/...` or `dai.ly/...` | title, poster |
+| TikTok | a `tiktok.com/@user/video/...` link (vertical, rendered 9:16) | title, poster |
 | Self-hosted file | a direct `.mp4` or `.webm` URL (pick **Self-hosted file**) | none; set the title and upload a poster yourself |
 
 Hosted videos load on click as the host's privacy-enhanced player (Vimeo uses `dnt=1` with no title or byline chrome); **self-hosted files** play in a native `<video>` element, so they make no third-party contact at any point. Galleries can mix sources freely in one grid. The bulk importer and channel sync remain YouTube-only in this release; multi-source bulk import is planned for 2.5.
@@ -150,6 +151,22 @@ On play, the plugin pushes to `window.dataLayer`:
 Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag reading those data-layer variables. Because the facade never refreshes the page, it avoids the attribution corruption that page-refresh consent workarounds cause.
 
 ## Changelog
+
+### 2.5.0
+
+Two new front-end capabilities plus a per-video editor pass.
+
+- **Embed any video anywhere.** `[xroad-video url="..."]` now renders the privacy-first click-to-load facade for any supported URL with no library entry needed, so an editor can drop a video into any post or page by pasting its link. Optional `poster` (a local attachment id or URL) and `title` attributes; the poster is sideloaded locally on first render and cached, so the embed still makes zero third-party requests before the click. Curated library videos (`[xroad-video id="123"]`) keep their richer VideoObject schema.
+- **TikTok support.** TikTok joins YouTube, Vimeo, Wistia, Loom, and Dailymotion as an auto-detected source. Paste a `tiktok.com/@user/video/...` link; it renders vertical (9:16) and loads on click as TikTok's native iframe player (no `embed.js`), poster fetched keyless via oEmbed. Works in galleries, single embeds, and the URL embed above.
+
+A per-video editor pass focused on a calmer, more intuitive add/edit flow. Admin-facing; the front-end gains optional mobile posters and auto-generated image renditions.
+
+- **Single-field editor.** The `xroad_video` post type no longer loads the full block editor body (videos are defined by their meta, not post content). The Add/Edit screen is now just a title field plus the Video Details box.
+- **Opt-in dedicated-page link.** The "Dedicated page URL" field is hidden behind a checkbox, so it only appears when you actually want a card to link out — a clearer default.
+- **Friendly duration entry.** Type the running time as `minutes:seconds` and the schema-accurate ISO 8601 value (`PT12M30S`) fills itself. A help accordion explains the format and links to a converter.
+- **Native upload-date picker.** Upload date is now a real date picker instead of a hand-typed `YYYY-MM-DD` string.
+- **Poster images, expanded.** The poster control is split into a clear **Primary poster** (16:9, grids/desktop) and an optional **Mobile poster** (a portrait/square crop shown ≤600px, served via `<picture>` and still 100% local — no third-party calls). Recommended specs live in an inline help accordion.
+- **Auto-generated renditions.** Registered `xrv-poster` (1280×720) and `xrv-poster-mobile` (720×960) image sizes, so WordPress generates desktop and mobile crops of every poster on upload.
 
 ### 2.4.0
 

@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.4.0
+ * Version:           2.5.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +60,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.4.0' );
+	define( 'XRV_VERSION', '2.5.0' );
 }
 
 /* =================================================================================================
@@ -104,7 +104,10 @@ function xrv_register_data_model() {
 		'show_in_rest'  => true,
 		'menu_icon'     => 'dashicons-video-alt3',
 		'rewrite'       => array( 'slug' => $pl['single'] ),  // single-post base (admin-selected, write-once)
-		'supports'      => array( 'title', 'editor', 'thumbnail', 'page-attributes' ), // page-attributes => menu_order for manual drag-ordering
+		// A video is defined entirely by its meta (URL, poster, taxonomy), not post body — so we drop
+		// 'editor' to collapse the screen to a single title field + the Video Details box. The front-end
+		// single page is built from meta by xrv_single_content(), so no post_content is needed.
+		'supports'      => array( 'title', 'thumbnail', 'page-attributes' ), // page-attributes => menu_order for manual drag-ordering
 	) );
 
 	// Three controlled-vocabulary taxonomies, each mapping to one filter group: series, audience, topic.
@@ -127,6 +130,16 @@ function xrv_register_data_model() {
 	}
 }
 
+/* Poster renditions WordPress auto-generates on upload, so every poster has a right-sized desktop crop
+ * (16:9) and a mobile-friendly portrait crop (3:4) ready without manual work. Hard crops (the `true`) keep
+ * a predictable shape across a mixed library. The responsive grid already serves the smallest sufficient
+ * 'large' rendition via srcset; these add purpose-built desktop/mobile shapes for art-directed posters. */
+add_action( 'after_setup_theme', 'xrv_register_image_sizes' );
+function xrv_register_image_sizes() {
+	add_image_size( 'xrv-poster', 1280, 720, true );        // desktop / grid card (16:9)
+	add_image_size( 'xrv-poster-mobile', 720, 960, true );  // mobile portrait (3:4)
+}
+
 /* -------------------------------------------------------------------------------------------------
  * 1a. Net-new scalar meta. Native register_post_meta (no ACF). All single, REST-exposed, edit-gated.
  * ------------------------------------------------------------------------------------------------- */
@@ -142,6 +155,7 @@ function xrv_register_meta() {
 		'_xrv_upload_date'   => 'string',  // YYYY-MM-DD
 		'_xrv_description'    => 'string', // plain-language summary
 		'_xrv_local_thumb_id' => 'integer', // media-library attachment ID for the locally stored poster
+		'_xrv_mobile_thumb_id' => 'integer', // optional: separate portrait/square poster shown on phones
 		'_xrv_transcript'    => 'string',  // full transcript -> VideoObject.transcript (rich results + AI citation)
 		'_xrv_chapters'      => 'string',  // "M:SS Label" per line -> hasPart Clip[] (key-moments rich result)
 	);
@@ -225,7 +239,7 @@ function xrv_lock_urls_handler() {
 
 /** Whitelist of providers xroad-videos can render. */
 function xrv_providers() {
-	return array( 'youtube', 'vimeo', 'wistia', 'loom', 'dailymotion', 'file' );
+	return array( 'youtube', 'vimeo', 'wistia', 'loom', 'dailymotion', 'tiktok', 'file' );
 }
 
 /** Sniff the provider from a pasted URL. Returns '' when nothing matches (caller falls back to youtube). */
@@ -237,6 +251,7 @@ function xrv_detect_provider( $url ) {
 	if ( preg_match( '#(?:wistia\.(?:com|net)|wi\.st)#i', $url ) )           { return 'wistia'; }
 	if ( preg_match( '#loom\.com#i', $url ) )                                { return 'loom'; }
 	if ( preg_match( '#(?:dailymotion\.com|dai\.ly)#i', $url ) )             { return 'dailymotion'; }
+	if ( preg_match( '#tiktok\.com#i', $url ) )                              { return 'tiktok'; }
 	if ( preg_match( '#\.(?:mp4|m4v|webm|ogv|ogg|mov)(?:[?\#]|$)#i', $url ) ) { return 'file'; }
 	return '';
 }
@@ -298,6 +313,15 @@ function xrv_extract_video_id( $url, $provider = 'youtube' ) {
 			}
 			return preg_match( '/^[A-Za-z0-9]{5,}$/', $url ) ? $url : '';
 
+		case 'tiktok':
+			// Long numeric ID. Accept @user/video, player, or embed URLs, or a bare ID.
+			// ponytail: canonical URLs only; vm.tiktok.com / tiktok.com/t short links redirect and would
+			// need a network call to resolve — paste the full @user/video link instead.
+			if ( preg_match( '#tiktok\.com/(?:@[\w.\-]+/video/|v/|embed/v2/|player/v1/)(\d+)#i', $url, $m ) ) {
+				return $m[1];
+			}
+			return preg_match( '/^\d{8,}$/', $url ) ? $url : '';
+
 		case 'file':
 			// Self-hosted: the media URL (or a site-relative path) is itself the identifier.
 			return ( preg_match( '#^https?://#i', $url ) || 0 === strpos( $url, '/' ) ) ? $url : '';
@@ -358,6 +382,10 @@ function xrv_embed_url( $id, $provider = 'youtube', $hash = '' ) {
 		case 'dailymotion':
 			return 'https://www.dailymotion.com/embed/video/' . rawurlencode( $id ) . '?autoplay=1';
 
+		case 'tiktok':
+			// Native iframe player (no embed.js). Music/description chrome off for a clean facade.
+			return 'https://www.tiktok.com/player/v1/' . rawurlencode( $id ) . '?autoplay=1&controls=1&description=0&music_info=0';
+
 		case 'file':
 			// Self-hosted: the media URL is played directly in a <video> element (handled client-side).
 			return $id;
@@ -386,6 +414,10 @@ function xrv_watch_url( $id, $provider = 'youtube' ) {
 			return 'https://www.loom.com/share/' . $id;
 		case 'dailymotion':
 			return 'https://www.dailymotion.com/video/' . $id;
+		case 'tiktok':
+			// Canonical watch URL needs the @handle, which the bare ID lacks; the pasted source URL is used
+			// for oEmbed instead, so an empty string here is fine (schema contentUrl just omits it).
+			return '';
 		case 'file':
 			return $id;
 		case 'youtube':
@@ -411,6 +443,10 @@ function xrv_fetch_oembed( $watch_url, $provider = 'youtube' ) {
 			break;
 		case 'dailymotion':
 			$endpoint = 'https://www.dailymotion.com/services/oembed?url=' . rawurlencode( $watch_url );
+			break;
+		case 'tiktok':
+			// Keyless; returns title + thumbnail_url (extension-less URL handled by the sideloader's sniffing).
+			$endpoint = 'https://www.tiktok.com/oembed?url=' . rawurlencode( $watch_url );
 			break;
 		case 'youtube':
 		default:
@@ -624,6 +660,20 @@ function xrv_poster_srcset( $thumb_id ) {
 	return array( 'srcset' => $srcset, 'sizes' => (string) $sizes );
 }
 
+/**
+ * The optional separate mobile poster URL (a manual portrait/square upload, _xrv_mobile_thumb_id). Empty
+ * when none is set, in which case the card simply serves a smaller rendition of the primary poster via the
+ * normal <img> srcset. Always a local /uploads/ URL, so the click-to-load facade stays zero-third-party.
+ */
+function xrv_mobile_poster_url( $post_id ) {
+	$mid = (int) get_post_meta( $post_id, '_xrv_mobile_thumb_id', true );
+	if ( $mid ) {
+		$url = wp_get_attachment_image_url( $mid, 'large' );
+		if ( $url ) { return $url; }
+	}
+	return '';
+}
+
 /* =================================================================================================
  * 5. THE RENDERER
  *    Queries every video ordered by menu_order (the editor's manual drag-order), prints the full markup
@@ -761,6 +811,7 @@ function xrv_render( $atts = array() ) {
 			'dur_sec'    => xrv_iso_to_seconds( $dur_iso ),
 			'upload'     => $upload,
 			'poster'     => xrv_local_poster_url( $id, $thumb_id ),
+			'poster_mobile' => xrv_mobile_poster_url( $id ),
 			'poster_srcset' => $poster_ss['srcset'],
 			'poster_sizes'  => $poster_ss['sizes'],
 			'series'     => $groups['series'],
@@ -952,7 +1003,9 @@ function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 		<div class="xrv-frame">
 			<button type="button" class="xrv-facade" aria-label="Play video: <?php echo esc_attr( $title ); ?>">
 				<?php if ( $poster !== '' ) : ?>
-					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>"<?php if ( ! empty( $r['poster_srcset'] ) ) : ?> srcset="<?php echo esc_attr( $r['poster_srcset'] ); ?>" sizes="<?php echo esc_attr( $r['poster_sizes'] ); ?>"<?php endif; ?> width="480" height="360" loading="<?php echo $eager ? 'eager' : 'lazy'; ?>"<?php echo $eager ? ' fetchpriority="high"' : ''; ?> decoding="async" alt="<?php echo esc_attr( $title ); ?>">
+					<?php $mobile = $r['poster_mobile'] ?? ''; $use_pic = ( '' !== $mobile && empty( $r['is_short'] ) ); ?>
+					<?php if ( $use_pic ) : ?><picture><source media="(max-width: 600px)" srcset="<?php echo esc_url( $mobile ); ?>"><?php endif; ?>
+					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>"<?php if ( ! empty( $r['poster_srcset'] ) ) : ?> srcset="<?php echo esc_attr( $r['poster_srcset'] ); ?>" sizes="<?php echo esc_attr( $r['poster_sizes'] ); ?>"<?php endif; ?> width="480" height="360" loading="<?php echo $eager ? 'eager' : 'lazy'; ?>"<?php echo $eager ? ' fetchpriority="high"' : ''; ?> decoding="async" alt="<?php echo esc_attr( $title ); ?>"><?php if ( $use_pic ) : ?></picture><?php endif; ?>
 				<?php else : ?>
 					<span class="xrv-thumb xrv-thumb--ph" aria-hidden="true"></span>
 				<?php endif; ?>
@@ -1390,8 +1443,8 @@ function xrv_inline_css() {
 .xrv-card{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin:0 0 24px;display:inline-block;width:100%;content-visibility:auto;contain-intrinsic-size:auto 320px}
 .xrv-frame{position:relative;width:100%}
 .xrv-facade{display:block;position:relative;width:100%;padding:0;margin:0;border:none;background:#0a1622;border-radius:6px;overflow:hidden;cursor:pointer;aspect-ratio:16/9;line-height:0}
-.xrv-card[data-short]{max-width:300px;margin-left:auto;margin-right:auto}
-.xrv-card[data-short] .xrv-facade,.xrv-card[data-short] .xrv-iframe{aspect-ratio:9/16}
+.xrv-card[data-short],.xrv-card[data-provider="tiktok"]{max-width:300px;margin-left:auto;margin-right:auto}
+.xrv-card[data-short] .xrv-facade,.xrv-card[data-short] .xrv-iframe,.xrv-card[data-provider="tiktok"] .xrv-facade,.xrv-card[data-provider="tiktok"] .xrv-iframe{aspect-ratio:9/16}
 .xrv-facade:focus-visible{outline:3px solid var(--xrv-accent,#019AB3);outline-offset:3px}
 .xrv-thumb{display:block;width:100%;height:100%;object-fit:cover;border:0;transition:transform .3s ease,opacity .2s ease}
 .xrv-thumb--ph{background:linear-gradient(135deg,var(--xrv-primary,#013C60),var(--xrv-link,#017A8E))}
@@ -1569,6 +1622,8 @@ function xrv_inline_js() {
 				return 'https://www.loom.com/embed/' + encodeURIComponent(id) + '?autoplay=1';
 			case 'dailymotion':
 				return 'https://www.dailymotion.com/embed/video/' + encodeURIComponent(id) + '?autoplay=1';
+			case 'tiktok':
+				return 'https://www.tiktok.com/player/v1/' + encodeURIComponent(id) + '?autoplay=1&controls=1&description=0&music_info=0';
 			default:
 				return 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&modestbranding=1&playsinline=1' + (isShort ? '&loop=1&playlist=' + encodeURIComponent(id) : '');
 		}
@@ -1690,7 +1745,7 @@ function xrv_inline_js() {
 			if(card.dataset.xrvPre) return;
 			card.dataset.xrvPre = '1';
 			var provider = card.getAttribute('data-provider') || 'youtube';
-			var hosts = { youtube:'https://www.youtube-nocookie.com', vimeo:'https://player.vimeo.com', wistia:'https://fast.wistia.net', loom:'https://www.loom.com', dailymotion:'https://www.dailymotion.com' };
+			var hosts = { youtube:'https://www.youtube-nocookie.com', vimeo:'https://player.vimeo.com', wistia:'https://fast.wistia.net', loom:'https://www.loom.com', dailymotion:'https://www.dailymotion.com', tiktok:'https://www.tiktok.com' };
 			var host = hosts[provider];
 			if(!host) return; // self-hosted files: nothing third-party to warm up
 			var l = document.createElement('link'); l.rel = 'preconnect'; l.href = host;
@@ -1821,16 +1876,20 @@ add_shortcode( 'xroad-videos', 'xrv_render' );
  * like /about/ that sit a specific video in the page flow. Provider-agnostic via the 2.0 sources. */
 add_shortcode( 'xroad-video', 'xrv_shortcode_single' );
 function xrv_shortcode_single( $atts ) {
-	$a  = shortcode_atts( array( 'id' => 0, 'playback' => 'inline' ), $atts, 'xroad-video' );
+	$a  = shortcode_atts( array( 'id' => 0, 'url' => '', 'poster' => '', 'title' => '', 'playback' => 'inline' ), $atts, 'xroad-video' );
 	$id = (int) $a['id'];
-	if ( 'xroad_video' !== get_post_type( $id ) || 'publish' !== get_post_status( $id ) ) {
-		// ponytail: id only. video="https://..." URL resolve is the upgrade path if editors prefer pasting links.
-		// Visible hint for editors (not visitors): the singular tag is easy to confuse with the gallery [xroad-videos].
-		return current_user_can( 'edit_posts' )
-			? '<span style="display:inline-block;padding:8px 12px;border:1px dashed #f3d199;background:#fff8ef;border-radius:6px;font-size:13px;color:#7a4f00"><code>[xroad-video]</code> needs a published video <code>id</code>, e.g. <code>[xroad-video id="123"]</code>. For a gallery of videos, use <code>[xroad-videos]</code> (plural).</span>'
-			: '';
+	// A published CPT video id renders the curated (schema-rich) single embed.
+	if ( $id && 'xroad_video' === get_post_type( $id ) && 'publish' === get_post_status( $id ) ) {
+		return xrv_render_single( $id, $a['playback'] ); // playback="lightbox" pops a modal; default plays in place
 	}
-	return xrv_render_single( $id, $a['playback'] ); // playback="lightbox" pops a modal (Divi-style); default plays in place
+	// Otherwise a pasted url renders an ad-hoc facade for ANY supported host, no CPT entry needed.
+	if ( '' !== trim( (string) $a['url'] ) ) {
+		return xrv_render_single_url( trim( (string) $a['url'] ), $a['playback'], (string) $a['poster'], (string) $a['title'] );
+	}
+	// Neither given: a visible hint for editors (the singular tag is easy to confuse with the gallery).
+	return current_user_can( 'edit_posts' )
+		? '<span style="display:inline-block;padding:8px 12px;border:1px dashed #f3d199;background:#fff8ef;border-radius:6px;font-size:13px;color:#7a4f00"><code>[xroad-video]</code> needs a published video <code>id</code> (<code>[xroad-video id="123"]</code>) or a <code>url</code> (<code>[xroad-video url="https://youtu.be/&hellip;"]</code>). For a gallery, use <code>[xroad-videos]</code> (plural).</span>'
+		: '';
 }
 
 add_action( 'init', 'xrv_register_block' );
@@ -1981,6 +2040,7 @@ function xrv_render_single( $post_id, $playback = 'inline' ) {
 		'dur_clock'  => xrv_iso_to_clock( $dur_iso ),
 		'upload'     => $upload,
 		'poster'     => xrv_local_poster_url( $post_id, $thumb_id ),
+		'poster_mobile' => xrv_mobile_poster_url( $post_id ),
 		'poster_srcset' => $poster_ss['srcset'],
 		'poster_sizes'  => $poster_ss['sizes'],
 		'series'     => is_wp_error( $series ) ? array() : $series,
@@ -2002,6 +2062,105 @@ function xrv_render_single( $post_id, $playback = 'inline' ) {
 </div>
 	<?php
 	echo xrv_single_video_schema( $post_id ); // standalone rich VideoObject (not the CollectionPage wrapper)
+	return ob_get_clean();
+}
+
+/**
+ * Ad-hoc poster for a pasted-URL embed that has no CPT entry. We must NOT point the <img> at a remote
+ * host (that would fire a third-party request before the click and break the facade promise), so the
+ * poster is sideloaded into the media library ONCE per provider:id and the attachment id cached in a
+ * single option. A short transient lock stops a traffic burst sideloading the same URL twice. Returns 0
+ * when no poster could be fetched yet (the card then shows the neutral placeholder).
+ * ponytail: sideload lazily on first render, locked + cached forever; move to a cron/async resolver only
+ * if a tenant embeds high-traffic ad-hoc URLs.
+ */
+function xrv_adhoc_thumb_id( $provider, $id, $source_url ) {
+	$key = $provider . ':' . $id;
+	$map = (array) get_option( 'xrv_adhoc_thumbs', array() );
+	if ( ! empty( $map[ $key ] ) && wp_get_attachment_image_url( (int) $map[ $key ], 'large' ) ) {
+		return (int) $map[ $key ];
+	}
+	$lock = 'xrv_adhoc_' . md5( $key );
+	if ( get_transient( $lock ) ) { return 0; } // a sideload is already in flight; placeholder this render
+	set_transient( $lock, 1, MINUTE_IN_SECONDS );
+
+	if ( 'youtube' === $provider ) {
+		$cands = xrv_thumb_candidates( $id, 'youtube', false !== strpos( (string) $source_url, '/shorts/' ) );
+	} else {
+		$oembed = xrv_fetch_oembed( $source_url, $provider ); // every non-YouTube host's poster = its oEmbed thumbnail_url
+		$cands  = ! empty( $oembed['thumbnail_url'] ) ? array( $oembed['thumbnail_url'] ) : array();
+	}
+	$att = $cands ? xrv_sideload_thumbnail( 0, $id, $provider, $cands ) : new WP_Error( 'xrv', 'no candidate' );
+	delete_transient( $lock );
+	if ( is_wp_error( $att ) ) { return 0; }
+	$map[ $key ] = (int) $att;
+	update_option( 'xrv_adhoc_thumbs', $map, false );
+	return (int) $att;
+}
+
+/**
+ * Render a click-to-load facade for ANY supported video URL with no CPT entry — powers
+ * [xroad-video url="..."] so an editor can drop a privacy-safe player into any post or page. Reuses the
+ * whole provider switch, the card, and the shared assets. Poster: an explicit poster attr wins, else the
+ * sideloaded-and-cached local image, else the neutral placeholder. No JSON-LD (the host page owns its own
+ * schema); use a curated CPT video for an SEO-first page.
+ */
+function xrv_render_single_url( $url, $playback = 'inline', $poster_attr = '', $title = '' ) {
+	$provider = xrv_detect_provider( $url );
+	if ( '' === $provider ) { $provider = 'youtube'; }
+	$id   = xrv_extract_video_id( $url, $provider );
+	$hash = xrv_extract_video_hash( $url, $provider );
+	if ( '' === $id ) {
+		return current_user_can( 'edit_posts' )
+			? '<span style="display:inline-block;padding:8px 12px;border:1px dashed #f3d199;background:#fff8ef;border-radius:6px;font-size:13px;color:#7a4f00"><code>[xroad-video]</code> could not read a video ID from that <code>url</code>. Paste a full watch/share link (for TikTok use the <code>@user/video/&hellip;</code> link, not a <code>vm.tiktok.com</code> short link).</span>'
+			: '';
+	}
+
+	// Poster stays LOCAL only (an explicit external URL is ignored, never rendered) to keep the
+	// no-third-party-before-click guarantee. attachment_url_to_postid() resolves a local media URL to its ID.
+	$thumb_id = 0;
+	if ( '' !== $poster_attr ) {
+		$thumb_id = is_numeric( $poster_attr ) ? (int) $poster_attr : (int) attachment_url_to_postid( $poster_attr );
+	}
+	if ( ! $thumb_id ) {
+		$thumb_id = xrv_adhoc_thumb_id( $provider, $id, $url );
+	}
+	$poster_ss = xrv_poster_srcset( $thumb_id );
+
+	$r = array(
+		'id'         => 0,
+		'title'      => (string) $title,
+		'provider'   => $provider,
+		'vid'        => $id,
+		'hash'       => $hash,
+		'source_url' => $url,
+		'desc'       => '',
+		'dedicated'  => '',
+		'dur_iso'    => '',
+		'dur_clock'  => '',
+		'upload'     => '',
+		'poster'     => $thumb_id ? (string) wp_get_attachment_image_url( $thumb_id, 'large' ) : '',
+		'poster_mobile' => '',
+		'poster_srcset' => $poster_ss['srcset'],
+		'poster_sizes'  => $poster_ss['sizes'],
+		'series'     => array(),
+		'audience'   => array(),
+		'topic'      => array(),
+		'date_key'   => 0,
+		'search'     => '',
+		'is_short'   => ( 'tiktok' === $provider ) || ( false !== strpos( $url, '/shorts/' ) ),
+	);
+
+	ob_start();
+	?>
+<div id="xroad-videos-app" class="xrv xrv--single" data-playback="<?php echo esc_attr( 'lightbox' === $playback ? 'lightbox' : 'inline' ); ?>">
+	<?php echo xrv_head_assets_once(); ?>
+	<div class="xrv-grid" style="column-count:1">
+		<?php echo xrv_render_card( $r ); ?>
+	</div>
+	<?php echo xrv_footer_js_once(); ?>
+</div>
+	<?php
 	return ob_get_clean();
 }
 
@@ -2067,6 +2226,7 @@ function xrv_render_meta_box( $post ) {
 		'wistia'      => 'Wistia',
 		'loom'        => 'Loom',
 		'dailymotion' => 'Dailymotion',
+		'tiktok'      => 'TikTok',
 		'file'        => 'Self-hosted file (MP4 / WebM)',
 	);
 	echo '<p style="margin:0 0 4px"><label for="_xrv_provider" style="display:block;font-weight:600;margin-bottom:4px">Provider</label>'
@@ -2075,7 +2235,7 @@ function xrv_render_meta_box( $post ) {
 		echo '<option value="' . esc_attr( $pv ) . '"' . selected( $provider, $pv, false ) . '>' . esc_html( $plabel ) . '</option>';
 	}
 	echo '</select></p>';
-	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">Leave this on <strong>Auto-detect</strong> and just paste the video URL below. Supported hosts: YouTube, Vimeo, Wistia, Loom, Dailymotion. For a <strong>self-hosted file</strong>, choose that option and paste a direct MP4 or WebM URL, then upload a poster image below.</p>';
+	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">Leave this on <strong>Auto-detect</strong> and just paste the video URL below. Supported hosts: YouTube, Vimeo, Wistia, Loom, Dailymotion, TikTok. For a <strong>self-hosted file</strong>, choose that option and paste a direct MP4 or WebM URL, then upload a poster image below.</p>';
 
 	$row( 'Video URL (paste the watch link; the ID is extracted automatically)', '_xrv_source_url', $src_url, 'e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'url' );
 
@@ -2083,29 +2243,68 @@ function xrv_render_meta_box( $post ) {
 
 	echo '<p style="margin:0 0 14px;color:#666;font-size:12px">Detected video ID: <code>' . ( $vid !== '' ? esc_html( $vid ) : '— (saved after you add a URL)' ) . '</code></p>';
 
-	// Poster image: a custom upload OR the auto-fetched YouTube thumbnail. Media picker wired in xrv_media_picker_js().
+	// Poster images: a primary (desktop/grid) poster — custom upload OR auto-fetched host thumbnail — plus an
+	// OPTIONAL separate mobile poster for art-directed phones. Both pickers wired in xrv_media_picker_js().
 	$is_custom   = '1' === (string) get_post_meta( $post->ID, '_xrv_thumb_custom', true );
 	$eff_id      = xrv_effective_thumb_id( $post->ID, $thumb_id );
 	$preview_url = $eff_id ? wp_get_attachment_image_url( $eff_id, 'medium' ) : '';
 	$src_label   = $is_custom ? 'custom upload' : ( $thumb_id ? 'auto-fetched from the video host' : ( $eff_id ? 'site default' : 'none yet' ) );
 	$settings_link = esc_url( admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) );
-	echo '<div class="xrv-media-field" style="margin:0 0 14px;padding:12px;border:1px solid #e2e6eb;border-radius:6px;background:#fbfbfc">'
-		. '<label style="display:block;font-weight:600;margin-bottom:6px">Poster image <span style="font-weight:400;color:#787c82">(' . esc_html( $src_label ) . ')</span></label>'
-		. '<div class="xrv-media-preview" style="margin-bottom:8px">' . ( $preview_url ? '<img src="' . esc_url( $preview_url ) . '" alt="" style="max-width:220px;height:auto;border-radius:4px;display:block">' : '<span style="color:#a05a00;font-size:12px">No poster yet — one is downloaded from the video host automatically on save (self-hosted files need a manual poster upload).</span>' ) . '</div>'
+	$mobile_id   = (int) get_post_meta( $post->ID, '_xrv_mobile_thumb_id', true );
+	$mobile_url  = $mobile_id ? wp_get_attachment_image_url( $mobile_id, 'medium' ) : '';
+
+	echo '<label style="display:block;font-weight:600;margin:0 0 8px">Poster images</label>';
+
+	// Primary / desktop poster.
+	echo '<div class="xrv-media-field" style="margin:0 0 10px;padding:12px;border:1px solid var(--xr-line);border-radius:10px;background:#fbfbfd">'
+		. '<div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--xr-charcoal)">Primary poster <span style="font-weight:400;color:#787c82">&middot; ' . esc_html( $src_label ) . ' &middot; grids &amp; wide screens (16:9)</span></div>'
+		. '<div class="xrv-media-preview" style="margin-bottom:8px">' . ( $preview_url ? '<img src="' . esc_url( $preview_url ) . '" alt="" style="max-width:220px;height:auto;border-radius:6px;display:block">' : '<span style="color:#a05a00;font-size:12px">No poster yet &mdash; one is downloaded from the video host automatically on save (self-hosted files need a manual upload).</span>' ) . '</div>'
 		. '<input type="hidden" class="xrv-media-id" name="_xrv_local_thumb_id" value="' . (int) $thumb_id . '">'
 		. '<input type="hidden" class="xrv-media-custom" name="_xrv_thumb_custom" value="' . ( $is_custom ? '1' : '0' ) . '">'
 		. '<button type="button" class="button xrv-media-pick">Upload / choose image</button>'
 		. ' <button type="button" class="button-link xrv-media-clear" style="color:#b32d2e;margin-left:8px;' . ( $thumb_id ? '' : 'display:none' ) . '">Reset to automatic</button>'
-		. '<p class="description" style="margin-top:8px">Upload your own poster to override the auto-fetched thumbnail. <strong>Reset to automatic</strong> clears it so the host thumbnail is re-fetched on save. If a video has no poster at all, the <a href="' . $settings_link . '">site default poster</a> is used.</p>'
 		. '</div>';
+
+	// Optional mobile poster (opt-in via checkbox; revealed by the meta-box script below).
+	echo '<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin:0 0 8px;cursor:pointer">'
+		. '<input type="checkbox" id="xrv-mob-toggle" style="margin-top:2px"' . checked( $mobile_id > 0, true, false ) . '>'
+		. '<span><strong>Use a different image on phones</strong> <span style="color:#787c82">&mdash; optional. A portrait / square crop shown at &le;600px. Leave off and phones use a smaller rendition of the primary poster automatically.</span></span></label>';
+	echo '<div class="xrv-media-field" id="xrv-mob-field" style="margin:0 0 6px;padding:12px;border:1px solid var(--xr-line);border-radius:10px;background:#fbfbfd;' . ( $mobile_id ? '' : 'display:none' ) . '">'
+		. '<div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--xr-charcoal)">Mobile poster <span style="font-weight:400;color:#787c82">&middot; recommended 3:4 or 1:1</span></div>'
+		. '<div class="xrv-media-preview" style="margin-bottom:8px">' . ( $mobile_url ? '<img src="' . esc_url( $mobile_url ) . '" alt="" style="max-width:150px;height:auto;border-radius:6px;display:block">' : '<span style="color:#787c82;font-size:12px">No mobile image chosen yet.</span>' ) . '</div>'
+		. '<input type="hidden" class="xrv-media-id" name="_xrv_mobile_thumb_id" value="' . (int) $mobile_id . '">'
+		. '<button type="button" class="button xrv-media-pick">Upload / choose mobile image</button>'
+		. ' <button type="button" class="button-link xrv-media-clear" style="color:#b32d2e;margin-left:8px;' . ( $mobile_id ? '' : 'display:none' ) . '">Remove</button>'
+		. '</div>';
+
+	echo xrv_help( 'Recommended poster specs', '<p><strong>Primary poster</strong> &mdash; 16:9 landscape, ideally <strong>1280&times;720</strong>. JPG or WebP, a clear focal subject, under ~300&nbsp;KB. WordPress auto-generates desktop and mobile renditions on upload and the grid serves the right size per screen.</p><p><strong>Mobile poster</strong> (optional) &mdash; a 3:4 portrait or 1:1 square framing for phones, where a wide 16:9 image can read small. Turn on the checkbox above to add one; otherwise phones use a smaller version of the primary poster.</p><p>If a video has no poster at all, the <a href="' . $settings_link . '">site default poster</a> set in Settings is used.</p>' ); // phpcs:ignore WordPress.Security.EscapeOutput
 
 	echo '<p style="margin:0 0 14px"><label for="_xrv_description" style="display:block;font-weight:600;margin-bottom:4px">Plain-language description (one or two sentences)</label>'
 		. '<textarea id="_xrv_description" name="_xrv_description" rows="3" class="widefat" placeholder="A short, plain-language summary of the video.">'
 		. esc_textarea( $desc ) . '</textarea></p>';
 
-	$row( 'Dedicated page URL (optional — a page this card links out to)', '_xrv_dedicated_url', $dedicated, 'e.g. https://example.com/videos/example/', 'url' );
-	$row( 'Duration (ISO 8601, optional — auto where available)', '_xrv_duration_iso', $dur, 'e.g. PT12M30S' );
-	$row( 'Upload date (YYYY-MM-DD, optional — auto where available)', '_xrv_upload_date', $upload, 'e.g. 2025-09-15' );
+	// Dedicated page URL — opt-in: the field only appears when the editor wants this behavior.
+	$use_ded = '' !== $dedicated;
+	echo '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:600;margin:0 0 6px;cursor:pointer">'
+		. '<input type="checkbox" id="xrv-ded-toggle" name="_xrv_use_dedicated" value="1" style="margin-top:3px"' . checked( $use_ded, true, false ) . '>'
+		. '<span>Link this card to a dedicated page <span style="font-weight:400;color:#787c82">&mdash; optional. Sends viewers to a page you choose instead of playing in place.</span></span></label>';
+	echo '<p id="xrv-ded-field" style="margin:0 0 16px 26px;' . ( $use_ded ? '' : 'display:none' ) . '">'
+		. '<input type="url" id="_xrv_dedicated_url" name="_xrv_dedicated_url" value="' . esc_attr( $dedicated ) . '" placeholder="https://example.com/videos/example/" class="widefat"></p>';
+
+	// Duration — keep the schema-accurate ISO field, but add a friendly minutes:seconds converter + help.
+	$dur_human = xrv_iso_to_clock( $dur );
+	echo '<p style="margin:0 0 4px"><label for="_xrv_duration_iso" style="display:block;font-weight:600;margin-bottom:4px">Duration <span style="font-weight:400;color:#787c82">(optional &mdash; filled automatically where the host provides it)</span></label>'
+		. '<span style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">'
+		. '<input type="text" id="xrv-dur-human" value="' . esc_attr( $dur_human ) . '" placeholder="12:30" style="width:120px" inputmode="numeric" aria-label="Duration as minutes and seconds">'
+		. '<span style="color:#787c82;font-size:12px">min:sec &rarr;</span>'
+		. '<input type="text" id="_xrv_duration_iso" name="_xrv_duration_iso" value="' . esc_attr( $dur ) . '" placeholder="PT12M30S" style="width:150px" aria-label="Duration in ISO 8601 format">'
+		. '<span style="color:#787c82;font-size:12px">auto-fills as you type</span>'
+		. '</span></p>';
+	echo xrv_help( 'What is the ISO 8601 duration, and do I need it?', '<p>Usually you don\'t touch it &mdash; for YouTube, Vimeo and friends it fills in automatically. When you do need it, type the running time as <code>minutes:seconds</code> (or <code>h:mm:ss</code>) in the left box and the ISO value fills itself.</p><p><strong>ISO 8601</strong> is the machine format search engines read for the duration rich result: <code>PT12M30S</code> = 12 min 30 sec, <code>PT1H2M</code> = 1 hr 2 min. Prefer a tool? <a href="https://www.google.com/search?q=time+to+ISO+8601+duration+converter" target="_blank" rel="noopener">Open a converter &rarr;</a></p>' ); // phpcs:ignore WordPress.Security.EscapeOutput
+
+	// Upload date — a native date picker beats hand-typing the YYYY-MM-DD format.
+	echo '<p style="margin:14px 0 14px"><label for="_xrv_upload_date" style="display:block;font-weight:600;margin-bottom:4px">Upload date <span style="font-weight:400;color:#787c82">(optional &mdash; auto where available)</span></label>'
+		. '<input type="date" id="_xrv_upload_date" name="_xrv_upload_date" value="' . esc_attr( $upload ) . '" max="' . esc_attr( gmdate( 'Y-m-d' ) ) . '"></p>';
 
 	echo '<details class="xrv-help xrv-help--form" style="margin:16px 0 4px">'
 		. '<summary>Rich video schema <span style="font-weight:400;color:#787c82">(optional &mdash; transcript &amp; key moments for richer Google results / AI citations)</span></summary>'
@@ -2123,6 +2322,30 @@ function xrv_render_meta_box( $post ) {
 
 	echo '<p class="xrv-hint" style="margin:14px 0 2px;color:#646970;font-size:12px">Series, Audience, and Topic are set in the taxonomy boxes in the sidebar. The keyword search index is built automatically.</p>';
 	echo xrv_help( 'How do I control the order videos appear in galleries?', '<p>Drag videos in <strong>All Videos</strong>, or set the <em>Order</em> field under <em>Page Attributes</em>. Galleries render in that sequence.</p>' ); // phpcs:ignore WordPress.Security.EscapeOutput
+
+	// Editor sugar: the minutes:seconds -> ISO converter and the two opt-in field reveals. Pure progressive
+	// enhancement — with JS off, the ISO field is still typeable and revealed fields default open when set.
+	echo <<<'MBJS'
+<script>
+(function(){
+	function toIso(v){
+		v=(v||'').trim(); if(!v) return '';
+		var p=v.split(':'); for(var i=0;i<p.length;i++){ if(p[i]===''||isNaN(+p[i])) return ''; p[i]=parseInt(p[i],10); }
+		var h=0,m=0,s=0;
+		if(p.length===3){ h=p[0]; m=p[1]; s=p[2]; }
+		else if(p.length===2){ m=p[0]; s=p[1]; }
+		else { m=p[0]; }
+		m+=Math.floor(s/60); s=s%60; h+=Math.floor(m/60); m=m%60;
+		var o='PT'; if(h)o+=h+'H'; if(m)o+=m+'M'; if(s||(!h&&!m))o+=s+'S'; return o;
+	}
+	var human=document.getElementById('xrv-dur-human'), iso=document.getElementById('_xrv_duration_iso');
+	if(human&&iso){ human.addEventListener('input',function(){ var v=toIso(human.value); if(v) iso.value=v; }); }
+	function toggle(cbId, fieldId){ var cb=document.getElementById(cbId), f=document.getElementById(fieldId); if(cb&&f){ cb.addEventListener('change',function(){ f.style.display=cb.checked?'':'none'; }); } }
+	toggle('xrv-ded-toggle','xrv-ded-field');
+	toggle('xrv-mob-toggle','xrv-mob-field');
+})();
+</script>
+MBJS;
 	echo '</div>'; // close .xrv-metabox wrapper
 }
 
@@ -2140,7 +2363,10 @@ function xrv_save_meta( $post_id, $post ) {
 
 	// URLs (read first so provider auto-detection can key off the source URL).
 	$source_url = isset( $_POST['_xrv_source_url'] ) ? esc_url_raw( wp_unslash( $_POST['_xrv_source_url'] ) ) : '';
-	$dedicated  = isset( $_POST['_xrv_dedicated_url'] ) ? esc_url_raw( wp_unslash( $_POST['_xrv_dedicated_url'] ) ) : '';
+	// The dedicated URL is opt-in: only stored when its enabling checkbox is ticked, so unchecking it
+	// cleanly removes the out-link even if the (now hidden) field still holds a stale value.
+	$use_ded    = ! empty( $_POST['_xrv_use_dedicated'] );
+	$dedicated  = ( $use_ded && isset( $_POST['_xrv_dedicated_url'] ) ) ? esc_url_raw( wp_unslash( $_POST['_xrv_dedicated_url'] ) ) : '';
 	update_post_meta( $post_id, '_xrv_source_url', $source_url );
 	update_post_meta( $post_id, '_xrv_dedicated_url', $dedicated );
 
@@ -2255,6 +2481,14 @@ function xrv_save_meta( $post_id, $post ) {
 			}
 			// On WP_Error the editor's manually uploaded featured image (if any) remains the poster fallback.
 		}
+	}
+
+	// Optional separate mobile poster (manual only; never auto-fetched). Stored when set, cleared when removed.
+	$mobile_thumb = isset( $_POST['_xrv_mobile_thumb_id'] ) ? max( 0, (int) wp_unslash( $_POST['_xrv_mobile_thumb_id'] ) ) : 0;
+	if ( $mobile_thumb > 0 ) {
+		update_post_meta( $post_id, '_xrv_mobile_thumb_id', $mobile_thumb );
+	} else {
+		delete_post_meta( $post_id, '_xrv_mobile_thumb_id' );
 	}
 }
 
@@ -2684,7 +2918,7 @@ function xrv_brand_logo( $h = 30 ) {
 }
 
 /* =================================================================================================
- * 9c. ADMIN UI KIT  (shared Crossroad-brand chrome for every XRV admin screen)
+ * 9f. ADMIN UI KIT  (shared Crossroad-brand chrome for every XRV admin screen)
  *     One palette, one card system, one bold-carat Q&A accordion — printed on Settings, Import, and the
  *     per-video editor so the whole plugin reads as one finished product. Admin-only: the front-end
  *     gallery keeps its own per-tenant tokens and never loads any of this. Each admin request renders at
