@@ -152,6 +152,12 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.6.0
+
+Admin-only. Extends the bulk importer so the **watch page** state is part of the import record, making it controllable per video from a file.
+
+- **`watch_page` import field.** A `.json` import record now accepts `"watch_page": "0"` (no standalone watch page) or `"1"` (force on); omit it to leave the video's current setting untouched. Accepts string, number, or boolean (`false`/`"no"`/`"off"` all map to off), so a hand-authored file can switch watch pages off without knowing the stored value. Paired with **Overwrite**, a re-import flips videos already in the library; on a fresh import it sets the state at creation. The URL/channel/playlist paste paths are unaffected (they carry no such field, so the default stays on).
+
 ### 2.5.1
 
 Reworks the per-video "dedicated page" control into a clearer **watch page** toggle.

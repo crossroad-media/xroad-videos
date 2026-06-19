@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.5.1
+ * Version:           2.6.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +60,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.5.1' );
+	define( 'XRV_VERSION', '2.6.0' );
 }
 
 /* =================================================================================================
@@ -2770,6 +2770,9 @@ function xrv_apply_youtube_meta( $pid, $id, $f ) {
 	if ( ! empty( $f['duration'] ) ) { update_post_meta( $pid, '_xrv_duration_iso', sanitize_text_field( $f['duration'] ) ); }
 	if ( ! empty( $f['upload'] ) )   { update_post_meta( $pid, '_xrv_upload_date', sanitize_text_field( $f['upload'] ) ); }
 	if ( ! empty( $f['desc'] ) )     { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $f['desc'] ) ); }
+	// Watch page: written only when the import record specified it ('0'/'1'); absent = leave as-is.
+	$wp = isset( $f['watch_page'] ) ? (string) $f['watch_page'] : '';
+	if ( '0' === $wp || '1' === $wp ) { update_post_meta( $pid, '_xrv_watch_page', $wp ); }
 }
 
 /** Detect a Short. The Data API exposes no aspect ratio, so probe the canonical /shorts/ URL: YouTube
@@ -3497,6 +3500,17 @@ function xrv_import_term_list( $val ) {
 	return $out;
 }
 
+/* Normalize an import record's optional `watch_page` field to the meta convention: '' = not specified
+ * (leave the video's existing/default state), '0' = no standalone watch page, '1' = on. Accepts string,
+ * number, or JSON boolean — `false`/`"0"`/`"no"`/`"off"`/`"none"` all map to off, so a hand-authored
+ * file can turn the watch page off without knowing the exact stored value. */
+function xrv_norm_watch_page( $val ) {
+	if ( ! isset( $val ) || null === $val || '' === $val ) { return ''; }
+	if ( is_bool( $val ) ) { return $val ? '1' : '0'; }
+	$s = strtolower( trim( (string) $val ) );
+	return in_array( $s, array( '0', 'false', 'no', 'off', 'none' ), true ) ? '0' : '1';
+}
+
 /* ---- YouTube Data API helpers (only used when an API key is supplied) ---- */
 function xrv_yt_get( $path, $params, $key ) {
 	$params['key'] = $key;
@@ -3641,13 +3655,14 @@ function xrv_ajax_import_preview() {
 			if ( '' === $rid ) { continue; }
 			$ids[] = $rid;
 			$json_meta[ $rid ] = array(
-				'title'    => isset( $rec['title'] ) ? (string) $rec['title'] : '',
-				'desc'     => isset( $rec['desc'] ) ? (string) $rec['desc'] : '',
-				'upload'   => isset( $rec['upload'] ) ? (string) $rec['upload'] : '',
-				'duration' => isset( $rec['duration'] ) ? (string) $rec['duration'] : '',
-				'series'   => xrv_import_term_list( isset( $rec['series'] ) ? $rec['series'] : '' ),
-				'audience' => xrv_import_term_list( isset( $rec['audience'] ) ? $rec['audience'] : '' ),
-				'topic'    => xrv_import_term_list( isset( $rec['topic'] ) ? $rec['topic'] : '' ),
+				'title'      => isset( $rec['title'] ) ? (string) $rec['title'] : '',
+				'desc'       => isset( $rec['desc'] ) ? (string) $rec['desc'] : '',
+				'upload'     => isset( $rec['upload'] ) ? (string) $rec['upload'] : '',
+				'duration'   => isset( $rec['duration'] ) ? (string) $rec['duration'] : '',
+				'series'     => xrv_import_term_list( isset( $rec['series'] ) ? $rec['series'] : '' ),
+				'audience'   => xrv_import_term_list( isset( $rec['audience'] ) ? $rec['audience'] : '' ),
+				'topic'      => xrv_import_term_list( isset( $rec['topic'] ) ? $rec['topic'] : '' ),
+				'watch_page' => xrv_norm_watch_page( isset( $rec['watch_page'] ) ? $rec['watch_page'] : null ),
 			);
 		}
 	} else {
@@ -3708,11 +3723,12 @@ function xrv_ajax_import_preview() {
 			'duration' => $meta[ $id ]['duration'] ?? '',
 			'upload'   => $meta[ $id ]['upload'] ?? '',
 			'desc'     => isset( $meta[ $id ]['desc'] ) ? mb_substr( $meta[ $id ]['desc'], 0, 5000 ) : '',
-			'series'   => isset( $meta[ $id ]['series'] ) ? (array) $meta[ $id ]['series'] : array(),
-			'audience' => isset( $meta[ $id ]['audience'] ) ? (array) $meta[ $id ]['audience'] : array(),
-			'topic'    => isset( $meta[ $id ]['topic'] ) ? (array) $meta[ $id ]['topic'] : array(),
-			'exists'   => $is_existing,
-			'thumb'    => 'https://i.ytimg.com/vi/' . $id . '/mqdefault.jpg',
+			'series'     => isset( $meta[ $id ]['series'] ) ? (array) $meta[ $id ]['series'] : array(),
+			'audience'   => isset( $meta[ $id ]['audience'] ) ? (array) $meta[ $id ]['audience'] : array(),
+			'topic'      => isset( $meta[ $id ]['topic'] ) ? (array) $meta[ $id ]['topic'] : array(),
+			'watch_page' => isset( $meta[ $id ]['watch_page'] ) ? (string) $meta[ $id ]['watch_page'] : '',
+			'exists'     => $is_existing,
+			'thumb'      => 'https://i.ytimg.com/vi/' . $id . '/mqdefault.jpg',
 		);
 	}
 	wp_send_json_success( array( 'videos' => $videos, 'total' => count( $videos ), 'new' => $new, 'exists' => count( $videos ) - $new, 'errors' => $errors, 'rich' => $rich ) );
@@ -3807,7 +3823,7 @@ function xrv_render_import_page() {
 			<tr><th scope="row"><label for="xrv-imp-src">Videos</label></th>
 				<td>
 					<textarea id="xrv-imp-src" rows="7" class="large-text code" placeholder="https://www.youtube.com/watch?v=...&#10;https://youtu.be/...&#10;https://www.youtube.com/@channel   (needs API key)&#10;https://www.youtube.com/playlist?list=...   (needs API key)"></textarea>
-					<p><label class="button">Choose file&hellip;<input type="file" id="xrv-imp-file" accept=".txt,.csv,.json" style="display:none"></label> <span style="color:#787c82">.txt / .csv of URLs, or a .json metadata file (id, title, duration, upload, desc) for rich import with no API key</span></p>
+					<p><label class="button">Choose file&hellip;<input type="file" id="xrv-imp-file" accept=".txt,.csv,.json" style="display:none"></label> <span style="color:#787c82">.txt / .csv of URLs, or a .json metadata file (id, title, duration, upload, desc, watch_page) for rich import with no API key</span></p>
 				</td></tr>
 		</tbody></table>
 
@@ -3823,7 +3839,7 @@ function xrv_render_import_page() {
 			'Do I need the API key to import?' =>
 				'<p>No. Without a key you import by URL and get the title and thumbnail. A free key adds duration, upload date, and description, and unlocks channel / playlist imports and the playlist picker above.</p>',
 			'What file types can I upload?' =>
-				'<p>A <code>.txt</code> or <code>.csv</code> of URLs (one per line), or a <code>.json</code> metadata file with <code>id, title, duration, upload, desc</code> fields for a rich import with no API key.</p>',
+				'<p>A <code>.txt</code> or <code>.csv</code> of URLs (one per line), or a <code>.json</code> metadata file with <code>id, title, duration, upload, desc</code> fields for a rich import with no API key. Add <code>"watch_page": "0"</code> to a record to import that video with <strong>no standalone watch page</strong> (<code>"1"</code> forces it on); omit it to leave the video&rsquo;s current setting. Combine with <strong>Overwrite</strong> to flip videos already in your library.</p>',
 			'What happens to videos already in my library?' =>
 				'<p>The preview flags each as <span class="xrv-badge-new">NEW</span> or <span class="xrv-badge-exists">EXISTS</span>. Before importing you choose whether existing videos are <strong>skipped</strong> (the default) or <strong>overwritten</strong> with a refreshed title, metadata, and thumbnail.</p>',
 			'Will importing publish the videos right away?' =>
@@ -3911,7 +3927,7 @@ function xrv_import_inline_js() {
 		function next(){
 			if(idx>=total){ $('#xrv-msg').innerHTML='<strong>Done.</strong> Created '+tally.created+' · Updated '+tally.updated+' · Skipped '+tally.skipped+(tally.failed?' · Failed '+tally.failed:'')+'. <a href="edit.php?post_type=xroad_video">View all videos &rarr;</a>'; runBtn.disabled=false; return; }
 			var batch=sel.slice(idx,idx+SIZE); idx+=SIZE;
-			var payload=batch.map(function(v){ return {id:v.id,title:v.title,duration:v.duration,upload:v.upload,desc:v.desc,series:v.series||[],audience:v.audience||[],topic:v.topic||[]}; });
+			var payload=batch.map(function(v){ return {id:v.id,title:v.title,duration:v.duration,upload:v.upload,desc:v.desc,series:v.series||[],audience:v.audience||[],topic:v.topic||[],watch_page:v.watch_page||''}; });
 			post('xrv_import_run',{ items:JSON.stringify(payload), overwrite:overwrite?'1':'0' }).then(function(res){
 				if(res && res.success && res.data && res.data.results){ res.data.results.forEach(function(r){ if(tally[r.status]!=null) tally[r.status]++; }); }
 				else { tally.failed+=batch.length; }
