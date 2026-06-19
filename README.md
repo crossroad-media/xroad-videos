@@ -151,6 +151,13 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.3.0
+
+Faster first paint and a live edge-region check. The front-end gains an LCP optimization; the new diagnostic is admin-only.
+
+- **Faster first paint.** The first card in a grid now loads its poster with `loading="eager"` and `fetchpriority="high"` (the LCP image); every other card stays lazy. No markup or API change for callers.
+- **Edge check (Settings, Privacy & consent).** A new admin-only diagnostic runs a live region check against the REST endpoint, times the round trip with a count-up, names the detected country, and contrasts XRV (zero extra calls, zero cookies, cache intact) with a typical geo-IP plugin. It shows a one-toggle Cloudflare hint when no region header is present. The front-end gallery is unchanged.
+
 ### 2.2.2
 
 Improved UI aesthetics. Admin-facing only; no front-end or behavior change.

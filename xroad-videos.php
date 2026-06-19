@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.2.2
+ * Version:           2.3.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -174,7 +174,7 @@ function xrv_activate() {
 		}
 	}
 
-	update_option( 'xrv_version', '2.2.2' );
+	update_option( 'xrv_version', '2.3.0' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
@@ -183,10 +183,10 @@ register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
  * version changes, so a changed default base (e.g. /video/) starts resolving without a manual re-save. */
 add_action( 'admin_init', 'xrv_maybe_flush_on_update' );
 function xrv_maybe_flush_on_update() {
-	if ( get_option( 'xrv_version' ) !== '2.2.2' ) {
+	if ( get_option( 'xrv_version' ) !== '2.3.0' ) {
 		xrv_register_data_model();
 		flush_rewrite_rules();
-		update_option( 'xrv_version', '2.2.2' );
+		update_option( 'xrv_version', '2.3.0' );
 	}
 }
 
@@ -853,7 +853,7 @@ function xrv_render( $atts = array() ) {
 			<?php endif; ?>
 
 			<div class="<?php echo esc_attr( $grid_class ); ?>" id="xrv-grid" style="<?php echo esc_attr( $grid_style ); ?>" data-perpage="<?php echo (int) $per_page; ?>" data-loadstep="<?php echo (int) $load_step; ?>">
-				<?php foreach ( $records as $r ) { echo xrv_render_card( $r, $card_meta ); } ?>
+				<?php foreach ( $records as $i => $r ) { echo xrv_render_card( $r, $card_meta, 0 === $i ); } // first card eager + high priority = the LCP image ?>
 			</div>
 
 			<div class="xrv-empty" id="xrv-empty" style="display:none">
@@ -912,7 +912,7 @@ function xrv_render_carousel( $records, $cols, $card_meta = 'full' ) {
  * 5a. One video card. The initial state is a LOCAL poster + a native <button> play control. No iframe,
  *     no third-party request, no cookie. The facade JS swaps in the youtube-nocookie iframe on click.
  * ------------------------------------------------------------------------------------------------- */
-function xrv_render_card( $r, $meta = 'full' ) {
+function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 	$title    = $r['title'];
 	$dedicated = $r['dedicated'];
 
@@ -947,7 +947,7 @@ function xrv_render_card( $r, $meta = 'full' ) {
 		<div class="xrv-frame">
 			<button type="button" class="xrv-facade" aria-label="Play video: <?php echo esc_attr( $title ); ?>">
 				<?php if ( $poster !== '' ) : ?>
-					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>"<?php if ( ! empty( $r['poster_srcset'] ) ) : ?> srcset="<?php echo esc_attr( $r['poster_srcset'] ); ?>" sizes="<?php echo esc_attr( $r['poster_sizes'] ); ?>"<?php endif; ?> width="480" height="360" loading="lazy" decoding="async" alt="<?php echo esc_attr( $title ); ?>">
+					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>"<?php if ( ! empty( $r['poster_srcset'] ) ) : ?> srcset="<?php echo esc_attr( $r['poster_srcset'] ); ?>" sizes="<?php echo esc_attr( $r['poster_sizes'] ); ?>"<?php endif; ?> width="480" height="360" loading="<?php echo $eager ? 'eager' : 'lazy'; ?>"<?php echo $eager ? ' fetchpriority="high"' : ''; ?> decoding="async" alt="<?php echo esc_attr( $title ); ?>">
 				<?php else : ?>
 					<span class="xrv-thumb xrv-thumb--ph" aria-hidden="true"></span>
 				<?php endif; ?>
@@ -1835,7 +1835,7 @@ function xrv_register_block() {
 	}
 	// No-build editor UI: a dependency-only handle (false src) carries the inline registerBlockType call,
 	// loaded in the editor as the block's editor_script (mirrors the xrv-admin inline pattern).
-	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.2.2', true );
+	wp_register_script( 'xrv-block', false, array( 'wp-blocks', 'wp-element', 'wp-block-editor', 'wp-components' ), '2.3.0', true );
 	wp_add_inline_script( 'xrv-block', xrv_block_editor_js() );
 	$str = array( 'type' => 'string' );
 	register_block_type( 'xroad/videos', array(
@@ -2270,7 +2270,7 @@ function xrv_admin_autotitle_assets( $hook ) {
 
 	if ( $is_edit ) {
 		// Dependency-only handle (false src) so we can attach inline JS that runs after these cores load.
-		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.2.2', true );
+		wp_register_script( 'xrv-admin', false, array( 'wp-api-fetch', 'wp-dom-ready', 'wp-data' ), '2.3.0', true );
 		wp_enqueue_script( 'xrv-admin' );
 		wp_add_inline_script( 'xrv-admin', xrv_admin_autotitle_js() );
 	}
@@ -2694,6 +2694,20 @@ function xrv_render_settings_page() {
 		.xrv-settings .xrv-card>.xrv-warn{margin:14px 26px 6px 26px;padding:13px 16px;background:#fff8ef;border:1px solid #f3d199;border-left:4px solid #F7941D;border-radius:10px;font-size:13px;line-height:1.5;color:#5a4a2a}
 		.xrv-settings .xrv-warn code{background:#fdeccc;color:#7a4f00}
 		.xrv-settings .xrv-warn ol{padding-left:0}
+		/* Edge check (the live region demo) */
+		#xrv-edge-out{margin-top:12px}
+		.xrv-edge-result{border:1px solid var(--xr-line);border-radius:12px;padding:14px 16px;background:#fff;max-width:640px}
+		.xrv-edge-flag{font-size:28px;line-height:1;vertical-align:-3px}
+		.xrv-edge-ms{font-size:30px;font-weight:700;color:var(--xr-purple);font-variant-numeric:tabular-nums}
+		.xrv-edge-duel{margin:12px 0 4px;display:grid;gap:8px;max-width:600px}
+		.xrv-edge-row{display:grid;grid-template-columns:140px 1fr;align-items:center;gap:10px;font-size:12px;color:var(--xr-charcoal)}
+		.xrv-edge-bar{display:inline-block;height:13px;border-radius:7px;vertical-align:-2px;margin-right:7px}
+		.xrv-edge-bar--xrv{background:#1a9d57;width:8px}
+		.xrv-edge-bar--them{background:#d98324;width:300px;max-width:60%}
+		.xrv-edge-chips{margin:10px 0 0;display:flex;flex-wrap:wrap;gap:6px}
+		.xrv-edge-chip{font-size:11px;font-weight:600;color:#0a6b3c;background:#e7f6ee;border:1px solid #b6e3c8;border-radius:999px;padding:3px 10px}
+		.xrv-edge-chip--warn{color:#7a4f00;background:#fff8ef;border-color:#f3d199}
+		.xrv-edge-guess button{margin:0 6px 6px 0}
 		.xrv-settings .xrv-card>h2.title{padding-top:16px;padding-bottom:12px;border:0;border-bottom:1px solid var(--xr-light);border-radius:0;background:transparent;font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--xr-deep);scroll-margin-top:60px}
 		.xrv-settings .xrv-card>.form-table{padding-top:8px;padding-bottom:14px;border:0;background:transparent}
 		.xrv-settings .xrv-card>p,.xrv-settings .xrv-card>form{padding-top:6px;padding-bottom:14px}
@@ -2723,6 +2737,63 @@ function xrv_render_settings_page() {
 
 			<div class="xrv-card"><h2 class="title" id="xrv-sec-privacy">Privacy &amp; consent</h2>
 			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Edge check</th>
+					<td>
+						<div id="xrv-edge" data-url="<?php echo esc_url( rest_url( 'xrv/v1/region' ) ); ?>">
+							<p class="description" style="margin:0 0 8px;max-width:640px">XRV reads each visitor's region from an edge header that is <strong>already on the request</strong> &mdash; zero extra network calls, zero cookies, the page stays fully cached. Run a live check to watch it work.</p>
+							<button type="button" class="button button-secondary" id="xrv-edge-go">&#9889; Run edge check</button>
+							<div id="xrv-edge-out" hidden></div>
+						</div>
+						<script>
+						(function(){
+							var root = document.getElementById('xrv-edge'); if(!root) return;
+							var go = document.getElementById('xrv-edge-go'), out = document.getElementById('xrv-edge-out'), url = root.getAttribute('data-url');
+							function flag(cc){ try{ return cc.replace(/./g, function(c){ return String.fromCodePoint(127397 + c.toUpperCase().charCodeAt(0)); }); }catch(e){ return '🌐'; } }
+							function rname(cc){ try{ return new Intl.DisplayNames(['en'],{type:'region'}).of(cc) || cc; }catch(e){ return cc; } }
+							function bucket(ms){ return ms < 50 ? 'fast' : (ms <= 150 ? 'mid' : 'slow'); }
+							var LBL = { fast:'under 50 ms', mid:'50–150 ms', slow:'over 150 ms' };
+							function countUp(el, to){ var s=null; (function step(t){ if(s===null)s=t; var p=Math.min(1,(t-s)/600); el.textContent=Math.round(p*to); if(p<1) requestAnimationFrame(step); })(performance.now()); }
+							function guessUI(){
+								out.hidden = false;
+								out.innerHTML = '<div class="xrv-edge-guess"><p style="margin:0 0 6px"><strong>Guess:</strong> how fast will the edge answer?</p>'
+									+ '<button type="button" class="button" data-g="fast">Under 50 ms</button>'
+									+ '<button type="button" class="button" data-g="mid">50&ndash;150 ms</button>'
+									+ '<button type="button" class="button" data-g="slow">Over 150 ms</button></div>';
+								Array.prototype.forEach.call(out.querySelectorAll('[data-g]'), function(b){ b.addEventListener('click', function(){ run(b.getAttribute('data-g')); }); });
+							}
+							function run(guess){
+								out.innerHTML = '<p class="description">Pinging the edge&hellip;</p>';
+								var t0 = performance.now();
+								fetch(url, { credentials:'same-origin', cache:'no-store' }).then(function(r){ return r.json(); }).then(function(d){
+									reveal(d || {}, Math.max(1, Math.round(performance.now() - t0)), guess);
+								}).catch(function(){ out.innerHTML = '<p style="color:#b32d2e">Could not reach the region endpoint &mdash; check that the REST API is reachable.</p>'; });
+							}
+							function reveal(d, ms, guess){
+								var cc = d.country || '', hit = (guess === bucket(ms));
+								var who = cc ? (flag(cc) + ' <strong>' + rname(cc) + '</strong>') : '<strong>no region header on this server yet</strong>';
+								out.innerHTML =
+									'<div class="xrv-edge-result">'
+									+ '<p style="margin:0 0 4px"><span class="xrv-edge-flag">' + (cc?flag(cc):'🌐') + '</span> &nbsp; live edge check answered in <span class="xrv-edge-ms" id="xrv-edge-n">0</span> ms</p>'
+									+ '<p class="description" style="margin:0 0 10px">You guessed ' + LBL[guess] + '. ' + (hit?'Nailed it.':'Not quite.') + ' Detected: ' + who + '. <em>This pinged the endpoint once to prove it is live; in production XRV adds no calls at all.</em></p>'
+									+ '<div class="xrv-edge-duel">'
+									+   '<div class="xrv-edge-row"><span><strong>XRV</strong></span><span><span class="xrv-edge-bar xrv-edge-bar--xrv"></span>0 extra calls/view &middot; 0 cookies &middot; cache intact</span></div>'
+									+   '<div class="xrv-edge-row"><span>Typical geo-IP plugin</span><span><span class="xrv-edge-bar xrv-edge-bar--them"></span>1 third-party call/view &middot; sets a cookie &middot; ~150 ms &middot; breaks cache</span></div>'
+									+ '</div>'
+									+ '<div class="xrv-edge-chips">'
+									+   (cc ? '<span class="xrv-edge-chip">0 third-party calls</span><span class="xrv-edge-chip">0 cookies set</span><span class="xrv-edge-chip">page still cached</span>'
+										   : '<span class="xrv-edge-chip xrv-edge-chip--warn">No region header &mdash; turn on Cloudflare &rarr; Managed Transforms &rarr; visitor location headers (one toggle)</span>')
+									+ '</div>'
+									+ '<p style="margin:10px 0 0"><button type="button" class="button-link" id="xrv-edge-again" style="color:var(--xr-purple)">Check again &#8635;</button></p>'
+									+ '</div>';
+								countUp(document.getElementById('xrv-edge-n'), ms);
+								document.getElementById('xrv-edge-again').addEventListener('click', guessUI);
+							}
+							go.addEventListener('click', guessUI);
+						})();
+						</script>
+					</td>
+				</tr>
 				<?php if ( 'geo' === $s['consent_notice'] ) : // region diagnostic is only relevant in Global mode ?>
 				<tr>
 					<th scope="row">Geo source</th>
