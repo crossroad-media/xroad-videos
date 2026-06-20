@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.7.0
+ * Version:           2.7.1
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +60,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.7.0' );
+	define( 'XRV_VERSION', '2.7.1' );
 }
 
 /* =================================================================================================
@@ -2297,9 +2297,23 @@ function xrv_render_meta_box( $post ) {
 	// Watch page — a per-video standalone page (this video's own permalink) with the embedded player and
 	// VideoObject schema. On by default: the card title links to it, and the card still plays in the modal.
 	$watch_on = '0' !== (string) get_post_meta( $post->ID, '_xrv_watch_page', true ); // default on
-	echo '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:600;margin:0 0 16px;cursor:pointer">'
-		. '<input type="checkbox" name="_xrv_watch_page" value="1" style="margin-top:3px"' . checked( $watch_on, true, false ) . '>'
+	echo '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:600;margin:0 0 10px;cursor:pointer">'
+		. '<input type="checkbox" id="xrv-watch-toggle" name="_xrv_watch_page" value="1" style="margin-top:3px"' . checked( $watch_on, true, false ) . '>'
 		. '<span>Give this video its own watch page <span style="font-weight:400;color:#787c82">&mdash; a standalone page at this video&rsquo;s own URL with the embedded player and VideoObject schema, for SEO and sharing. The card <strong>title</strong> links to it; the card still plays in place. Untick to keep this video gallery-only (its title won&rsquo;t link and its URL won&rsquo;t serve a page).</span></span></label>';
+
+	// The watch page's URL slug, editable here and revealed only when the checkbox is on (gallery-only videos
+	// serve no page, so the slug is moot). Reuses the opt-in reveal pattern + the toggle() helper below.
+	$pl_base = (string) ( get_option( 'xrv_permalinks', array() )['single'] ?? '' );
+	if ( '' === $pl_base ) { $pl_base = 'video'; }
+	echo '<div id="xrv-watch-slug" class="xrv-media-field" style="margin:0 0 16px;padding:12px;border:1px solid var(--xr-line);border-radius:10px;background:#fbfbfd;' . ( $watch_on ? '' : 'display:none' ) . '">'
+		. '<label for="xrv_slug" style="display:block;font-weight:600;font-size:13px;margin-bottom:6px">Watch page URL slug</label>'
+		. '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+		. '<span style="color:#787c82;font-size:12px">' . esc_html( trailingslashit( home_url( $pl_base ) ) ) . '</span>'
+		. '<input type="text" id="xrv_slug" name="xrv_slug" value="' . esc_attr( $post->post_name ) . '" style="flex:1;min-width:200px" placeholder="' . esc_attr( sanitize_title( get_the_title( $post ) ) ) . '">'
+		. '<span style="color:#787c82;font-size:12px">/</span>'
+		. '</div>'
+		. '<p style="margin:6px 0 0;color:#787c82;font-size:12px">The address of this video&rsquo;s standalone page. Lowercase letters, numbers, and hyphens; leave blank to auto-generate from the title on save.</p>'
+		. '</div>';
 
 	// Duration — keep the schema-accurate ISO field, but add a friendly minutes:seconds converter + help.
 	$dur_human = xrv_iso_to_clock( $dur );
@@ -2352,6 +2366,7 @@ function xrv_render_meta_box( $post ) {
 	if(human&&iso){ human.addEventListener('input',function(){ var v=toIso(human.value); if(v) iso.value=v; }); }
 	function toggle(cbId, fieldId){ var cb=document.getElementById(cbId), f=document.getElementById(fieldId); if(cb&&f){ cb.addEventListener('change',function(){ f.style.display=cb.checked?'':'none'; }); } }
 	toggle('xrv-mob-toggle','xrv-mob-field');
+	toggle('xrv-watch-toggle','xrv-watch-slug');
 })();
 </script>
 MBJS;
@@ -2376,6 +2391,18 @@ function xrv_save_meta( $post_id, $post ) {
 	// Watch page: store '0' only when explicitly unticked; absent meta = on. A legacy _xrv_dedicated_url is
 	// left untouched (no field posts it anymore) and still wins as the title link where one was set.
 	update_post_meta( $post_id, '_xrv_watch_page', isset( $_POST['_xrv_watch_page'] ) ? '1' : '0' );
+
+	// Watch page slug: editable in the meta box. Direct slug-only write (kept unique by WP) so we don't
+	// re-enter save_post via wp_update_post. Empty input leaves the existing/auto slug untouched.
+	if ( isset( $_POST['xrv_slug'] ) ) {
+		$slug = sanitize_title( wp_unslash( $_POST['xrv_slug'] ) );
+		if ( '' !== $slug && $slug !== $post->post_name ) {
+			$slug = wp_unique_post_slug( $slug, $post_id, $post->post_status, $post->post_type, $post->post_parent );
+			global $wpdb;
+			$wpdb->update( $wpdb->posts, array( 'post_name' => $slug ), array( 'ID' => $post_id ) );
+			clean_post_cache( $post_id );
+		}
+	}
 
 	// Flag YouTube Shorts (vertical) from the /shorts/ URL so galleries can render/filter them. Delete when
 	// not a short, so the EXISTS / NOT EXISTS meta queries stay clean.
@@ -3110,6 +3137,7 @@ function xrv_render_settings_page() {
 			<a href="#xrv-sec-appearance"><?php echo xrv_admin_icon( 'image' ); ?> Appearance</a>
 			<a href="#xrv-sec-sync"><?php echo xrv_admin_icon( 'sync' ); ?> Auto-sync</a>
 			<a href="#xrv-sec-urls"><?php echo xrv_admin_icon( 'link' ); ?> URLs</a>
+			<a href="#xrv-sec-watch"><?php echo xrv_admin_icon( 'play' ); ?> Watch pages</a>
 			<a href="#xrv-sec-faq"><?php echo xrv_admin_icon( 'help' ); ?> Help</a>
 		</nav>
 		<script>
@@ -3122,23 +3150,6 @@ function xrv_render_settings_page() {
 			secs.forEach(function(s){ io.observe(s); });
 		})();
 		</script>
-		<?php
-		// One-click watch-page control over the WHOLE library. Its OWN form (posts to admin-post.php) so it
-		// is a sibling of, never nested inside, the settings form below. The list-table Bulk Actions on All
-		// Videos handle a selected, paginated subset; this hits every video at once.
-		?>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="xrv-card" style="margin-bottom:18px">
-			<?php
-			echo xrv_card_head( 'xrv-sec-bulk', 'sliders', 'Bulk watch pages', 'Turn the standalone watch page on or off for every video at once. Per-video control is in each video&rsquo;s editor; selective bulk control is on the All Videos list.' );
-			wp_nonce_field( 'xrv_watch_all' );
-			?>
-			<input type="hidden" name="action" value="xrv_watch_all">
-			<p style="padding-bottom:6px;margin-top:4px">
-				<button type="submit" name="state" value="0" class="button button-primary">Turn off all watch pages</button>
-				<button type="submit" name="state" value="1" class="button">Turn all back on</button>
-				<a href="<?php echo esc_url( admin_url( 'edit.php?post_type=xroad_video' ) ); ?>" class="button-link" style="margin-left:10px">Review on All Videos &rarr;</a>
-			</p>
-		</form>
 		<form method="post" action="options.php">
 			<?php settings_fields( 'xrv_settings_group' ); ?>
 
@@ -3456,6 +3467,22 @@ function xrv_render_settings_page() {
 				<p><?php submit_button( 'Save video URLs', 'primary', 'submit', false ); ?></p>
 			</form>
 		</div>
+
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="xrv-card">
+			<?php
+			// Watch Page Controls — the standalone-page switch for the whole library, grouped beside Video URLs
+			// (watch pages ARE the per-video URLs). Its OWN form (posts to admin-post.php), a sibling of the
+			// settings form above. Per-video + selective bulk control live in the editor and the All Videos list.
+			echo xrv_card_head( 'xrv-sec-watch', 'play', 'Watch Page Controls', 'Turn the standalone watch page on or off for every video at once. Per-video control is in each video&rsquo;s editor; selective bulk control is on the All Videos list.' );
+			wp_nonce_field( 'xrv_watch_all' );
+			?>
+			<input type="hidden" name="action" value="xrv_watch_all">
+			<p style="padding-bottom:6px;margin-top:4px">
+				<button type="submit" name="state" value="0" class="button button-primary">Turn off all watch pages</button>
+				<button type="submit" name="state" value="1" class="button">Turn all back on</button>
+				<a href="<?php echo esc_url( admin_url( 'edit.php?post_type=xroad_video' ) ); ?>" class="button-link" style="margin-left:10px">Review on All Videos &rarr;</a>
+			</p>
+		</form>
 
 		<?php
 		// On-demand sync (separate form: it performs an action, not a settings save).

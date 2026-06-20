@@ -152,6 +152,13 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.7.1
+
+Admin-only. Enhanced Watch Page Controls: finer control over each video's standalone page, plus a clearer home for the bulk switch.
+
+- **Editable watch page slug in the editor.** Ticking "Give this video its own watch page" now reveals an editable URL-slug field, so the standalone page's address is set inline (kept unique by WordPress). It hides when the video is gallery-only.
+- **Watch Page Controls, relocated.** The bulk on/off card (renamed from "Bulk watch pages") now sits beside the Video URLs card in Settings, with its own nav chip, grouped where it belongs since watch pages are the per-video URLs.
+
 ### 2.7.0
 
 Admin-only. Bulk controls for the two things a privacy-first curated library has that a feed plugin does not: per-video SEO **watch pages** and **local-poster** integrity.
