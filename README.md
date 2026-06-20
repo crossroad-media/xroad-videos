@@ -152,6 +152,13 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.7.0
+
+Admin-only. Bulk controls for the two things a privacy-first curated library has that a feed plugin does not: per-video SEO **watch pages** and **local-poster** integrity.
+
+- **Bulk Actions on All Videos.** The native Bulk Actions dropdown gains **Watch page: turn off / turn on** (set a selected set's standalone-page state in one go) and **Rebuild local posters** (re-pull each selected video's poster from its provider, swap in the fresh copy, and drop the stale one — the repair tool for broken or missing thumbnails). A new **Watch page** column shows each video's On/Off state at a glance.
+- **One-click whole-library toggle.** Settings gains **Turn off all watch pages** / **Turn all back on** buttons that apply to every video at once, for when you want the library gallery-only without selecting row by row.
+
 ### 2.6.0
 
 Admin-only. Extends the bulk importer so the **watch page** state is part of the import record, making it controllable per video from a file.

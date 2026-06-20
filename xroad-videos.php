@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.6.0
+ * Version:           2.7.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +60,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.6.0' );
+	define( 'XRV_VERSION', '2.7.0' );
 }
 
 /* =================================================================================================
@@ -3122,6 +3122,23 @@ function xrv_render_settings_page() {
 			secs.forEach(function(s){ io.observe(s); });
 		})();
 		</script>
+		<?php
+		// One-click watch-page control over the WHOLE library. Its OWN form (posts to admin-post.php) so it
+		// is a sibling of, never nested inside, the settings form below. The list-table Bulk Actions on All
+		// Videos handle a selected, paginated subset; this hits every video at once.
+		?>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="xrv-card" style="margin-bottom:18px">
+			<?php
+			echo xrv_card_head( 'xrv-sec-bulk', 'sliders', 'Bulk watch pages', 'Turn the standalone watch page on or off for every video at once. Per-video control is in each video&rsquo;s editor; selective bulk control is on the All Videos list.' );
+			wp_nonce_field( 'xrv_watch_all' );
+			?>
+			<input type="hidden" name="action" value="xrv_watch_all">
+			<p style="padding-bottom:6px;margin-top:4px">
+				<button type="submit" name="state" value="0" class="button button-primary">Turn off all watch pages</button>
+				<button type="submit" name="state" value="1" class="button">Turn all back on</button>
+				<a href="<?php echo esc_url( admin_url( 'edit.php?post_type=xroad_video' ) ); ?>" class="button-link" style="margin-left:10px">Review on All Videos &rarr;</a>
+			</p>
+		</form>
 		<form method="post" action="options.php">
 			<?php settings_fields( 'xrv_settings_group' ); ?>
 
@@ -3941,6 +3958,116 @@ function xrv_import_inline_js() {
 })();
 </script>
 JS;
+}
+
+/* =================================================================================================
+ * 9g. BULK CONTROLS  (native list-table bulk actions + an at-a-glance column + a one-click "all" handler)
+ *     The XRV differentiators Smash Balloon has no equivalent for, exposed in bulk: per-video SEO WATCH
+ *     PAGES and LOCAL-POSTER integrity. All native WordPress list-table hooks, no custom screen — the Bulk
+ *     Actions dropdown on All Videos acts on a selected subset; the Settings buttons (9d) act on the whole
+ *     library; a status column shows each video's state at a glance.
+ * ================================================================================================= */
+
+/* Bulk Actions dropdown items on the All Videos list. */
+add_filter( 'bulk_actions-edit-xroad_video', 'xrv_bulk_actions' );
+function xrv_bulk_actions( $actions ) {
+	$actions['xrv_watch_off']       = 'Watch page: turn off';
+	$actions['xrv_watch_on']        = 'Watch page: turn on';
+	$actions['xrv_rebuild_posters'] = 'Rebuild local posters';
+	return $actions;
+}
+
+/* Handle a selected-set bulk action; append a result count for the notice. WP verifies the bulk nonce
+ * before this filter runs. */
+add_filter( 'handle_bulk_actions-edit-xroad_video', 'xrv_handle_bulk_actions', 10, 3 );
+function xrv_handle_bulk_actions( $redirect, $action, $ids ) {
+	if ( ! in_array( $action, array( 'xrv_watch_off', 'xrv_watch_on', 'xrv_rebuild_posters' ), true ) ) { return $redirect; }
+	if ( ! current_user_can( 'edit_others_posts' ) ) { return $redirect; }
+	$ids = array_filter( array_map( 'intval', (array) $ids ), function( $id ) { return 'xroad_video' === get_post_type( $id ); } );
+	$n = 0;
+	if ( 'xrv_rebuild_posters' === $action ) {
+		// ponytail: synchronous re-pull (one HEAD + download per video). If a large selection ever trips
+		// PHP max_execution_time, move it to a chunked AJAX run like the importer (9c).
+		foreach ( $ids as $id ) { if ( xrv_rebuild_poster( $id ) ) { $n++; } }
+	} else {
+		$val = ( 'xrv_watch_on' === $action ) ? '1' : '0';
+		foreach ( $ids as $id ) { update_post_meta( $id, '_xrv_watch_page', $val ); $n++; }
+	}
+	return add_query_arg( array( 'xrv_bulk' => $action, 'xrv_n' => $n ), $redirect );
+}
+
+/* One-click "whole library" watch-page handler behind the Settings buttons (9d). */
+add_action( 'admin_post_xrv_watch_all', 'xrv_handle_watch_all' );
+function xrv_handle_watch_all() {
+	if ( ! current_user_can( 'edit_others_posts' ) ) { wp_die( 'You do not have permission to do that.' ); }
+	check_admin_referer( 'xrv_watch_all' );
+	$val = ( isset( $_POST['state'] ) && '1' === (string) $_POST['state'] ) ? '1' : '0';
+	$ids = get_posts( array( 'post_type' => 'xroad_video', 'post_status' => 'any', 'posts_per_page' => -1, 'fields' => 'ids' ) );
+	foreach ( $ids as $id ) { update_post_meta( $id, '_xrv_watch_page', $val ); }
+	wp_safe_redirect( add_query_arg(
+		array( 'post_type' => 'xroad_video', 'page' => 'xrv-settings', 'xrv_bulk' => ( '1' === $val ? 'xrv_watch_on' : 'xrv_watch_off' ), 'xrv_n' => count( $ids ) ),
+		admin_url( 'edit.php' )
+	) );
+	exit;
+}
+
+/* Re-pull a video's local poster from its provider, swap the pointer, drop the stale attachment. The
+ * local-poster guarantee is XRV's privacy headline, so a "repair" control belongs in bulk. */
+function xrv_rebuild_poster( $id ) {
+	$vid = (string) get_post_meta( $id, '_xrv_video_id', true );
+	if ( '' === $vid ) { return false; }
+	$provider = (string) get_post_meta( $id, '_xrv_provider', true );
+	if ( '' === $provider ) { $provider = 'youtube'; }
+	$short = '1' === (string) get_post_meta( $id, '_xrv_short', true );
+	$cands = ( $short && 'youtube' === $provider ) ? xrv_thumb_candidates( $vid, $provider, true ) : null;
+	$att   = xrv_sideload_thumbnail( $id, $vid, $provider, $cands );
+	if ( is_wp_error( $att ) || ! $att ) { return false; }
+	$old = (int) get_post_meta( $id, '_xrv_local_thumb_id', true );
+	update_post_meta( $id, '_xrv_local_thumb_id', (int) $att );
+	set_post_thumbnail( $id, (int) $att );
+	// Replace the old plugin-generated poster only after the new one is in place. Never delete the shared
+	// site-wide default poster (an admin-chosen library image), only this video's own sideloaded thumb.
+	$default = (int) ( xrv_get_settings()['default_thumb_id'] ?? 0 );
+	if ( $old && $old !== (int) $att && $old !== $default ) { wp_delete_attachment( $old, true ); }
+	return true;
+}
+
+/* Success notice for both the list-table actions and the Settings buttons (scoped to XRV screens). */
+add_action( 'admin_notices', 'xrv_bulk_notice' );
+function xrv_bulk_notice() {
+	if ( empty( $_GET['xrv_bulk'] ) ) { return; } // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only display flag, no state change
+	$screen = get_current_screen();
+	if ( ! $screen || 'xroad_video' !== $screen->post_type ) { return; }
+	$labels = array(
+		'xrv_watch_off'       => 'Turned the watch page off for',
+		'xrv_watch_on'        => 'Turned the watch page on for',
+		'xrv_rebuild_posters' => 'Rebuilt local posters for',
+	);
+	$action = sanitize_key( wp_unslash( $_GET['xrv_bulk'] ) );
+	if ( ! isset( $labels[ $action ] ) ) { return; }
+	$n = isset( $_GET['xrv_n'] ) ? max( 0, (int) $_GET['xrv_n'] ) : 0;
+	printf( '<div class="notice notice-success is-dismissible"><p><strong>XRV:</strong> %s %d video%s.</p></div>',
+		esc_html( $labels[ $action ] ), (int) $n, 1 === $n ? '' : 's' );
+}
+
+/* At-a-glance "Watch page" column on the All Videos list, so the bulk state is visible without opening each. */
+add_filter( 'manage_xroad_video_posts_columns', 'xrv_admin_columns' );
+function xrv_admin_columns( $cols ) {
+	$out = array();
+	foreach ( $cols as $k => $v ) {
+		if ( 'date' === $k ) { $out['xrv_watch'] = 'Watch page'; }
+		$out[ $k ] = $v;
+	}
+	if ( ! isset( $out['xrv_watch'] ) ) { $out['xrv_watch'] = 'Watch page'; } // fallback if a theme/plugin removed the Date column
+	return $out;
+}
+add_action( 'manage_xroad_video_posts_custom_column', 'xrv_admin_column', 10, 2 );
+function xrv_admin_column( $col, $id ) {
+	if ( 'xrv_watch' !== $col ) { return; }
+	$on = '0' !== (string) get_post_meta( $id, '_xrv_watch_page', true );
+	echo $on
+		? '<span style="color:#1a9d57;font-weight:600">On</span>'
+		: '<span style="color:#8a8d91">Off</span>';
 }
 
 /* =================================================================================================
