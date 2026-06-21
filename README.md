@@ -56,7 +56,7 @@ Editors never pick a provider by hand: paste a URL and the host is detected auto
 | TikTok | a `tiktok.com/@user/video/...` link (vertical, rendered 9:16) | title, poster |
 | Self-hosted file | a direct `.mp4` or `.webm` URL (pick **Self-hosted file**) | none; set the title and upload a poster yourself |
 
-Hosted videos load on click as the host's privacy-enhanced player (Vimeo uses `dnt=1` with no title or byline chrome); **self-hosted files** play in a native `<video>` element, so they make no third-party contact at any point. Galleries can mix sources freely in one grid. The bulk importer and channel sync remain YouTube-only in this release; multi-source bulk import is planned for 2.5.
+Hosted videos load on click as the host's privacy-enhanced player (Vimeo uses `dnt=1` with no title or byline chrome); **self-hosted files** play in a native `<video>` element, so they make no third-party contact at any point. Galleries can mix sources freely in one grid. The bulk importer and channel sync are currently YouTube-only; extending bulk import to every provider is a planned roadmap item.
 
 **Content and filtering**
 
@@ -151,6 +151,14 @@ On play, the plugin pushes to `window.dataLayer`:
 Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag reading those data-layer variables. Because the facade never refreshes the page, it avoids the attribution corruption that page-refresh consent workarounds cause.
 
 ## Changelog
+
+### 2.8.0
+
+Adds a **Privacy self-test** that turns the zero-third-party guarantee from a claim into an in-product proof. Front-end harness + admin diagnostic; no new dependencies, no front-end weight on real pages.
+
+- **Resource-Timing privacy self-test** (Settings → Privacy self-test). One click renders your real gallery in an isolated, admin-only frame, reads the browser's `performance.getEntriesByType('resource')` log without ever dispatching a play, and reports a clear **PASS/FAIL** — naming by URL any pre-click request to a video-provider host (YouTube, Vimeo, Wistia, Loom, Dailymotion, TikTok and their CDNs). It is both the strongest privacy demo for a regulated-industry buyer and a standing regression guard: a future change that leaked a pre-click request turns this red. Requests to other origins you control (e.g. an image CDN) are reported but do not fail the test.
+- **Verify the detector.** A negative-control mode loads a deliberately leaky page (one planted provider request) so you can watch the detector catch a real leak — the only place XRV ever contacts a provider without a click, and only when an admin explicitly runs it.
+- Doc-hygiene: corrected the stale note that multi-source bulk import was "planned for 2.5."
 
 ### 2.7.1
 

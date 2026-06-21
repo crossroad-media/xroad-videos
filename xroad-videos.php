@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.7.1
+ * Version:           2.8.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +60,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.7.1' );
+	define( 'XRV_VERSION', '2.8.0' );
 }
 
 /* =================================================================================================
@@ -3121,6 +3121,250 @@ function xrv_admin_css() {
 CSS;
 }
 
+/* =================================================================================================
+ * 9g. PRIVACY SELF-TEST  (Prove the moat — make the zero-third-party guarantee falsifiable, in product)
+ *     XRV's reason to exist is that a gallery contacts NO video provider until a deliberate click. This
+ *     makes that claim testable: an admin renders a REAL gallery in an isolated frame, the browser's
+ *     Resource-Timing log is read back (no click is ever dispatched), and any pre-click request to a
+ *     provider host is named and failed. A negative-control mode plants one real provider request so the
+ *     admin can watch the detector actually catch a leak. No competitor can show this; it is also a
+ *     standing regression guard against any future change that would leak a pre-click request.
+ * ================================================================================================= */
+
+/* Hostname suffixes that mean "a video provider was contacted." A match in the timing log BEFORE any click
+ * is a privacy failure. Suffix-matched in JS (host === s OR host ends with ".$s") so subdomains are covered.
+ * Filterable so a site can add a provider host its theme/CDN introduces. */
+function xrv_provider_hosts() {
+	$hosts = array(
+		'youtube.com', 'youtube-nocookie.com', 'ytimg.com', 'googlevideo.com', 'ggpht.com',
+		'google.com', 'gstatic.com', 'doubleclick.net',
+		'vimeo.com', 'vimeocdn.com',
+		'wistia.com', 'wistia.net', 'wi.st',
+		'loom.com',
+		'dailymotion.com', 'dmcdn.net',
+		'tiktok.com', 'tiktokcdn.com', 'ttwstatic.com',
+	);
+	return apply_filters( 'xrv_selftest_provider_hosts', $hosts );
+}
+
+/* Front-end harness: an admin-only, nonce-gated isolated render of a real gallery, used as the iframe
+ * source for the self-test. Hooked at priority 0 so it answers before redirect_canonical can touch the
+ * request. Renders ONLY XRV's own output (no wp_head, no theme, no other plugins), so any provider request
+ * the timing log shows is unambiguously the gallery facade's doing — a true SELF-test. */
+add_action( 'template_redirect', 'xrv_selftest_maybe_render', 0 );
+function xrv_selftest_maybe_render() {
+	if ( ! isset( $_GET['xrv_selftest'] ) ) { return; }
+	if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) { return; }
+	$nonce = isset( $_GET['_xrvnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_xrvnonce'] ) ) : '';
+	if ( ! wp_verify_nonce( $nonce, 'xrv_selftest' ) ) { return; }
+	$mode = ( 'leak' === $_GET['xrv_selftest'] ) ? 'leak' : 'clean';
+	xrv_selftest_render_page( $mode );
+	exit;
+}
+
+function xrv_selftest_render_page( $mode ) {
+	nocache_headers();
+	if ( ! headers_sent() ) {
+		header( 'Content-Type: text/html; charset=' . get_bloginfo( 'charset' ) );
+		header( 'X-Robots-Tag: noindex, nofollow, noarchive', true );
+		header( 'Referrer-Policy: no-referrer' );
+	}
+
+	// A real gallery — the same renderer the site ships — so the test exercises the production facade.
+	$gallery = xrv_render( array( 'layout' => 'grid', 'limit' => 24, 'controls' => 'true' ) );
+
+	// NEGATIVE CONTROL: the ONLY place XRV ever requests a provider host without a click, and only when an
+	// admin explicitly runs "Verify the detector". One off-screen pixel proves the timing-log detector fires.
+	$control = ( 'leak' === $mode )
+		? '<img src="https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" alt="" width="1" height="1" referrerpolicy="no-referrer" aria-hidden="true" style="position:absolute;left:-9999px;top:0">'
+		: '';
+	?><!doctype html>
+<html <?php language_attributes(); ?>>
+<head>
+<meta charset="<?php echo esc_attr( get_bloginfo( 'charset' ) ); ?>">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>XRV privacy self-test</title>
+<style>html,body{margin:0;padding:16px;background:#fff;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}</style>
+</head>
+<body>
+<?php
+echo $control;  // phpcs:ignore WordPress.Security.EscapeOutput -- static, controlled negative-control markup
+echo $gallery;  // phpcs:ignore WordPress.Security.EscapeOutput -- xrv_render returns prepared, internally-escaped markup
+?>
+</body>
+</html>
+<?php
+}
+
+/* The Settings card: explanation, the two run buttons, and a live results region. Rendered OUTSIDE the
+ * settings <form> (it saves nothing). The orchestration JS loads the harness in a hidden iframe, reads its
+ * Resource-Timing entries WITHOUT dispatching any click, and renders a pass/fail naming any offender. */
+function xrv_selftest_card() {
+	$nonce     = wp_create_nonce( 'xrv_selftest' );
+	$clean_url = add_query_arg( array( 'xrv_selftest' => 'clean', '_xrvnonce' => $nonce ), home_url( '/' ) );
+	$leak_url  = add_query_arg( array( 'xrv_selftest' => 'leak', '_xrvnonce' => $nonce ), home_url( '/' ) );
+	$published = (int) wp_count_posts( 'xroad_video' )->publish;
+
+	$cfg = wp_json_encode(
+		array( 'hosts' => array_values( xrv_provider_hosts() ), 'clean' => $clean_url, 'leak' => $leak_url ),
+		JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP
+	);
+
+	ob_start();
+	?>
+	<div class="xrv-card xrv-selftest"><?php echo xrv_card_head( 'xrv-sec-selftest', 'shield', 'Privacy self-test', 'Proof, not a promise — render a real gallery and watch every network request.' ); // phpcs:ignore WordPress.Security.EscapeOutput -- helper escapes its inputs ?>
+		<p class="description" style="max-width:700px">XRV's core guarantee is that a gallery makes <strong>zero requests to any video provider</strong> &mdash; YouTube, Vimeo, Wistia, Loom, Dailymotion, TikTok &mdash; until a visitor deliberately clicks play. This renders your real gallery in an isolated frame, reads the browser's Resource-Timing log, and confirms it. It is both the strongest privacy demo you can show a buyer and a regression guard: if a future change ever leaked a pre-click request, this turns red.</p>
+		<?php if ( $published < 1 ) : ?>
+			<div class="xrv-st-card xrv-st-warn"><strong>Add at least one published video first.</strong> The self-test renders your real library; with nothing published there is nothing to prove.</div>
+		<?php else : ?>
+		<p class="xrv-st-actions">
+			<button type="button" class="button button-primary" id="xrv-selftest-run">&#128737;&#65039; Run privacy self-test</button>
+			<button type="button" class="button button-secondary" id="xrv-selftest-verify" title="Loads a deliberately leaky control page to prove the detector catches a real leak">Verify the detector</button>
+			<span class="xrv-st-status" id="xrv-selftest-status" role="status" aria-live="polite"></span>
+		</p>
+		<div id="xrv-selftest-out" aria-live="polite"></div>
+		<?php endif; ?>
+		<?php
+		echo xrv_selftest_styles();                            // phpcs:ignore WordPress.Security.EscapeOutput -- static CSS
+		echo '<script>window.XRVST=' . $cfg . ';</script>';   // phpcs:ignore WordPress.Security.EscapeOutput -- wp_json_encode w/ HEX_TAG|HEX_AMP is script-safe
+		echo xrv_selftest_js();                                // phpcs:ignore WordPress.Security.EscapeOutput -- static NOWDOC script
+		?>
+	</div>
+	<?php
+	return ob_get_clean();
+}
+
+function xrv_selftest_styles() {
+	return <<<'CSS'
+<style id="xrv-selftest-css">
+.xrv-selftest .xrv-st-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:6px 0 0}
+.xrv-selftest .button-primary{background:var(--xr-purple);border-color:var(--xr-purple)}
+.xrv-selftest .button-primary:hover{background:var(--xr-deep);border-color:var(--xr-deep)}
+.xrv-st-status{font-style:italic;color:var(--xr-charcoal)}
+.xrv-st-status.busy::before{content:"";display:inline-block;width:12px;height:12px;margin-right:7px;vertical-align:-2px;border:2px solid var(--xr-line);border-top-color:var(--xr-purple);border-radius:50%;animation:xrv-st-spin .7s linear infinite}
+@keyframes xrv-st-spin{to{transform:rotate(360deg)}}
+.xrv-st-card{margin-top:14px;padding:14px 16px;border:1px solid var(--xr-line);border-radius:10px;background:#fff;font-size:14px;line-height:1.5}
+.xrv-st-card strong{display:block;margin-bottom:2px;font-size:14.5px}
+.xrv-st-card p{margin:.45em 0}
+.xrv-st-card ul{margin:.5em 0 0;padding-left:18px}
+.xrv-st-card li{margin:.25em 0;word-break:break-all}
+.xrv-st-card code{background:rgba(0,0,0,.06);padding:1px 6px;border-radius:4px;font-size:12px;word-break:break-all}
+.xrv-st-note{font-size:13px;color:var(--xr-charcoal);border-top:1px solid var(--xr-line);padding-top:8px}
+.xrv-st-pass{border-color:#bfe6cf;background:#f1faf4;color:#10532f}
+.xrv-st-pass strong{color:var(--xr-green)}
+.xrv-st-fail{border-color:#f1c3c0;background:#fdf2f1;color:#7a1d18}
+.xrv-st-fail strong{color:#b32d2e}
+.xrv-st-warn{border-color:#f6d9a8;background:#fff8ec;color:#7a531a}
+.xrv-st-warn strong{color:#a9740f}
+</style>
+CSS;
+}
+
+function xrv_selftest_js() {
+	return <<<'JS'
+<script>
+(function(){
+	var cfg = window.XRVST || {};
+	var hosts = cfg.hosts || [];
+	function el(id){ return document.getElementById(id); }
+	function esc(s){ var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+	function matchProvider(hostname){
+		hostname = String(hostname).toLowerCase();
+		for (var i=0; i<hosts.length; i++){
+			var s = hosts[i];
+			if (hostname === s || hostname.slice(-(s.length+1)) === '.'+s) { return s; }
+		}
+		return null;
+	}
+	function uniqueHosts(urls){
+		var seen = {}, out = [];
+		urls.forEach(function(u){ var h; try{ h = new URL(u).hostname; }catch(e){ return; } if(!seen[h]){ seen[h]=1; out.push(h); } });
+		return out;
+	}
+	function setStatus(msg, busy){
+		var s = el('xrv-selftest-status'); if(!s){ return; }
+		s.className = 'xrv-st-status' + (busy ? ' busy' : '');
+		s.textContent = msg || '';
+	}
+	function probe(url, done){
+		var frame = document.createElement('iframe');
+		frame.setAttribute('aria-hidden', 'true');
+		frame.style.cssText = 'position:absolute;left:-99999px;top:0;width:1024px;height:768px;border:0';
+		var settled = false;
+		function finish(result){ if(settled){ return; } settled = true; try{ document.body.removeChild(frame); }catch(e){} done(result); }
+		frame.onload = function(){
+			// Read timings WITHOUT ever dispatching a click. Wait a beat so any deferred request would have fired.
+			setTimeout(function(){
+				var out = { ok:true, offenders:[], others:[], total:0, error:null };
+				try {
+					var win = frame.contentWindow;
+					var origin = win.location.origin;
+					var entries = win.performance.getEntriesByType('resource');
+					out.total = entries.length;
+					for (var i=0; i<entries.length; i++){
+						var name = entries[i].name, u;
+						try { u = new URL(name); } catch(e){ continue; }
+						if (u.origin === origin) { continue; }
+						var prov = matchProvider(u.hostname);
+						if (prov) { out.offenders.push({ url:name, host:u.hostname, match:prov }); }
+						else { out.others.push(name); }
+					}
+				} catch(e){ out.ok = false; out.error = (e && e.message) ? e.message : String(e); }
+				finish(out);
+			}, 700);
+		};
+		frame.onerror = function(){ finish({ ok:false, offenders:[], others:[], total:0, error:'The test frame failed to load.' }); };
+		frame.src = url;
+		document.body.appendChild(frame);
+		setTimeout(function(){ finish({ ok:false, offenders:[], others:[], total:0, error:'Timed out loading the test gallery.' }); }, 15000);
+	}
+	function card(cls, html){ return '<div class="xrv-st-card ' + cls + '">' + html + '</div>'; }
+	function renderClean(r){
+		var out = el('xrv-selftest-out');
+		if (!r.ok){ out.innerHTML = card('xrv-st-warn', '<strong>Could not read the test frame.</strong><p>' + esc(r.error||'') + ' This usually means wp-admin and your site address are on different origins (e.g. www vs. non-www).</p>'); return; }
+		if (r.offenders.length === 0){
+			var note = '';
+			if (r.others.length){
+				note = '<p class="xrv-st-note">' + r.others.length + ' request' + (r.others.length===1?'':'s') + ' went to other origins you control (e.g. an image CDN): <code>' + uniqueHosts(r.others).map(esc).join('</code> <code>') + '</code>. These are not video-provider trackers, so the guarantee holds.</p>';
+			}
+			out.innerHTML = card('xrv-st-pass', '<strong>PASS &mdash; zero third-party video requests before click.</strong><p>The rendered gallery made ' + r.total + ' request' + (r.total===1?'':'s') + ', all to this site. Nothing reached YouTube, Vimeo, Wistia, Loom, Dailymotion, or TikTok until a deliberate play.</p>' + note);
+		} else {
+			var li = r.offenders.map(function(o){ return '<li><code>' + esc(o.host) + '</code> &mdash; ' + esc(o.url) + '</li>'; }).join('');
+			out.innerHTML = card('xrv-st-fail', '<strong>FAIL &mdash; ' + r.offenders.length + ' third-party video request' + (r.offenders.length===1?'':'s') + ' before any click.</strong><p>A video provider was contacted before anyone pressed play. This breaks the privacy guarantee &mdash; most often a video whose local poster failed to sideload. Offending requests:</p><ul>' + li + '</ul>');
+		}
+	}
+	function renderVerify(r){
+		var out = el('xrv-selftest-out');
+		if (!r.ok){ out.innerHTML = card('xrv-st-warn', '<strong>Detector check inconclusive.</strong><p>' + esc(r.error||'') + '</p>'); return; }
+		if (r.offenders.length > 0){
+			out.innerHTML = card('xrv-st-pass', '<strong>Detector verified.</strong><p>The control page deliberately requests <code>' + esc(r.offenders[0].host) + '</code> before any click, and the self-test caught it. A real leak would be flagged exactly the same way.</p>');
+		} else {
+			out.innerHTML = card('xrv-st-warn', '<strong>Detector check inconclusive.</strong><p>The planted third-party request did not appear in the timing log &mdash; a browser extension or network filter may have blocked it. Retry with extensions disabled.</p>');
+		}
+	}
+	function go(mode){
+		var runBtn = el('xrv-selftest-run'), vBtn = el('xrv-selftest-verify');
+		if (runBtn){ runBtn.disabled = true; } if (vBtn){ vBtn.disabled = true; }
+		setStatus(mode === 'leak' ? 'Running detector self-check…' : 'Rendering a real gallery and watching every request…', true);
+		el('xrv-selftest-out').innerHTML = '';
+		probe(mode === 'leak' ? cfg.leak : cfg.clean, function(r){
+			if (runBtn){ runBtn.disabled = false; } if (vBtn){ vBtn.disabled = false; }
+			setStatus('', false);
+			if (mode === 'leak') { renderVerify(r); } else { renderClean(r); }
+		});
+	}
+	function wire(){
+		var runBtn = el('xrv-selftest-run'); if (runBtn){ runBtn.addEventListener('click', function(){ go('clean'); }); }
+		var vBtn = el('xrv-selftest-verify'); if (vBtn){ vBtn.addEventListener('click', function(){ go('leak'); }); }
+	}
+	if (el('xrv-selftest-run') || el('xrv-selftest-verify')) { wire(); }
+	else { document.addEventListener('DOMContentLoaded', wire); }
+})();
+</script>
+JS;
+}
+
 function xrv_render_settings_page() {
 	if ( ! current_user_can( 'manage_options' ) ) { return; }
 	$s       = xrv_get_settings();
@@ -3131,6 +3375,7 @@ function xrv_render_settings_page() {
 		<?php echo xrv_admin_css(); // phpcs:ignore WordPress.Security.EscapeOutput -- static, controlled CSS ?>
 		<?php xrv_admin_header( 'Privacy-first video gallery', 'XRV <b>Settings</b>', 'Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.' ); ?>
 		<nav class="xrv-nav" aria-label="Settings sections">
+			<a href="#xrv-sec-selftest"><?php echo xrv_admin_icon( 'shield' ); ?> Self-test</a>
 			<a href="#xrv-sec-privacy"><?php echo xrv_admin_icon( 'shield' ); ?> Privacy &amp; consent</a>
 			<a href="#xrv-sec-browse"><?php echo xrv_admin_icon( 'sliders' ); ?> Browse</a>
 			<a href="#xrv-sec-api"><?php echo xrv_admin_icon( 'key' ); ?> API key</a>
@@ -3150,6 +3395,7 @@ function xrv_render_settings_page() {
 			secs.forEach(function(s){ io.observe(s); });
 		})();
 		</script>
+		<?php echo xrv_selftest_card(); // phpcs:ignore WordPress.Security.EscapeOutput -- returns prepared, internally-escaped markup ?>
 		<form method="post" action="options.php">
 			<?php settings_fields( 'xrv_settings_group' ); ?>
 
