@@ -12,7 +12,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.8.0
+ * Version:           2.10.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +60,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.8.0' );
+	define( 'XRV_VERSION', '2.10.0' );
 }
 
 /* =================================================================================================
@@ -128,6 +128,38 @@ function xrv_register_data_model() {
 			'rewrite'           => false,
 		) );
 	}
+
+	// 2.9.0 (Galleries anywhere): a "Collection" is a named, reusable, *placeable* gallery — a saved layout
+	// over either a hand-picked, drag-ordered set of videos OR a taxonomy filter. Config-only: it has no
+	// public single page (it is dropped into pages/templates via [xroad-videos collection="slug"] or the
+	// block), so publicly_queryable / rewrite / has_archive are all off — it adds ZERO front-end rewrite
+	// rules, so no flush is needed for it to work. Slug = post_name (looked up with get_page_by_path);
+	// page-attributes gives menu_order to order the collection list.
+	register_post_type( 'xrv_collection', array(
+		'labels' => array(
+			'name'               => 'Collections',
+			'singular_name'      => 'Collection',
+			'add_new_item'       => 'Add New Collection',
+			'edit_item'          => 'Edit Collection',
+			'new_item'           => 'New Collection',
+			'view_item'          => 'View Collection',
+			'search_items'       => 'Search Collections',
+			'not_found'          => 'No collections yet',
+			'not_found_in_trash' => 'No collections in Trash',
+			'all_items'          => 'Collections',
+			'menu_name'          => 'Collections',
+		),
+		'public'              => false,
+		'publicly_queryable'  => false,
+		'show_ui'             => true,
+		'show_in_menu'        => 'edit.php?post_type=xroad_video', // grouped under the XRV Video menu
+		'show_in_rest'        => false, // config-only CPT; no REST / headless consumer, so keep it off the API surface
+		'rewrite'             => false,
+		'has_archive'         => false,
+		'exclude_from_search' => true,
+		'capability_type'     => 'post',
+		'supports'            => array( 'title', 'page-attributes' ), // title = collection name; page-attributes = menu_order
+	) );
 }
 
 /* Poster renditions WordPress auto-generates on upload, so every poster has a right-sized desktop crop
@@ -168,6 +200,9 @@ function xrv_register_meta() {
 			'auth_callback' => function() { return current_user_can( 'edit_posts' ); },
 		) );
 	}
+
+	// 2.9.0: collection meta (_xrvc_video_ids, _xrvc_layout) is written/read directly via update/get_post_meta
+	// in the collection editor + resolver — no register_post_meta needed (no REST/headless consumer).
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -691,11 +726,42 @@ function xrv_is_short( $post_id, $source_url = '' ) {
 	return false !== strpos( $source_url, '/shorts/' );
 }
 
+/* 2.9.0: resolve a saved Collection (by slug or numeric ID) into base atts for xrv_render. Returns null when
+ * the collection does not exist. A collection is a hand-picked, ordered set of videos plus a layout; the
+ * ordered ids become an `ids` list. An EMPTY collection renders nothing (ids => '-1', a non-matching id),
+ * never the whole library. */
+function xrv_collection_atts( $slug ) {
+	$slug = (string) $slug;
+	$post = is_numeric( $slug )
+		? get_post( (int) $slug )
+		: get_page_by_path( sanitize_title( $slug ), OBJECT, 'xrv_collection' );
+	if ( ! $post || 'xrv_collection' !== $post->post_type ) {
+		return null;
+	}
+	$ids  = trim( (string) get_post_meta( $post->ID, '_xrvc_video_ids', true ) );
+	$atts = array(
+		'layout' => (string) get_post_meta( $post->ID, '_xrvc_layout', true ),
+		'ids'    => '' !== $ids ? $ids : '-1', // empty collection => non-matching id => "No videos found", not the whole library
+	);
+	// Drop an empty layout so it inherits the site default; `ids` is always set.
+	return array_filter( $atts, function( $v ) { return '' !== $v && null !== $v; } );
+}
+
 function xrv_render( $atts = array() ) {
 
 	// Drop empty attrs so a blank shortcode value OR an unset/"site default" block control falls through to
 	// the site defaults below (instead of overriding them with an empty string).
 	$atts = array_filter( (array) $atts, function( $v ) { return '' !== $v && null !== $v; } );
+
+	// 2.9.0: a `collection` resolves a saved Collection's config into the base atts; any attribute passed
+	// explicitly on the shortcode/block still overrides the collection. (Unknown/empty slug falls through to
+	// normal rendering.) A hand-picked collection arrives here as an ordered `ids` list.
+	if ( ! empty( $atts['collection'] ) ) {
+		$cfg = xrv_collection_atts( $atts['collection'] );
+		unset( $atts['collection'] );
+		if ( is_array( $cfg ) ) { $atts = array_merge( $cfg, $atts ); } // explicit atts win over collection config
+	}
+
 	$s = xrv_get_settings(); // site-wide defaults (Videos -> Settings); explicit shortcode/block attrs override these
 	$atts = shortcode_atts( array(
 		'series'   => '',   // comma-separated xrv_series slugs to pre-filter
@@ -703,7 +769,8 @@ function xrv_render( $atts = array() ) {
 		'topic'    => '',   // comma-separated xrv_topic slugs
 		'limit'    => -1,   // max videos (default: all)
 		'columns'  => '',   // fixed column count; blank = responsive (masonry for grid, 3 for library/carousel)
-		'playback' => 'lightbox', // 'lightbox' (pops out into a centered overlay) | 'inline' (plays in the card)
+		'playback' => $s['playback'], // lightbox (all) | lightbox-desktop | lightbox-mobile | inline — the modal can be scoped to a device class (see below)
+		'lightbox_details' => $s['lightbox_details'], // show title + date + description inside the lightbox (1/0)
 		'layout'   => 'grid',      // 'grid' | 'carousel' | 'library' (featured carousel + browse grid)
 		'controls' => 'true',      // show the search / sort / filter / count bar on the grid
 		'filter_ui' => $s['filter_ui'],   // facet filters as dropdown 'select' menus (default) or clickable 'chips'
@@ -720,9 +787,16 @@ function xrv_render( $atts = array() ) {
 		'consent_decline' => $s['consent_decline'], // label for the decline/dismiss control on the prompt
 		'privacy_url'     => $s['privacy_url'],      // privacy policy link in the notice; defaults to the WP privacy page
 		'shorts'   => $s['shorts_default'],          // all | only | hide — YouTube Shorts (vertical 9:16) handling for this gallery
+		'ids'      => '',                            // 2.9.0: explicit ordered post-id list (hand-picked collection); when set, it is the exact set + order
 	), $atts, 'xroad-videos' );
 
-	$playback = ( 'inline' === $atts['playback'] ) ? 'inline' : 'lightbox';
+	// Playback: 'lightbox' (pop-out modal on every device) | 'inline' (plays in the card) | device-scoped
+	// 'lightbox-desktop' / 'lightbox-mobile' (modal on that device class, inline on the other). The desktop /
+	// mobile split is decided CLIENT-SIDE at click time (viewport width), so the page stays fully cacheable.
+	$playback = in_array( $atts['playback'], array( 'inline', 'lightbox', 'lightbox-desktop', 'lightbox-mobile' ), true ) ? $atts['playback'] : 'lightbox';
+	// Lightbox details panel (title + relative date + collapsible description, à la a YouTube watch caption).
+	// Lightbox-only; inline playback already shows the caption beneath the card.
+	$lb_details = ! in_array( strtolower( (string) $atts['lightbox_details'] ), array( '0', 'false', 'no', 'off' ), true );
 	$layout   = in_array( $atts['layout'], array( 'grid', 'carousel', 'library' ), true ) ? $atts['layout'] : 'grid';
 	$controls = ! in_array( strtolower( (string) $atts['controls'] ), array( 'false', '0', 'no', 'off' ), true );
 	$filter_ui = ( 'chips' === strtolower( (string) $atts['filter_ui'] ) ) ? 'chips' : 'select';
@@ -757,6 +831,16 @@ function xrv_render( $atts = array() ) {
 	$shorts = in_array( $atts['shorts'], array( 'all', 'only', 'hide' ), true ) ? $atts['shorts'] : $s['shorts_default'];
 	if ( 'only' === $shorts )     { $query_args['meta_query'] = array( array( 'key' => '_xrv_short', 'compare' => 'EXISTS' ) ); }
 	elseif ( 'hide' === $shorts ) { $query_args['meta_query'] = array( array( 'key' => '_xrv_short', 'compare' => 'NOT EXISTS' ) ); }
+
+	// 2.9.0: an explicit ordered id list (a hand-picked collection, or `[xroad-videos ids="12,7,30"]`) is the
+	// exact set AND order — it takes precedence over taxonomy and Shorts filtering.
+	$ids = array_filter( array_map( 'intval', preg_split( '/[\s,]+/', (string) $atts['ids'] ) ) );
+	if ( $ids ) {
+		$query_args['post__in']       = $ids;
+		$query_args['orderby']        = 'post__in'; // preserve the hand-picked drag order
+		$query_args['posts_per_page'] = count( $ids );
+		unset( $query_args['tax_query'], $query_args['meta_query'] );
+	}
 
 	$q = new WP_Query( $query_args );
 	if ( ! $q->have_posts() ) {
@@ -855,7 +939,7 @@ function xrv_render( $atts = array() ) {
 
 	ob_start();
 	?>
-<div id="xroad-videos-app" class="xrv xrv--<?php echo esc_attr( $layout ); ?>" data-playback="<?php echo esc_attr( $playback ); ?>" data-layout="<?php echo esc_attr( $layout ); ?>" data-consent="<?php echo esc_attr( $consent_notice ); ?>" data-consent-text="<?php echo esc_attr( $atts['consent_text'] ); ?>" data-consent-btn="<?php echo esc_attr( $atts['consent_button'] ); ?>" data-consent-decline="<?php echo esc_attr( $atts['consent_decline'] ); ?>" data-privacy="<?php echo esc_attr( $privacy_url ); ?>"<?php if ( 'geo' === $consent_notice ) : ?> data-region-url="<?php echo esc_url( rest_url( 'xrv/v1/region' ) ); ?>"<?php endif; ?>>
+<div class="xrv xrv--<?php echo esc_attr( $layout ); ?>" data-playback="<?php echo esc_attr( $playback ); ?>" data-lb-details="<?php echo $lb_details ? '1' : '0'; ?>" data-layout="<?php echo esc_attr( $layout ); ?>" data-consent="<?php echo esc_attr( $consent_notice ); ?>" data-consent-text="<?php echo esc_attr( $atts['consent_text'] ); ?>" data-consent-btn="<?php echo esc_attr( $atts['consent_button'] ); ?>" data-consent-decline="<?php echo esc_attr( $atts['consent_decline'] ); ?>" data-privacy="<?php echo esc_attr( $privacy_url ); ?>"<?php if ( 'geo' === $consent_notice ) : ?> data-region-url="<?php echo esc_url( rest_url( 'xrv/v1/region' ) ); ?>"<?php endif; ?>>
 	<?php echo xrv_head_assets_once(); ?>
 
 	<?php if ( 'library' !== $layout && '' !== $atts['heading'] ) : ?>
@@ -874,7 +958,7 @@ function xrv_render( $atts = array() ) {
 			<div class="xrv-bar">
 				<div class="xrv-search">
 					<svg class="xrv-ic"><use href="#xrv-i-search"/></svg>
-					<input type="text" id="xrv-q" placeholder="Search videos&hellip;" aria-label="Search videos by keyword">
+					<input type="text" class="xrv-q" placeholder="Search videos&hellip;" aria-label="Search videos by keyword">
 				</div>
 				<div class="xrv-ctrls">
 					<?php if ( 'select' === $filter_ui ) {
@@ -884,8 +968,8 @@ function xrv_render( $atts = array() ) {
 						echo xrv_render_filter_select( 'topic',    'Topic',    'xrv_topic',    $facet['topic'] );
 					} ?>
 					<div class="xrv-sortwrap">
-						<label for="xrv-sort">Sort</label>
-						<select id="xrv-sort">
+						<?php $sort_id = wp_unique_id( 'xrv-sort-' ); // per-instance so the label/for pairing survives multiple galleries on one page ?><label for="<?php echo esc_attr( $sort_id ); ?>">Sort</label>
+						<select id="<?php echo esc_attr( $sort_id ); ?>" class="xrv-sort">
 							<option value="curated">Curated order</option>
 							<option value="newest">Newest first</option>
 							<option value="oldest">Oldest first</option>
@@ -907,22 +991,22 @@ function xrv_render( $atts = array() ) {
 			?>
 
 			<div class="xrv-statusbar">
-				<div class="xrv-count">Showing <strong id="xrv-shown"><?php echo (int) min( $per_page, $total ); ?></strong> of <strong id="xrv-total"><?php echo (int) $total; ?></strong> videos</div>
-				<button type="button" class="xrv-reset" id="xrv-reset"><svg class="xrv-ic"><use href="#xrv-i-reset"/></svg> Reset</button>
+				<div class="xrv-count">Showing <strong class="xrv-shown"><?php echo (int) min( $per_page, $total ); ?></strong> of <strong class="xrv-total"><?php echo (int) $total; ?></strong> videos</div>
+				<button type="button" class="xrv-reset"><svg class="xrv-ic"><use href="#xrv-i-reset"/></svg> Reset</button>
 			</div>
 			<?php endif; ?>
 
-			<div class="<?php echo esc_attr( $grid_class ); ?>" id="xrv-grid" style="<?php echo esc_attr( $grid_style ); ?>" data-perpage="<?php echo (int) $per_page; ?>" data-loadstep="<?php echo (int) $load_step; ?>">
+			<div class="<?php echo esc_attr( $grid_class ); ?>" style="<?php echo esc_attr( $grid_style ); ?>" data-perpage="<?php echo (int) $per_page; ?>" data-loadstep="<?php echo (int) $load_step; ?>">
 				<?php foreach ( $records as $i => $r ) { echo xrv_render_card( $r, $card_meta, 0 === $i ); } // first card eager + high priority = the LCP image ?>
 			</div>
 
-			<div class="xrv-empty" id="xrv-empty" style="display:none">
+			<div class="xrv-empty" style="display:none">
 				<h3>No videos match your filters</h3>
 				<p>Try removing a filter or clearing the keyword search.</p>
 			</div>
 
 			<div class="xrv-more">
-				<button type="button" class="xrv-loadmore" id="xrv-loadmore" style="display:none">Load More&hellip;</button>
+				<button type="button" class="xrv-loadmore" style="display:none">Load More&hellip;</button>
 				<?php if ( $subscribe_url !== '' ) : ?>
 					<a class="xrv-subscribe" href="<?php echo esc_url( $subscribe_url ); ?>" target="_blank" rel="noopener"><svg class="xrv-yt" viewBox="0 0 24 24" aria-hidden="true"><use href="#xrv-i-yt"/></svg> <?php echo esc_html( $atts['subscribe_label'] ); ?></a>
 				<?php endif; ?>
@@ -991,6 +1075,14 @@ function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 
 	$poster = $r['poster'];
 
+	// Relative upload date ("2 months ago") for the lightbox details panel — rendered server-side so the
+	// modal can show it without any client-side date math. Empty when the video has no stored upload date.
+	$when = '';
+	if ( '' !== ( $r['upload'] ?? '' ) ) {
+		$ts = strtotime( (string) $r['upload'] );
+		if ( $ts ) { $when = human_time_diff( $ts ) . ' ago'; }
+	}
+
 	ob_start();
 	?>
 	<figure class="xrv-card"<?php if ( ! empty( $r['is_short'] ) ) echo ' data-short="1"'; ?>
@@ -1003,6 +1095,8 @@ function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 		data-date="<?php echo esc_attr( $r['date_key'] ); ?>"
 		data-seconds="<?php echo (int) ( $r['dur_sec'] ?? 0 ); ?>"
 		data-title="<?php echo esc_attr( strtolower( $title ) ); ?>"
+		<?php if ( '' !== $when ) : ?>data-when="<?php echo esc_attr( $when ); ?>" <?php endif; ?>
+		<?php if ( '' !== $r['desc'] ) : ?>data-desc="<?php echo esc_attr( $r['desc'] ); ?>" <?php endif; ?>
 		data-search="<?php echo esc_attr( $r['search'] ); ?>">
 		<div class="xrv-frame">
 			<button type="button" class="xrv-facade" aria-label="Play video: <?php echo esc_attr( $title ); ?>">
@@ -1067,7 +1161,7 @@ function xrv_render_filter_select( $group, $heading, $taxonomy, $counts ) {
 	if ( is_wp_error( $ordered ) || empty( $ordered ) ) {
 		return '';
 	}
-	$id = 'xrv-fsel-' . $group;
+	$id = wp_unique_id( 'xrv-fsel-' . $group . '-' ); // per-instance id so each label/for pairing is valid with multiple galleries on one page
 	ob_start(); ?>
 	<div class="xrv-fselwrap">
 		<label for="<?php echo esc_attr( $id ); ?>"><?php echo esc_html( $heading ); ?></label>
@@ -1358,7 +1452,7 @@ function xrv_single_video_schema( $post_id ) {
 
 /* =================================================================================================
  * 7. INLINE ASSETS  (SVG sprite, scoped critical CSS, vanilla JS)
- *    Emitted inline inside the rendered block, namespaced under .xrv- and #xroad-videos-app. Inlining is
+ *    Emitted inline inside the rendered block, namespaced under .xrv- and the .xrv wrapper class. Inlining is
  *    deliberate: first paint is self-sufficient, the styles survive a performance plugin's unused-CSS
  *    pass (inline styles are not removal candidates), and the tool stays theme-independent.
  *    WCAG AA: 4.5:1 text contrast, 3:1 non-text/focus ring.
@@ -1384,7 +1478,7 @@ function xrv_dynamic_css() {
 	if ( '' === $base && '' === $hov ) { return ''; }
 	$v  = '' !== $base ? '--xrv-play:' . $base . ';' : '';
 	$v .= '' !== $hov ? '--xrv-play-hover:' . $hov . ';' : '';
-	return "\n" . '<style id="xrv-dynamic">#xroad-videos-app{' . $v . '}</style>';
+	return "\n" . '<style id="xrv-dynamic">.xrv{' . $v . '}</style>';
 }
 function xrv_footer_js_once() {
 	static $done = false;
@@ -1407,12 +1501,12 @@ SVG;
 function xrv_inline_css() {
 	return <<<'CSS'
 <style>
-#xroad-videos-app{font-family:var(--xrv-font, 'Gotham',Helvetica,Arial,sans-serif) !important;color:var(--xrv-text,#1a2332) !important;line-height:1.55 !important;max-width:1180px;margin:0 auto;padding:0}
-#xroad-videos-app *,#xroad-videos-app *::before,#xroad-videos-app *::after{box-sizing:border-box}
-#xroad-videos-app h3{font-family:inherit !important;line-height:1.3 !important;margin:0;font-weight:700;text-align:left}
-#xroad-videos-app p{margin:0}
-#xroad-videos-app a{color:var(--xrv-link,#017A8E);text-decoration:none}
-#xroad-videos-app a:hover{text-decoration:underline}
+.xrv{font-family:var(--xrv-font, 'Gotham',Helvetica,Arial,sans-serif) !important;color:var(--xrv-text,#1a2332) !important;line-height:1.55 !important;max-width:1180px;margin:0 auto;padding:0}
+.xrv *,.xrv *::before,.xrv *::after{box-sizing:border-box}
+.xrv h3{font-family:inherit !important;line-height:1.3 !important;margin:0;font-weight:700;text-align:left}
+.xrv p{margin:0}
+.xrv a{color:var(--xrv-link,#017A8E);text-decoration:none}
+.xrv a:hover{text-decoration:underline}
 .xrv-ic{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-2px;flex:0 0 auto}
 .xrv-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px}
 .xrv-search{position:relative;flex:1 1 320px;min-width:240px}
@@ -1546,21 +1640,34 @@ function xrv_inline_css() {
 .xrv-subscribe:hover{background:var(--xrv-action,#007A53);text-decoration:none !important}
 .xrv-subscribe:focus-visible{outline:3px solid rgba(1,154,179,.5);outline-offset:2px}
 .xrv-yt{width:22px;height:22px;flex:0 0 auto;vertical-align:-5px}
-/* Lightbox modal. UNSCOPED on purpose: the overlay is appended to <body>, outside #xroad-videos-app. */
+/* Lightbox modal. UNSCOPED on purpose: the overlay is appended to <body>, outside the .xrv wrapper. */
 .xrv-modal{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:24px;font-family:var(--xrv-font, 'Gotham',Helvetica,Arial,sans-serif)}
 .xrv-modal[hidden]{display:none}
 .xrv-modal__backdrop{position:absolute;inset:0;background:rgba(8,16,28,.85)}
-.xrv-modal__dialog{position:relative;width:100%;max-width:1100px}
-.xrv-modal__frame{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.xrv-modal__dialog{position:relative;width:100%;max-width:1100px;display:flex;flex-direction:column;max-height:calc(100vh - 56px)}
+.xrv-modal__frame{position:relative;width:100%;flex:none;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.xrv-modal--has-caption .xrv-modal__dialog{filter:drop-shadow(0 24px 70px rgba(0,0,0,.55))}
+.xrv-modal--has-caption .xrv-modal__frame{border-radius:8px 8px 0 0;box-shadow:none}
+.xrv-modal__caption{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;background:#fff;border-radius:0 0 8px 8px;padding:18px 22px 20px;color:#3c4a57}
+.xrv-modal__head{border-bottom:1px solid #e6e6eb;padding-bottom:13px;margin-bottom:14px}
+.xrv-modal__title{margin:0 0 4px;font-size:20px;line-height:1.3;font-weight:700;color:var(--xrv-primary,#16263a)}
+.xrv-modal__meta{font-size:13px;color:#5a6b7b}
+.xrv-modal__desc{font-size:14px;line-height:1.55;color:#3c4a57;white-space:pre-line;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden}
+.xrv-modal__desc.is-open{-webkit-line-clamp:unset;display:block;overflow:visible}
+.xrv-modal__more{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:12px;padding:8px 12px;font-family:inherit;font-size:13px;font-weight:600;color:var(--xrv-primary,#16263a);background:#f3f4f5;border:0;border-radius:8px;cursor:pointer}
+.xrv-modal__more:hover{background:#eceef0}
+.xrv-modal__more:focus-visible{outline:2px solid var(--xrv-accent,#019AB3);outline-offset:2px}
+.xrv-modal__more svg{width:14px;height:14px;transition:transform .2s}
+.xrv-modal__more.is-open svg{transform:rotate(180deg)}
 .xrv-modal__frame .xrv-iframe,.xrv-modal__frame .xrv-video{position:absolute;inset:0;width:100%;height:100%;aspect-ratio:auto;border-radius:8px}
-.xrv-modal--short .xrv-modal__dialog{max-width:none;width:auto;display:flex;justify-content:center}
+.xrv-modal--short .xrv-modal__dialog{max-width:none;width:auto;display:flex;flex-direction:row;align-items:center;justify-content:center}
 .xrv-modal--short .xrv-modal__frame{aspect-ratio:9/16;width:auto;height:min(86vh,760px);max-width:94vw}
 .xrv-modal__frame iframe,.xrv-modal__frame video{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}
 .xrv-modal__close{position:absolute;top:-46px;right:0;width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.55);color:#fff;border-radius:50%;cursor:pointer;font-size:18px;line-height:1;padding:0}
 .xrv-modal__close:hover{background:rgba(255,255,255,.28)}
 .xrv-modal__close:focus-visible{outline:3px solid var(--xrv-accent,#019AB3);outline-offset:2px}
 body.xrv-modal-open{overflow:hidden}
-@media (max-width:600px){.xrv-modal{padding:14px}.xrv-modal__close{top:-42px}}
+@media (max-width:600px){.xrv-modal{padding:14px}.xrv-modal__close{top:-42px}.xrv-modal__caption{padding:14px 16px 16px}.xrv-modal__title{font-size:18px;line-height:1.25}}
 /* Shorts shelf: shorts="only" lays the verticals out as a horizontal, thumb-swipeable scroll-snap strip. */
 .xrv-grid--shelf{display:flex;gap:16px;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;padding-bottom:12px;scrollbar-width:thin}
 .xrv-grid--shelf::-webkit-scrollbar{height:8px}
@@ -1593,24 +1700,51 @@ function xrv_inline_js() {
 		return m;
 	}
 	var xrvLastFocus = null;
-	function xrvOpenModal(node, title, isShort){
+	// The optional details panel under the player: title + relative date + a description that opens with a
+	// "Description" toggle (a watch-page-style caption). Built from the card's data-* attributes, text-only.
+	function xrvBuildCaption(title, when, desc){
+		var cap = document.createElement('div'); cap.className = 'xrv-modal__caption';
+		var head = document.createElement('div'); head.className = 'xrv-modal__head';
+		var h = document.createElement('h2'); h.className = 'xrv-modal__title'; h.textContent = title || ''; head.appendChild(h);
+		if(when){ var mt = document.createElement('div'); mt.className = 'xrv-modal__meta'; mt.textContent = when; head.appendChild(mt); }
+		cap.appendChild(head);
+		if(desc){
+			var d = document.createElement('div'); d.className = 'xrv-modal__desc'; d.textContent = desc; cap.appendChild(d);
+			var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'xrv-modal__more'; btn.setAttribute('aria-expanded', 'false');
+			btn.innerHTML = '<span>Description</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+			btn.addEventListener('click', function(){ var ex = d.classList.toggle('is-open'); btn.classList.toggle('is-open', ex); btn.setAttribute('aria-expanded', ex ? 'true' : 'false'); });
+			cap.appendChild(btn);
+		}
+		return cap;
+	}
+	function xrvOpenModal(node, title, isShort, when, desc, showDetails){
 		var m = xrvGetModal();
 		m.classList.toggle('xrv-modal--short', !!isShort);
+		var dlg = m.querySelector('.xrv-modal__dialog');
 		var frame = m.querySelector('.xrv-modal__frame');
 		frame.innerHTML = '';
 		frame.appendChild(node);
+		var oldCap = dlg.querySelector('.xrv-modal__caption'); if(oldCap){ oldCap.parentNode.removeChild(oldCap); }
+		// Shorts stay player-only (a 9:16 tower + caption would overflow); the caption is a desktop/landscape device.
+		var hasCap = !!(showDetails && !isShort && (title || desc || when));
+		if(hasCap){ dlg.appendChild(xrvBuildCaption(title, when, desc)); }
+		m.classList.toggle('xrv-modal--has-caption', hasCap);
 		m.setAttribute('aria-label', title || 'Video player');
 		xrvLastFocus = document.activeElement;
 		m.removeAttribute('hidden');
 		document.body.classList.add('xrv-modal-open');
+		// Drop the "Description" toggle when the text already fits (nothing to expand) — measured post-layout.
+		if(hasCap){ var dd = dlg.querySelector('.xrv-modal__desc'), more = dlg.querySelector('.xrv-modal__more'); if(dd && more && dd.scrollHeight <= dd.clientHeight + 1){ more.style.display = 'none'; } }
 		var c = m.querySelector('.xrv-modal__close'); if(c) c.focus();
 	}
 	function xrvCloseModal(){
 		var m = document.getElementById('xrv-modal');
 		if(!m || m.hasAttribute('hidden')) return;
 		m.setAttribute('hidden', '');
+		m.classList.remove('xrv-modal--has-caption');
 		document.body.classList.remove('xrv-modal-open');
 		var frame = m.querySelector('.xrv-modal__frame'); if(frame) frame.innerHTML = ''; // stop playback
+		var cap = m.querySelector('.xrv-modal__caption'); if(cap){ cap.parentNode.removeChild(cap); }
 		if(xrvLastFocus && xrvLastFocus.focus){ xrvLastFocus.focus(); }
 	}
 	document.addEventListener('keydown', function(e){ if(e.key === 'Escape' || e.keyCode === 27) xrvCloseModal(); });
@@ -1655,6 +1789,17 @@ function xrv_inline_js() {
 		ROOT.dataset.xrvReady = '1';
 
 		var playbackMode = ROOT.getAttribute('data-playback') || 'lightbox';
+		// Device-scoped playback ('lightbox-desktop' / 'lightbox-mobile'): the modal is reserved for one device
+		// class and the other plays inline. The split is resolved here, in the browser, at click time — never
+		// server-side UA sniffing — so the rendered HTML is identical for every visitor and stays cacheable.
+		// Re-checked per click, so a rotate/resize lands the visitor in the right mode without a reload.
+		var XRV_DESKTOP_MIN = 768; // px: at/above is "desktop", below is "mobile"
+		function effectivePlayback(){
+			if(playbackMode === 'lightbox-desktop') return (window.innerWidth >= XRV_DESKTOP_MIN) ? 'lightbox' : 'inline';
+			if(playbackMode === 'lightbox-mobile')  return (window.innerWidth >= XRV_DESKTOP_MIN) ? 'inline' : 'lightbox';
+			return (playbackMode === 'inline') ? 'inline' : 'lightbox';
+		}
+		var lbDetails = ROOT.getAttribute('data-lb-details') !== '0'; // show title/date/description inside the lightbox
 
 		// ---- Informed-consent notice (consent_notice = off | strict | geo) ----
 		// The facade still makes ZERO third-party requests until a click. This only governs whether an
@@ -1706,13 +1851,15 @@ function xrv_inline_js() {
 			var titleEl = card.querySelector('.xrv-title');
 			var title = titleEl ? titleEl.textContent.trim() : 'Video player';
 			var short = !!card.dataset.short;
+			var when = card.getAttribute('data-when') || '';
+			var desc = card.getAttribute('data-desc') || '';
 			var node = xrvEmbedNode(provider, id, hash, title, short);
-			if(playbackMode === 'inline'){
+			if(effectivePlayback() === 'inline'){
 				var frame = (btn && btn.closest) ? (btn.closest('.xrv-frame') || btn.parentNode) : card.querySelector('.xrv-frame');
 				if(btn && btn.replaceWith){ btn.replaceWith(node); } else if(frame){ frame.appendChild(node); }
 				if(frame && frame.style){ frame.style.lineHeight = '0'; }
 			} else {
-				xrvOpenModal(node, title, short); /* shorts pop in a 9:16 portrait modal */
+				xrvOpenModal(node, title, short, when, desc, lbDetails); /* shorts pop in a 9:16 portrait modal (no caption) */
 			}
 			window.dataLayer = window.dataLayer || [];
 			window.dataLayer.push({ event:'video_play', video_provider:provider, video_id:id, video_title:title, video_series:(card.getAttribute('data-series') || '').split(' ')[0] });
@@ -1788,12 +1935,12 @@ function xrv_inline_js() {
 		var grid = ROOT.querySelector('.xrv-grid');
 		if(grid){
 			var cards = Array.prototype.slice.call(grid.querySelectorAll('.xrv-card'));
-			var shownEl = ROOT.querySelector('#xrv-shown');
-			var totalEl = ROOT.querySelector('#xrv-total');
-			var emptyEl = ROOT.querySelector('#xrv-empty');
-			var qEl = ROOT.querySelector('#xrv-q');
-			var sortEl = ROOT.querySelector('#xrv-sort');
-			var loadMoreBtn = ROOT.querySelector('#xrv-loadmore');
+			var shownEl = ROOT.querySelector('.xrv-shown');
+			var totalEl = ROOT.querySelector('.xrv-total');
+			var emptyEl = ROOT.querySelector('.xrv-empty');
+			var qEl = ROOT.querySelector('.xrv-q');
+			var sortEl = ROOT.querySelector('.xrv-sort');
+			var loadMoreBtn = ROOT.querySelector('.xrv-loadmore');
 			var pageSize = parseInt(grid.getAttribute('data-perpage'), 10) || 9;
 			var loadStep = parseInt(grid.getAttribute('data-loadstep'), 10) || 3;
 			var visibleLimit = pageSize;
@@ -1844,7 +1991,7 @@ function xrv_inline_js() {
 				});
 			});
 			if(loadMoreBtn) loadMoreBtn.addEventListener('click', function(){ visibleLimit += loadStep; apply(); });
-			var resetBtn = ROOT.querySelector('#xrv-reset');
+			var resetBtn = ROOT.querySelector('.xrv-reset');
 			if(resetBtn) resetBtn.addEventListener('click', function(){
 				state = { q:'', series:[], audience:[], topic:[], sort:'curated' };
 				if(qEl) qEl.value = '';
@@ -1909,10 +2056,11 @@ function xrv_register_block() {
 		'render_callback' => function( $attributes ) { return xrv_render( (array) $attributes ); },
 		'editor_script'   => 'xrv-block',
 		'attributes'      => array(
-			'layout' => $str, 'columns' => $str, 'playback' => $str, 'controls' => $str, 'filter_ui' => $str, 'card_meta' => $str, 'shorts' => $str,
+			'layout' => $str, 'columns' => $str, 'playback' => $str, 'lightbox_details' => $str, 'controls' => $str, 'filter_ui' => $str, 'card_meta' => $str, 'shorts' => $str,
 			'per_page' => $str, 'load_more' => $str, 'featured_limit' => $str, 'heading' => $str,
 			'subscribe_url' => $str, 'subscribe_label' => $str, 'consent_notice' => $str, 'consent_text' => $str,
 			'consent_button' => $str, 'consent_decline' => $str, 'privacy_url' => $str, 'series' => $str, 'audience' => $str, 'topic' => $str, 'limit' => $str,
+			'collection' => $str, 'ids' => $str, // 2.9.0: render a saved Collection by slug, or an explicit ordered id list
 		),
 	) );
 }
@@ -1939,11 +2087,19 @@ function xrv_block_editor_js() {
 			var controlsOn = (a.controls !== 'false');
 			return el(Fragment, {},
 				el(InspectorControls, {},
+					el(PanelBody, { title:'Collection (optional)', initialOpen:false },
+						el(TextControl, { label:'Collection slug', help:'Render a saved Collection (XRV → Collections) by its slug. When set it supplies the base layout and videos; the fields below still override it.', value:a.collection||'', onChange:f('collection') })
+					),
 					el(PanelBody, { title:'Layout', initialOpen:true },
 						el(SelectControl, { label:'Layout', value:a.layout||'grid', options:[
 							{label:'Grid', value:'grid'}, {label:'Library (featured + grid)', value:'library'}, {label:'Carousel (featured row)', value:'carousel'} ], onChange:f('layout') }),
-						el(SelectControl, { label:'Playback', value:a.playback||'lightbox', options:[
-							{label:'Lightbox (pop-out)', value:'lightbox'}, {label:'Inline', value:'inline'} ], onChange:f('playback') }),
+						el(SelectControl, { label:'Playback', value:a.playback||'', help:'Where the video plays on click. The desktop/mobile split is decided in the browser, so the page stays cacheable.', options:[
+							{label:'Site default', value:''},
+							{label:'Lightbox — all devices', value:'lightbox'},
+							{label:'Lightbox on desktop, inline on mobile', value:'lightbox-desktop'},
+							{label:'Lightbox on mobile, inline on desktop', value:'lightbox-mobile'},
+							{label:'Inline — all devices', value:'inline'} ], onChange:f('playback') }),
+						el(ToggleControl, { label:'Show details in lightbox', help:'Title, date & a collapsible description below the player (lightbox only).', checked:(a.lightbox_details !== 'false' && a.lightbox_details !== '0'), onChange:function(v){ set({lightbox_details: v?'true':'false'}); } }),
 						el(TextControl, { label:'Fixed columns (blank = responsive)', value:a.columns||'', onChange:f('columns') }),
 						el(TextControl, { label:'Heading (optional)', value:a.heading||'', onChange:f('heading') }),
 						el(ToggleControl, { label:'Show search / sort / filter bar', checked:controlsOn, onChange:function(v){ set({controls: v?'true':'false'}); } })
@@ -1966,7 +2122,7 @@ function xrv_block_editor_js() {
 					el('div', { style:{ border:'1px dashed var(--xrv-border,#c4ccd6)', borderRadius:'6px', padding:'18px', textAlign:'center', color:'#50575e', background:'#f6f7f7' } },
 						el('strong', { style:{ color:'var(--xrv-primary,#013C60)' } }, '▶ XRV'),
 						el('div', { style:{ fontSize:'12px', marginTop:'5px' } },
-							(a.layout||'grid') + ' · ' + (controlsOn ? 'controls on' : 'controls off') + (a.shorts ? (' · shorts: '+a.shorts) : '')),
+							(a.collection ? ('collection: '+a.collection+' · ') : '') + (a.layout||'grid') + ' · ' + (controlsOn ? 'controls on' : 'controls off') + (a.shorts ? (' · shorts: '+a.shorts) : '')),
 						el('div', { style:{ fontSize:'11px', marginTop:'3px', color:'#787c82' } }, 'Rendered live on the front end.')
 					)
 				)
@@ -2064,7 +2220,7 @@ function xrv_render_single( $post_id, $playback = 'inline' ) {
 
 	ob_start();
 	?>
-<div id="xroad-videos-app" class="xrv xrv--single" data-playback="<?php echo esc_attr( $playback ); ?>">
+<div class="xrv xrv--single" data-playback="<?php echo esc_attr( $playback ); ?>">
 	<?php echo xrv_head_assets_once(); ?>
 	<div class="xrv-grid" style="column-count:1">
 		<?php echo xrv_render_card( $r ); ?>
@@ -2164,7 +2320,7 @@ function xrv_render_single_url( $url, $playback = 'inline', $poster_attr = '', $
 
 	ob_start();
 	?>
-<div id="xroad-videos-app" class="xrv xrv--single" data-playback="<?php echo esc_attr( 'lightbox' === $playback ? 'lightbox' : 'inline' ); ?>">
+<div class="xrv xrv--single" data-playback="<?php echo esc_attr( 'lightbox' === $playback ? 'lightbox' : 'inline' ); ?>">
 	<?php echo xrv_head_assets_once(); ?>
 	<div class="xrv-grid" style="column-count:1">
 		<?php echo xrv_render_card( $r ); ?>
@@ -2198,6 +2354,185 @@ function xrv_single_chrome_css() {
  *    from oEmbed on first save. Duration and upload date can be entered by hand or read from oEmbed where
  *    available; if unavailable they fall back to editor-entered values so schema is never blank.
  * ================================================================================================= */
+
+/* =================================================================================================
+ * 9h. COLLECTION EDITOR  (2.9.0 — build a hand-picked, placeable gallery)
+ *     The admin UI for an xrv_collection: pick and order videos, choose a layout, copy the shortcode.
+ *     Dependency-free vanilla JS over a JSON list of the library — no wp.media, no build step.
+ * ================================================================================================= */
+
+add_action( 'add_meta_boxes_xrv_collection', 'xrvc_add_meta_boxes' );
+function xrvc_add_meta_boxes() {
+	add_meta_box( 'xrvc_build', 'Build this collection', 'xrvc_render_build_box', 'xrv_collection', 'normal', 'high' );
+}
+
+/* The library the picker draws from: every video (any status) as {id,title,thumb}. Capped so a very large
+ * library can't bloat the editor page; the cap is surfaced in the UI when hit. */
+function xrvc_library_for_picker() {
+	$q = new WP_Query( array(
+		'post_type'      => 'xroad_video',
+		'post_status'    => array( 'publish', 'future', 'draft', 'pending', 'private' ),
+		'posts_per_page' => 500,
+		'orderby'        => 'menu_order',
+		'order'          => 'ASC',
+		'no_found_rows'  => true,
+	) );
+	$out = array();
+	foreach ( $q->posts as $p ) {
+		$tid   = xrv_effective_thumb_id( $p->ID );
+		$thumb = $tid ? wp_get_attachment_image_url( $tid, 'thumbnail' ) : '';
+		$out[] = array( 'id' => $p->ID, 'title' => get_the_title( $p->ID ), 'thumb' => $thumb ? $thumb : '' );
+	}
+	return $out;
+}
+
+function xrvc_render_build_box( $post ) {
+	wp_nonce_field( 'xrvc_save_meta', 'xrvc_meta_nonce' );
+	echo xrv_admin_css(); // phpcs:ignore WordPress.Security.EscapeOutput -- shared admin brand CSS (prints once/request)
+
+	$ids    = (string) get_post_meta( $post->ID, '_xrvc_video_ids', true );
+	$layout = (string) get_post_meta( $post->ID, '_xrvc_layout', true );
+	$lib    = xrvc_library_for_picker();
+	$capped = count( $lib ) >= 500;
+	$slug   = (string) $post->post_name;
+
+	echo '<div class="xrv-admin xrv-metabox xrvc-build">';
+	echo '<input type="hidden" id="_xrvc_video_ids" name="_xrvc_video_ids" value="' . esc_attr( $ids ) . '">';
+
+	if ( ! $lib ) {
+		echo '<p class="xrvc-empty">No videos in the library yet. Add videos under <strong>XRV Video &rarr; Add</strong>, then build a collection.</p>';
+	} else {
+		echo '<div class="xrvc-cols">';
+		echo '<div class="xrvc-col"><div class="xrvc-col-h">In this collection <span id="xrvc-count" class="xrvc-pill">0</span></div><div id="xrvc-selected" class="xrvc-list xrvc-selected"></div><p class="xrvc-hint">Use the &uarr; &darr; buttons to order. This order is exactly how the gallery renders.</p></div>';
+		echo '<div class="xrvc-col"><div class="xrvc-col-h">Add from library</div><input type="search" id="xrvc-search" class="widefat xrvc-search" placeholder="Search videos&hellip;"><div id="xrvc-lib" class="xrvc-list xrvc-lib"></div>' . ( $capped ? '<p class="xrvc-hint">Showing the first 500 videos.</p>' : '' ) . '</div>';
+		echo '</div>';
+	}
+
+	// Layout — the one display choice intrinsic to a collection; everything else is set on the shortcode/block at the placement site.
+	echo '<p style="margin:14px 0 0"><label for="_xrvc_layout" style="font-weight:600;display:block;margin-bottom:4px">Layout</label><select id="_xrvc_layout" name="_xrvc_layout">';
+	foreach ( array( '' => 'Site default (grid)', 'grid' => 'Grid', 'carousel' => 'Carousel (featured row)', 'library' => 'Library (featured + grid)' ) as $v => $l ) {
+		echo '<option value="' . esc_attr( $v ) . '"' . selected( $layout, $v, false ) . '>' . esc_html( $l ) . '</option>';
+	}
+	echo '</select></p>';
+
+	// Shortcode hint (replaces the separate usage box).
+	if ( '' !== $slug ) {
+		echo '<p class="xrvc-hint" style="margin:12px 0 0">Drop it anywhere with <code>[xroad-videos collection="' . esc_html( $slug ) . '"]</code> or the XRV Video block. Set columns / heading / etc. on the shortcode at each placement.</p>';
+	} else {
+		echo '<p class="xrvc-hint" style="margin:12px 0 0">Save to generate the slug, then a <code>[xroad-videos collection="&hellip;"]</code> shortcode appears here.</p>';
+	}
+
+	echo '</div>'; // .xrvc-build
+
+	echo xrvc_build_styles(); // phpcs:ignore WordPress.Security.EscapeOutput -- static CSS
+	echo '<script>window.XRVC_LIB=' . wp_json_encode( $lib, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP ) . ';</script>'; // phpcs:ignore WordPress.Security.EscapeOutput -- wp_json_encode w/ HEX flags is script-safe
+	echo xrvc_build_js(); // phpcs:ignore WordPress.Security.EscapeOutput -- static NOWDOC script
+}
+
+function xrvc_build_styles() {
+	return <<<'CSS'
+<style id="xrvc-build-css">
+.xrvc-build .xrvc-col-h{font-weight:700;color:var(--xr-deep);margin:0 0 6px;font-size:13px}
+.xrvc-build .xrvc-pill{display:inline-block;min-width:20px;text-align:center;background:var(--xr-light);color:var(--xr-purple);border-radius:10px;padding:0 7px;font-size:12px;margin-left:4px}
+.xrvc-build .xrvc-cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:782px){.xrvc-build .xrvc-cols{grid-template-columns:1fr}}
+.xrvc-build .xrvc-list{border:1px solid var(--xr-line);border-radius:10px;background:#fbfbfd;min-height:90px;max-height:340px;overflow:auto;padding:6px}
+.xrvc-build .xrvc-row{display:flex;align-items:center;gap:8px;padding:6px;border-radius:8px;background:#fff;border:1px solid var(--xr-line);margin-bottom:6px}
+.xrvc-build .xrvc-row img,.xrvc-build .xrvc-row .xrvc-noimg{width:56px;height:32px;object-fit:cover;border-radius:4px;flex:none;background:var(--xr-light);display:block}
+.xrvc-build .xrvc-row .xrvc-t{flex:1;font-size:13px;line-height:1.3;overflow:hidden}
+.xrvc-build .xrvc-row button{flex:none;border:0;background:transparent;cursor:pointer;color:var(--xr-charcoal);font-size:14px;line-height:1;padding:4px 6px;border-radius:6px}
+.xrvc-build .xrvc-row button:hover{background:var(--xr-light)}
+.xrvc-build .xrvc-row .xrvc-rm:hover{background:#fdecea;color:#b32d2e}
+.xrvc-build .xrvc-row .xrvc-add{margin-left:auto;font-weight:600;color:var(--xr-purple);font-size:13px}
+.xrvc-build .xrvc-empty,.xrvc-build .xrvc-hint{color:#787c82;font-size:12px;margin:6px 0 0}
+.xrvc-build .xrvc-search{margin:0 0 8px}
+.xrvc-build .xrvc-lib .xrvc-row{cursor:default}
+</style>
+CSS;
+}
+
+function xrvc_build_js() {
+	return <<<'JS'
+<script>
+(function(){
+	var LIB = window.XRVC_LIB || [];
+	var byId = {}; LIB.forEach(function(v){ byId[v.id] = v; });
+	function el(id){ return document.getElementById(id); }
+	var hidden = el('_xrvc_video_ids');
+	var selWrap = el('xrvc-selected'), libWrap = el('xrvc-lib'), search = el('xrvc-search'), countEl = el('xrvc-count');
+	var selected = (hidden && hidden.value) ? hidden.value.split(',').map(Number).filter(function(n){ return n && byId[n]; }) : [];
+	function esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+	function thumb(v){ return v.thumb ? '<img src="' + esc(v.thumb) + '" alt="">' : '<span class="xrvc-noimg"></span>'; }
+	function renderSelected(){
+		if(!selWrap) return;
+		if(!selected.length){ selWrap.innerHTML = '<p class="xrvc-empty">No videos chosen yet. Add some from the library on the right.</p>'; return; }
+		selWrap.innerHTML = '';
+		selected.forEach(function(id){
+			var v = byId[id]; if(!v) return;
+			var row = document.createElement('div');
+			row.className = 'xrvc-row'; row.dataset.id = id;
+			row.innerHTML = thumb(v) + '<span class="xrvc-t">' + esc(v.title) + '</span>'
+				+ '<button type="button" class="xrvc-up" title="Move up" aria-label="Move up">&uarr;</button>'
+				+ '<button type="button" class="xrvc-down" title="Move down" aria-label="Move down">&darr;</button>'
+				+ '<button type="button" class="xrvc-rm" title="Remove" aria-label="Remove">&#10005;</button>';
+			selWrap.appendChild(row);
+		});
+	}
+	function renderLib(){
+		if(!libWrap) return;
+		var q = (search && search.value ? search.value : '').trim().toLowerCase();
+		var avail = LIB.filter(function(v){ return selected.indexOf(v.id) < 0 && (!q || String(v.title).toLowerCase().indexOf(q) > -1); });
+		if(!avail.length){ libWrap.innerHTML = '<p class="xrvc-empty">' + (q ? 'No matches.' : 'Every video is already in this collection.') + '</p>'; return; }
+		libWrap.innerHTML = '';
+		avail.forEach(function(v){
+			var row = document.createElement('div');
+			row.className = 'xrvc-row'; row.dataset.id = v.id;
+			row.innerHTML = thumb(v) + '<span class="xrvc-t">' + esc(v.title) + '</span><button type="button" class="xrvc-add" title="Add to collection">+ Add</button>';
+			libWrap.appendChild(row);
+		});
+	}
+	function sync(){ if(hidden) hidden.value = selected.join(','); if(countEl) countEl.textContent = selected.length; renderSelected(); renderLib(); }
+	function move(id, dir){ var i = selected.indexOf(id), j = i + dir; if(i < 0 || j < 0 || j >= selected.length) return; var t = selected[i]; selected[i] = selected[j]; selected[j] = t; sync(); }
+	if(selWrap){
+		selWrap.addEventListener('click', function(e){
+			var row = e.target.closest('.xrvc-row'); if(!row) return; var id = Number(row.dataset.id);
+			if(e.target.closest('.xrvc-rm')){ selected = selected.filter(function(x){ return x !== id; }); sync(); }
+			else if(e.target.closest('.xrvc-up')){ move(id, -1); }
+			else if(e.target.closest('.xrvc-down')){ move(id, 1); }
+		});
+	}
+	if(libWrap){
+		libWrap.addEventListener('click', function(e){
+			if(!e.target.closest('.xrvc-add')) return;
+			var row = e.target.closest('.xrvc-row'); if(!row) return; var id = Number(row.dataset.id);
+			if(selected.indexOf(id) < 0){ selected.push(id); sync(); }
+		});
+	}
+	if(search){ search.addEventListener('input', renderLib); }
+	sync();
+})();
+</script>
+JS;
+}
+
+add_action( 'save_post_xrv_collection', 'xrvc_save_meta', 10, 2 );
+function xrvc_save_meta( $post_id, $post ) {
+	if ( ! isset( $_POST['xrvc_meta_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['xrvc_meta_nonce'] ) ), 'xrvc_save_meta' ) ) {
+		return;
+	}
+	if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+		return;
+	}
+	if ( ! current_user_can( 'edit_post', $post_id ) ) {
+		return;
+	}
+	$ids_raw = isset( $_POST['_xrvc_video_ids'] ) ? (string) wp_unslash( $_POST['_xrvc_video_ids'] ) : '';
+	$ids     = array_values( array_unique( array_filter( array_map( 'intval', preg_split( '/[\s,]+/', $ids_raw ) ) ) ) );
+	update_post_meta( $post_id, '_xrvc_video_ids', implode( ',', $ids ) );
+
+	$layout = isset( $_POST['_xrvc_layout'] ) ? strtolower( sanitize_text_field( wp_unslash( $_POST['_xrvc_layout'] ) ) ) : '';
+	update_post_meta( $post_id, '_xrvc_layout', in_array( $layout, array( 'grid', 'carousel', 'library' ), true ) ? $layout : '' );
+}
 
 add_action( 'add_meta_boxes', 'xrv_add_meta_box' );
 function xrv_add_meta_box() {
@@ -2698,6 +3033,8 @@ function xrv_settings_defaults() {
 		'consent_button'  => 'Load video',
 		'consent_decline' => 'No thanks',
 		'privacy_url'     => '',
+		'playback'        => 'lightbox', // lightbox (all) | lightbox-desktop | lightbox-mobile | inline — see xrv_render
+		'lightbox_details' => 1,         // show title + relative date + collapsible description inside the lightbox
 		'filter_ui'       => 'select',
 		'card_meta'       => 'full',
 		'per_page'        => 9,
@@ -2725,6 +3062,9 @@ function xrv_sanitize_settings( $in ) {
 	$out['consent_button']  = isset( $in['consent_button'] ) ? sanitize_text_field( $in['consent_button'] ) : $d['consent_button'];
 	$out['consent_decline'] = isset( $in['consent_decline'] ) ? sanitize_text_field( $in['consent_decline'] ) : $d['consent_decline'];
 	$out['privacy_url']     = isset( $in['privacy_url'] ) ? esc_url_raw( $in['privacy_url'] ) : '';
+	$pb = isset( $in['playback'] ) ? strtolower( $in['playback'] ) : 'lightbox';
+	$out['playback']        = in_array( $pb, array( 'lightbox', 'lightbox-desktop', 'lightbox-mobile', 'inline' ), true ) ? $pb : 'lightbox';
+	$out['lightbox_details'] = empty( $in['lightbox_details'] ) ? 0 : 1;
 	$out['filter_ui']       = ( isset( $in['filter_ui'] ) && 'chips' === $in['filter_ui'] ) ? 'chips' : 'select';
 	$cm = isset( $in['card_meta'] ) ? strtolower( $in['card_meta'] ) : 'full';
 	$out['card_meta']       = in_array( $cm, array( 'full', 'compact', 'title' ), true ) ? $cm : 'full';
@@ -3045,13 +3385,15 @@ function xrv_admin_css() {
 .xrv-admin .xrv-card>h2.title .xrv-ico{flex:none;display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;border-radius:9px;background:var(--xr-light);color:var(--xr-purple)}
 .xrv-admin .xrv-card>h2.title .xrv-ico svg{width:17px;height:17px}
 .xrv-admin .xrv-card>.xrv-card-sub{padding-top:13px;padding-bottom:0;color:#50575e;font-size:13px;line-height:1.55;max-width:780px}
-.xrv-admin .xrv-card>.form-table{padding-top:8px;padding-bottom:16px;border:0;background:transparent}
+.xrv-admin .xrv-card>.form-table{padding:8px 0 16px;border:0;background:transparent}
 .xrv-admin .xrv-card>p,.xrv-admin .xrv-card>form{padding-top:8px;padding-bottom:14px}
 .xrv-admin .xrv-card>.xrv-warn{margin:14px 26px 8px;padding:13px 16px;background:#fff8ef;border:1px solid #f3d199;border-left:4px solid var(--xr-orange);border-radius:10px;font-size:13px;line-height:1.5;color:#5a4a2a}
 .xrv-admin .xrv-warn code{background:#fdeccc;color:#7a4f00}
 .xrv-admin .xrv-warn ol{padding-left:0}
 /* ---- Forms ---- */
-.xrv-admin .form-table th{width:220px;color:var(--xr-charcoal);font-weight:600}
+.xrv-admin .form-table th{width:220px;color:var(--xr-charcoal);font-weight:600;padding-left:26px}
+.xrv-admin .form-table td{padding-right:26px}
+.xrv-admin .form-table td:first-child{padding-left:26px}
 .xrv-admin .form-table td .description,.xrv-admin .description{color:#646970}
 .xrv-admin h2.title{margin:24px 0 6px;font-size:15px;font-weight:700;color:var(--xr-deep)}
 .xrv-admin input[type=text],.xrv-admin input[type=url],.xrv-admin input[type=number],.xrv-admin select,.xrv-admin textarea{border-radius:7px}
@@ -3061,7 +3403,7 @@ function xrv_admin_css() {
 .xrv-admin .button-primary:hover,.xrv-admin .button-primary:focus{background:var(--xr-deep);border-color:var(--xr-deep);color:#fff}
 .xrv-admin a{color:var(--xr-blue)}
 .xrv-admin a:hover{color:var(--xr-purple)}
-.xrv-admin .submit{padding-left:0}
+.xrv-admin .submit{padding-left:26px}
 /* ---- Bold-carat Q&A accordion ---- */
 .xrv-admin details.xrv-help{margin:12px 0 0;max-width:820px;border:1px solid var(--xr-line);border-radius:12px;background:#fff;transition:border-color .15s ease,box-shadow .15s ease}
 .xrv-admin details.xrv-help+details.xrv-help{margin-top:8px}
@@ -3116,253 +3458,9 @@ function xrv_admin_css() {
 .xrv-admin.xrv-metabox{max-width:760px}
 .xrv-admin.xrv-metabox .xrv-media-field{border:1px solid var(--xr-line);border-radius:10px;background:#fbfbfd}
 .xrv-admin.xrv-metabox label[for]{color:var(--xr-charcoal)}
-@media (max-width:782px){.xrv-admin .xrv-hero{padding:18px}.xrv-admin .form-table th{width:auto}}
+@media (max-width:782px){.xrv-admin .xrv-hero{padding:18px}.xrv-admin .form-table th{width:auto}.xrv-admin .form-table td{padding-left:26px}}
 </style>
 CSS;
-}
-
-/* =================================================================================================
- * 9g. PRIVACY SELF-TEST  (Prove the moat — make the zero-third-party guarantee falsifiable, in product)
- *     XRV's reason to exist is that a gallery contacts NO video provider until a deliberate click. This
- *     makes that claim testable: an admin renders a REAL gallery in an isolated frame, the browser's
- *     Resource-Timing log is read back (no click is ever dispatched), and any pre-click request to a
- *     provider host is named and failed. A negative-control mode plants one real provider request so the
- *     admin can watch the detector actually catch a leak. No competitor can show this; it is also a
- *     standing regression guard against any future change that would leak a pre-click request.
- * ================================================================================================= */
-
-/* Hostname suffixes that mean "a video provider was contacted." A match in the timing log BEFORE any click
- * is a privacy failure. Suffix-matched in JS (host === s OR host ends with ".$s") so subdomains are covered.
- * Filterable so a site can add a provider host its theme/CDN introduces. */
-function xrv_provider_hosts() {
-	$hosts = array(
-		'youtube.com', 'youtube-nocookie.com', 'ytimg.com', 'googlevideo.com', 'ggpht.com',
-		'google.com', 'gstatic.com', 'doubleclick.net',
-		'vimeo.com', 'vimeocdn.com',
-		'wistia.com', 'wistia.net', 'wi.st',
-		'loom.com',
-		'dailymotion.com', 'dmcdn.net',
-		'tiktok.com', 'tiktokcdn.com', 'ttwstatic.com',
-	);
-	return apply_filters( 'xrv_selftest_provider_hosts', $hosts );
-}
-
-/* Front-end harness: an admin-only, nonce-gated isolated render of a real gallery, used as the iframe
- * source for the self-test. Hooked at priority 0 so it answers before redirect_canonical can touch the
- * request. Renders ONLY XRV's own output (no wp_head, no theme, no other plugins), so any provider request
- * the timing log shows is unambiguously the gallery facade's doing — a true SELF-test. */
-add_action( 'template_redirect', 'xrv_selftest_maybe_render', 0 );
-function xrv_selftest_maybe_render() {
-	if ( ! isset( $_GET['xrv_selftest'] ) ) { return; }
-	if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) { return; }
-	$nonce = isset( $_GET['_xrvnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_xrvnonce'] ) ) : '';
-	if ( ! wp_verify_nonce( $nonce, 'xrv_selftest' ) ) { return; }
-	$mode = ( 'leak' === $_GET['xrv_selftest'] ) ? 'leak' : 'clean';
-	xrv_selftest_render_page( $mode );
-	exit;
-}
-
-function xrv_selftest_render_page( $mode ) {
-	nocache_headers();
-	if ( ! headers_sent() ) {
-		header( 'Content-Type: text/html; charset=' . get_bloginfo( 'charset' ) );
-		header( 'X-Robots-Tag: noindex, nofollow, noarchive', true );
-		header( 'Referrer-Policy: no-referrer' );
-	}
-
-	// A real gallery — the same renderer the site ships — so the test exercises the production facade.
-	$gallery = xrv_render( array( 'layout' => 'grid', 'limit' => 24, 'controls' => 'true' ) );
-
-	// NEGATIVE CONTROL: the ONLY place XRV ever requests a provider host without a click, and only when an
-	// admin explicitly runs "Verify the detector". One off-screen pixel proves the timing-log detector fires.
-	$control = ( 'leak' === $mode )
-		? '<img src="https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" alt="" width="1" height="1" referrerpolicy="no-referrer" aria-hidden="true" style="position:absolute;left:-9999px;top:0">'
-		: '';
-	?><!doctype html>
-<html <?php language_attributes(); ?>>
-<head>
-<meta charset="<?php echo esc_attr( get_bloginfo( 'charset' ) ); ?>">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<title>XRV privacy self-test</title>
-<style>html,body{margin:0;padding:16px;background:#fff;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}</style>
-</head>
-<body>
-<?php
-echo $control;  // phpcs:ignore WordPress.Security.EscapeOutput -- static, controlled negative-control markup
-echo $gallery;  // phpcs:ignore WordPress.Security.EscapeOutput -- xrv_render returns prepared, internally-escaped markup
-?>
-</body>
-</html>
-<?php
-}
-
-/* The Settings card: explanation, the two run buttons, and a live results region. Rendered OUTSIDE the
- * settings <form> (it saves nothing). The orchestration JS loads the harness in a hidden iframe, reads its
- * Resource-Timing entries WITHOUT dispatching any click, and renders a pass/fail naming any offender. */
-function xrv_selftest_card() {
-	$nonce     = wp_create_nonce( 'xrv_selftest' );
-	$clean_url = add_query_arg( array( 'xrv_selftest' => 'clean', '_xrvnonce' => $nonce ), home_url( '/' ) );
-	$leak_url  = add_query_arg( array( 'xrv_selftest' => 'leak', '_xrvnonce' => $nonce ), home_url( '/' ) );
-	$published = (int) wp_count_posts( 'xroad_video' )->publish;
-
-	$cfg = wp_json_encode(
-		array( 'hosts' => array_values( xrv_provider_hosts() ), 'clean' => $clean_url, 'leak' => $leak_url ),
-		JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP
-	);
-
-	ob_start();
-	?>
-	<div class="xrv-card xrv-selftest"><?php echo xrv_card_head( 'xrv-sec-selftest', 'shield', 'Privacy self-test', 'Proof, not a promise — render a real gallery and watch every network request.' ); // phpcs:ignore WordPress.Security.EscapeOutput -- helper escapes its inputs ?>
-		<p class="description" style="max-width:700px">XRV's core guarantee is that a gallery makes <strong>zero requests to any video provider</strong> &mdash; YouTube, Vimeo, Wistia, Loom, Dailymotion, TikTok &mdash; until a visitor deliberately clicks play. This renders your real gallery in an isolated frame, reads the browser's Resource-Timing log, and confirms it. It is both the strongest privacy demo you can show a buyer and a regression guard: if a future change ever leaked a pre-click request, this turns red.</p>
-		<?php if ( $published < 1 ) : ?>
-			<div class="xrv-st-card xrv-st-warn"><strong>Add at least one published video first.</strong> The self-test renders your real library; with nothing published there is nothing to prove.</div>
-		<?php else : ?>
-		<p class="xrv-st-actions">
-			<button type="button" class="button button-primary" id="xrv-selftest-run">&#128737;&#65039; Run privacy self-test</button>
-			<button type="button" class="button button-secondary" id="xrv-selftest-verify" title="Loads a deliberately leaky control page to prove the detector catches a real leak">Verify the detector</button>
-			<span class="xrv-st-status" id="xrv-selftest-status" role="status" aria-live="polite"></span>
-		</p>
-		<div id="xrv-selftest-out" aria-live="polite"></div>
-		<?php endif; ?>
-		<?php
-		echo xrv_selftest_styles();                            // phpcs:ignore WordPress.Security.EscapeOutput -- static CSS
-		echo '<script>window.XRVST=' . $cfg . ';</script>';   // phpcs:ignore WordPress.Security.EscapeOutput -- wp_json_encode w/ HEX_TAG|HEX_AMP is script-safe
-		echo xrv_selftest_js();                                // phpcs:ignore WordPress.Security.EscapeOutput -- static NOWDOC script
-		?>
-	</div>
-	<?php
-	return ob_get_clean();
-}
-
-function xrv_selftest_styles() {
-	return <<<'CSS'
-<style id="xrv-selftest-css">
-.xrv-selftest .xrv-st-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:6px 0 0}
-.xrv-selftest .button-primary{background:var(--xr-purple);border-color:var(--xr-purple)}
-.xrv-selftest .button-primary:hover{background:var(--xr-deep);border-color:var(--xr-deep)}
-.xrv-st-status{font-style:italic;color:var(--xr-charcoal)}
-.xrv-st-status.busy::before{content:"";display:inline-block;width:12px;height:12px;margin-right:7px;vertical-align:-2px;border:2px solid var(--xr-line);border-top-color:var(--xr-purple);border-radius:50%;animation:xrv-st-spin .7s linear infinite}
-@keyframes xrv-st-spin{to{transform:rotate(360deg)}}
-.xrv-st-card{margin-top:14px;padding:14px 16px;border:1px solid var(--xr-line);border-radius:10px;background:#fff;font-size:14px;line-height:1.5}
-.xrv-st-card strong{display:block;margin-bottom:2px;font-size:14.5px}
-.xrv-st-card p{margin:.45em 0}
-.xrv-st-card ul{margin:.5em 0 0;padding-left:18px}
-.xrv-st-card li{margin:.25em 0;word-break:break-all}
-.xrv-st-card code{background:rgba(0,0,0,.06);padding:1px 6px;border-radius:4px;font-size:12px;word-break:break-all}
-.xrv-st-note{font-size:13px;color:var(--xr-charcoal);border-top:1px solid var(--xr-line);padding-top:8px}
-.xrv-st-pass{border-color:#bfe6cf;background:#f1faf4;color:#10532f}
-.xrv-st-pass strong{color:var(--xr-green)}
-.xrv-st-fail{border-color:#f1c3c0;background:#fdf2f1;color:#7a1d18}
-.xrv-st-fail strong{color:#b32d2e}
-.xrv-st-warn{border-color:#f6d9a8;background:#fff8ec;color:#7a531a}
-.xrv-st-warn strong{color:#a9740f}
-</style>
-CSS;
-}
-
-function xrv_selftest_js() {
-	return <<<'JS'
-<script>
-(function(){
-	var cfg = window.XRVST || {};
-	var hosts = cfg.hosts || [];
-	function el(id){ return document.getElementById(id); }
-	function esc(s){ var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
-	function matchProvider(hostname){
-		hostname = String(hostname).toLowerCase();
-		for (var i=0; i<hosts.length; i++){
-			var s = hosts[i];
-			if (hostname === s || hostname.slice(-(s.length+1)) === '.'+s) { return s; }
-		}
-		return null;
-	}
-	function uniqueHosts(urls){
-		var seen = {}, out = [];
-		urls.forEach(function(u){ var h; try{ h = new URL(u).hostname; }catch(e){ return; } if(!seen[h]){ seen[h]=1; out.push(h); } });
-		return out;
-	}
-	function setStatus(msg, busy){
-		var s = el('xrv-selftest-status'); if(!s){ return; }
-		s.className = 'xrv-st-status' + (busy ? ' busy' : '');
-		s.textContent = msg || '';
-	}
-	function probe(url, done){
-		var frame = document.createElement('iframe');
-		frame.setAttribute('aria-hidden', 'true');
-		frame.style.cssText = 'position:absolute;left:-99999px;top:0;width:1024px;height:768px;border:0';
-		var settled = false;
-		function finish(result){ if(settled){ return; } settled = true; try{ document.body.removeChild(frame); }catch(e){} done(result); }
-		frame.onload = function(){
-			// Read timings WITHOUT ever dispatching a click. Wait a beat so any deferred request would have fired.
-			setTimeout(function(){
-				var out = { ok:true, offenders:[], others:[], total:0, error:null };
-				try {
-					var win = frame.contentWindow;
-					var origin = win.location.origin;
-					var entries = win.performance.getEntriesByType('resource');
-					out.total = entries.length;
-					for (var i=0; i<entries.length; i++){
-						var name = entries[i].name, u;
-						try { u = new URL(name); } catch(e){ continue; }
-						if (u.origin === origin) { continue; }
-						var prov = matchProvider(u.hostname);
-						if (prov) { out.offenders.push({ url:name, host:u.hostname, match:prov }); }
-						else { out.others.push(name); }
-					}
-				} catch(e){ out.ok = false; out.error = (e && e.message) ? e.message : String(e); }
-				finish(out);
-			}, 700);
-		};
-		frame.onerror = function(){ finish({ ok:false, offenders:[], others:[], total:0, error:'The test frame failed to load.' }); };
-		frame.src = url;
-		document.body.appendChild(frame);
-		setTimeout(function(){ finish({ ok:false, offenders:[], others:[], total:0, error:'Timed out loading the test gallery.' }); }, 15000);
-	}
-	function card(cls, html){ return '<div class="xrv-st-card ' + cls + '">' + html + '</div>'; }
-	function renderClean(r){
-		var out = el('xrv-selftest-out');
-		if (!r.ok){ out.innerHTML = card('xrv-st-warn', '<strong>Could not read the test frame.</strong><p>' + esc(r.error||'') + ' This usually means wp-admin and your site address are on different origins (e.g. www vs. non-www).</p>'); return; }
-		if (r.offenders.length === 0){
-			var note = '';
-			if (r.others.length){
-				note = '<p class="xrv-st-note">' + r.others.length + ' request' + (r.others.length===1?'':'s') + ' went to other origins you control (e.g. an image CDN): <code>' + uniqueHosts(r.others).map(esc).join('</code> <code>') + '</code>. These are not video-provider trackers, so the guarantee holds.</p>';
-			}
-			out.innerHTML = card('xrv-st-pass', '<strong>PASS &mdash; zero third-party video requests before click.</strong><p>The rendered gallery made ' + r.total + ' request' + (r.total===1?'':'s') + ', all to this site. Nothing reached YouTube, Vimeo, Wistia, Loom, Dailymotion, or TikTok until a deliberate play.</p>' + note);
-		} else {
-			var li = r.offenders.map(function(o){ return '<li><code>' + esc(o.host) + '</code> &mdash; ' + esc(o.url) + '</li>'; }).join('');
-			out.innerHTML = card('xrv-st-fail', '<strong>FAIL &mdash; ' + r.offenders.length + ' third-party video request' + (r.offenders.length===1?'':'s') + ' before any click.</strong><p>A video provider was contacted before anyone pressed play. This breaks the privacy guarantee &mdash; most often a video whose local poster failed to sideload. Offending requests:</p><ul>' + li + '</ul>');
-		}
-	}
-	function renderVerify(r){
-		var out = el('xrv-selftest-out');
-		if (!r.ok){ out.innerHTML = card('xrv-st-warn', '<strong>Detector check inconclusive.</strong><p>' + esc(r.error||'') + '</p>'); return; }
-		if (r.offenders.length > 0){
-			out.innerHTML = card('xrv-st-pass', '<strong>Detector verified.</strong><p>The control page deliberately requests <code>' + esc(r.offenders[0].host) + '</code> before any click, and the self-test caught it. A real leak would be flagged exactly the same way.</p>');
-		} else {
-			out.innerHTML = card('xrv-st-warn', '<strong>Detector check inconclusive.</strong><p>The planted third-party request did not appear in the timing log &mdash; a browser extension or network filter may have blocked it. Retry with extensions disabled.</p>');
-		}
-	}
-	function go(mode){
-		var runBtn = el('xrv-selftest-run'), vBtn = el('xrv-selftest-verify');
-		if (runBtn){ runBtn.disabled = true; } if (vBtn){ vBtn.disabled = true; }
-		setStatus(mode === 'leak' ? 'Running detector self-check…' : 'Rendering a real gallery and watching every request…', true);
-		el('xrv-selftest-out').innerHTML = '';
-		probe(mode === 'leak' ? cfg.leak : cfg.clean, function(r){
-			if (runBtn){ runBtn.disabled = false; } if (vBtn){ vBtn.disabled = false; }
-			setStatus('', false);
-			if (mode === 'leak') { renderVerify(r); } else { renderClean(r); }
-		});
-	}
-	function wire(){
-		var runBtn = el('xrv-selftest-run'); if (runBtn){ runBtn.addEventListener('click', function(){ go('clean'); }); }
-		var vBtn = el('xrv-selftest-verify'); if (vBtn){ vBtn.addEventListener('click', function(){ go('leak'); }); }
-	}
-	if (el('xrv-selftest-run') || el('xrv-selftest-verify')) { wire(); }
-	else { document.addEventListener('DOMContentLoaded', wire); }
-})();
-</script>
-JS;
 }
 
 function xrv_render_settings_page() {
@@ -3375,7 +3473,6 @@ function xrv_render_settings_page() {
 		<?php echo xrv_admin_css(); // phpcs:ignore WordPress.Security.EscapeOutput -- static, controlled CSS ?>
 		<?php xrv_admin_header( 'Privacy-first video gallery', 'XRV <b>Settings</b>', 'Site-wide <strong>defaults</strong> for every gallery. Anything set directly on a <code>[xroad-videos]</code> shortcode or the block overrides what you choose here.' ); ?>
 		<nav class="xrv-nav" aria-label="Settings sections">
-			<a href="#xrv-sec-selftest"><?php echo xrv_admin_icon( 'shield' ); ?> Self-test</a>
 			<a href="#xrv-sec-privacy"><?php echo xrv_admin_icon( 'shield' ); ?> Privacy &amp; consent</a>
 			<a href="#xrv-sec-browse"><?php echo xrv_admin_icon( 'sliders' ); ?> Browse</a>
 			<a href="#xrv-sec-api"><?php echo xrv_admin_icon( 'key' ); ?> API key</a>
@@ -3395,7 +3492,6 @@ function xrv_render_settings_page() {
 			secs.forEach(function(s){ io.observe(s); });
 		})();
 		</script>
-		<?php echo xrv_selftest_card(); // phpcs:ignore WordPress.Security.EscapeOutput -- returns prepared, internally-escaped markup ?>
 		<form method="post" action="options.php">
 			<?php settings_fields( 'xrv_settings_group' ); ?>
 
@@ -3531,6 +3627,25 @@ function xrv_render_settings_page() {
 				<div class="xrv-card"><h2 class="title" id="xrv-sec-browse"><span class="xrv-ico"><?php echo xrv_admin_icon( 'sliders' ); ?></span>Browse defaults</h2>
 			<table class="form-table" role="presentation">
 				<tr>
+					<th scope="row"><label for="xrv-playback">Play videos in</label></th>
+					<td>
+						<select id="xrv-playback" name="xrv_settings[playback]">
+							<option value="lightbox"         <?php selected( $s['playback'], 'lightbox' ); ?>>A pop-out lightbox — all devices</option>
+							<option value="lightbox-desktop" <?php selected( $s['playback'], 'lightbox-desktop' ); ?>>Lightbox on desktop, inline on mobile</option>
+							<option value="lightbox-mobile"  <?php selected( $s['playback'], 'lightbox-mobile' ); ?>>Lightbox on mobile, inline on desktop</option>
+							<option value="inline"           <?php selected( $s['playback'], 'inline' ); ?>>Inline, in the card — all devices</option>
+						</select>
+						<p class="description" style="max-width:760px">A <strong>lightbox</strong> pops the player into a centered overlay over a dimmed page; <strong>inline</strong> swaps the player into the card in place. The desktop / mobile split is decided in the visitor's browser by screen width (under 768&nbsp;px is treated as mobile), so the page stays fully cached. A <code>[xroad-videos]</code> shortcode or block can override this per gallery.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">Lightbox details</th>
+					<td>
+						<label><input type="checkbox" name="xrv_settings[lightbox_details]" value="1" <?php checked( ! empty( $s['lightbox_details'] ) ); ?>> Show the title, date &amp; a collapsible description below the player in the lightbox</label>
+						<p class="description" style="max-width:760px">Mirrors the watch-page caption (title, &ldquo;2 months ago&rdquo;, and a description that opens with a <em>Description</em> toggle). Applies to lightbox playback only; inline playback already shows this beneath the card.</p>
+					</td>
+				</tr>
+				<tr>
 					<th scope="row">Filter style</th>
 					<td>
 						<label style="margin-right:18px"><input type="radio" name="xrv_settings[filter_ui]" value="select" <?php checked( $s['filter_ui'], 'select' ); ?>> Dropdown selects</label>
@@ -3634,11 +3749,11 @@ function xrv_render_settings_page() {
 				<tr>
 					<th scope="row"><label for="xrv-sync-freq">Check frequency</label></th>
 					<td><select id="xrv-sync-freq" name="xrv_settings[sync_freq]">
-						<?php foreach ( array( 'off' => 'On demand / never', 'hourly' => 'Hourly', 'daily' => 'Daily', 'weekly' => 'Weekly', 'monthly' => 'Monthly' ) as $val => $lbl ) {
+						<?php foreach ( array( 'off' => 'On demand only (recommended)', 'daily' => 'Daily (most frequent we recommend)', 'weekly' => 'Weekly', 'monthly' => 'Monthly', 'hourly' => 'Hourly (not recommended)' ) as $val => $lbl ) {
 							echo '<option value="' . esc_attr( $val ) . '" ' . selected( $s['sync_freq'], $val, false ) . '>' . esc_html( $lbl ) . '</option>';
 						} ?>
 					</select>
-					<p class="description"><strong>On demand / never</strong> turns off the schedule &mdash; the library only updates when you click <em>Sync now</em> below. Any other choice checks automatically at that cadence.
+					<p class="description"><strong>On demand only</strong> is the default and what we recommend: nothing is scheduled and the library updates only when you click <a href="#xrv-sec-syncnow"><em>Sync now</em></a> below. If you do automate, keep it to <strong>daily at most</strong> &mdash; a video library rarely changes hour to hour, so hourly checks just burn YouTube API quota with nothing new to show.
 					<?php
 					$next = wp_next_scheduled( 'xrv_sync_event' );
 					if ( $next ) {
@@ -3744,7 +3859,7 @@ function xrv_render_settings_page() {
 		}
 		?>
 		<div class="xrv-card">
-			<?php echo xrv_card_head( 'xrv-sec-syncnow', 'play', 'Run a sync now', 'Check the channel immediately using the settings above. Save your changes first if you just edited them.' ); ?>
+			<?php echo xrv_card_head( 'xrv-sec-syncnow', 'play', 'Run a one-time sync now', 'A manual, on-demand check of the channel using the settings above &mdash; nothing is scheduled, it runs once. This is the recommended way to use sync. Save your changes first if you just edited them.' ); ?>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<input type="hidden" name="action" value="xrv_sync_now">
 				<?php wp_nonce_field( 'xrv_sync_now' ); ?>

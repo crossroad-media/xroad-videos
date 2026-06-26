@@ -1,6 +1,15 @@
-# Build artifact — regenerate from source, attach to releases
+# Build artifact — regenerate from source, attach to releases.
+# xroad-videos.zip is THE canonical build; versioned copies are release
+# attachments only (the git tag is the source of truth for provenance).
 xroad-videos.zip
+xroad-videos-*.zip
 /_pkg/
+
+# Local previews + user-guide assets (release/working material, not plugin source)
+/previews/
+/docs/
+USER-GUIDE.md
+XRV-User-Guide.docx
 
 # Local / client-specific tooling (not part of the generic plugin)
 /tools/

@@ -152,6 +152,23 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.10.0
+
+Front-end + admin. Two lightbox upgrades: the pop-out modal becomes a **per-device** choice, and it can now carry a **details panel** (title, date, collapsible description) under the player. The zero-third-party-request-before-click guarantee is untouched.
+
+- **Device-scoped playback.** XRV → Settings → *Browse defaults* → **Play videos in** now offers: lightbox on **all devices**, **lightbox on desktop / inline on mobile**, **lightbox on mobile / inline on desktop**, or **inline everywhere**. The XRV Video block and `[xroad-videos playback="…"]` accept the same four values (plus *Site default*), so any gallery can override the site setting.
+- **Decided in the browser, not on the server.** The desktop / mobile split is resolved client-side by viewport width (under 768 px is mobile) at the moment of the click, so the rendered HTML is identical for every visitor and the page stays fully cacheable — no UA sniffing, no cache fragmentation. A rotate or resize lands the next play in the right mode with no reload.
+- **Lightbox details panel.** A watch-page-style caption can now sit under the player in the lightbox: the **title**, a relative **upload date** (“2 months ago”), and the **description** collapsed to four lines behind a *Description* toggle. On by default; turn it off at Settings → *Browse defaults* → **Lightbox details**, or per gallery with `[xroad-videos lightbox_details="false"]` / the block toggle. The panel is text rendered from the video’s own stored metadata — no view count, and no extra network calls. Shorts stay player-only.
+
+### 2.9.0
+
+Adds **Collections** — build more than one curated gallery and drop each anywhere on the site, including the hero. Removes the 2.8.0 privacy self-test. Existing single galleries are unchanged; the zero-third-party-request-before-click guarantee is untouched.
+
+- **Collections** (new *Collections* screen under XRV Video). A collection is a saved, placeable gallery: **hand-pick and order** specific videos, choose a **layout** (grid / carousel / library), and drop it with `[xroad-videos collection="slug"]` or the XRV Video block's *Collection slug* field — in a page, a widget, an FSE template part, or the theme hero. Presentation (columns, heading, etc.) is set on the shortcode/block at each placement. Dependency-free editor (no wp.media, no build step).
+- **`ids` attribute.** `[xroad-videos ids="12,7,30"]` renders an exact, ordered set via `post__in` — what collections ride on, usable on its own too.
+- **Multiple galleries per page.** The facade is now fully instance-scoped (wrapper and every control are class- or per-instance-id based), so two carousels plus a filtered grid coexist on one page with independent search / sort / filter.
+- **Removed:** the privacy self-test shipped in 2.8.0 — low practical value in an isolated render; may return later as a real-page check.
+
 ### 2.8.0
 
 Adds a **Privacy self-test** that turns the zero-third-party guarantee from a claim into an in-product proof. Front-end harness + admin diagnostic; no new dependencies, no front-end weight on real pages.
