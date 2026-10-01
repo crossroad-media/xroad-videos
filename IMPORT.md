@@ -121,7 +121,9 @@ Run every command with the global `--user=<admin>` flag. Writes are capability-g
 | `wp xrv collection set <slug> --ids=<ids>` | Create or update one collection. Idempotent. |
 | `wp xrv export --file=<manifest.json>` | Write settings, permalinks, collections and videos to a manifest. |
 | `wp xrv apply <manifest.json>` | Apply a manifest's sections to this site. |
-| `wp xrv rollback <log.json>` | Undo an import, collection or apply run from its log. |
+| `wp xrv handover <ids> \| --all` | Hand video addresses to XRV (or back with `--to=old`), in batches or all at once. 2.11.1. |
+| `wp xrv list` | Show who serves each video's own address right now. 2.11.1. |
+| `wp xrv rollback <log.json>` | Undo an import, collection, apply or handover run from its log. |
 
 `wp help xrv <command>` prints every option.
 
@@ -197,12 +199,33 @@ A manifest has four sections: `settings` (never the API key), `permalinks`, `col
 - The `videos` section patches only status, `dedicated_url` (including removal), `watch_page`, Order and date.
 - One run applies settings, then permalinks (the rewrite rules are rebuilt at once), then videos, then collections, then flushes the object cache (and WP Engine's caches when present). Because it is one process, there is no moment where the new address exists but the old redirect still points away.
 
+### Handing addresses over: `wp xrv handover` and `wp xrv list` (2.11.1)
+
+When the video base matches addresses other content already uses (base `videos` on a site whose old video posts live at `/blog/videos/<postname>/`), XRV serves one of those addresses only for a **published** video that has been **handed** it. Until then, WordPress serves the address as if XRV were not there, so the old page keeps it. With nothing else at the address, XRV serves it anyway, so there is never a 404 or a redirect loop.
+
+A video has not been handed its address while its **dedicated URL is that address**. `handover` removes the dedicated URL (and remembers it, so `--to=old` can put it back):
+
+```
+wp xrv handover yahxL3E6azk,4LAX2feihbE --dry-run --user=admin
+wp xrv handover yahxL3E6azk,4LAX2feihbE --user=admin       # one batch
+wp xrv handover yahxL3E6azk --to=old --user=admin           # give one back
+wp xrv handover --all --user=admin                          # everything left: the single cutover
+wp xrv list --state=old --user=admin                        # what is still with the old pages
+```
+
+- Each real run purges the object cache (and WP Engine's caches) and writes a run log; `wp xrv rollback <handover log>` undoes the batch.
+- A video whose watch page is off is kept (its address would redirect home) unless you pass `--force`.
+- A draft can be handed over; XRV serves its address once it is published.
+- `wp xrv list` states: `xrv` (XRV serves it), `old` (the old page serves it), `redirect` (its dedicated URL points elsewhere), `home` (watch page off), `draft`. The All Videos screen shows the same in its Watch page column.
+- Editors can check a video's XRV page before handing it over by adding `?preview=true` to its address.
+
 ### `wp xrv rollback`
 
 ```
 wp xrv rollback wp-content/xrv-runs/xrv-import-<stamp>-<hex>.json --dry-run --user=admin
 ```
 
+- **Handover log:** gives each address back exactly as it was before the run (and purges caches).
 - **Import or collection log:** force-deletes (never trashes) the posts the run created and the poster files it imported for them; reused posters are never deleted. A created video whose status has changed since the run is kept unless `--force`. Updated videos get every changed field back. Term counts are recounted.
 - **Apply log:** an exact restore of the pre-image (options written raw, permalinks restored and rewrite rules rebuilt, the sync schedule restored). It refuses when something changed after the apply, unless `--force`.
 
@@ -214,8 +237,13 @@ A move from another video plugin, rehearsed on staging first. Every step has its
 2. **Apply settings with sync off, then import as drafts.** On production: `wp xrv apply manifest.json` (settings and collections only). **Never carry `permalinks` in this first apply**; the video base changes last. Then `wp xrv import videos.json --status=draft`, with each record's exact slug, original `post_date` (the GMT date is set from it), existing `poster_id`, and a temporary `dedicated_url` pointing at the page the video lives on today.
 3. **Publish.** Publish the drafts (the manifest's `videos` section, or the editor). With **Dedicated URL redirect** set to **302** in Settings, each video's own address sends visitors to the old page while the migration is in progress, and browsers do not cache that.
 4. **Build the gallery pages** with collections and `[xroad-videos orderby="newest"]`.
-5. **Cut over.** One `apply` with `--sections=permalinks,videos --confirm-urls` sets the final video base and removes the dedicated URLs in the same process, then purges caches. Read the shadow report it prints first. Switch **Dedicated URL redirect** back to 301 afterwards if any dedicated URLs remain.
-6. **Then** turn on channel sync, as draft or publish.
+5. **Move the video base onto the old addresses, invisibly.** An `apply` with only `--sections=permalinks` (base `videos`) and `--confirm-urls`, keeping the dedicated URLs. Read the shadow report first. Every video whose dedicated URL is now its own address is "not handed over", so the old pages keep serving and nothing visible changes. Videos whose old page lives somewhere else keep redirecting there.
+6. **Hand the addresses over**, either way:
+   - **In batches:** `wp xrv handover <ten IDs>`, check those pages, then the next batch. `wp xrv rollback <handover log>` (or `--to=old`) gives a batch back.
+   - **All at once:** `wp xrv handover --all`. (The 2.11.0 path still works too: one `apply` with `--sections=permalinks,videos --confirm-urls` that also removes the dedicated URLs.)
+
+   `wp xrv list --state=old` shows what is left. Switch **Dedicated URL redirect** back to 301 when no temporary redirects remain.
+7. **Then** turn on channel sync, as draft or publish.
 
 Two traps:
 

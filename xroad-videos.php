@@ -13,7 +13,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.11.0
+ * Version:           2.11.1
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -61,7 +61,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.11.0' );
+	define( 'XRV_VERSION', '2.11.1' );
 }
 
 /* =================================================================================================
@@ -2900,6 +2900,225 @@ function xrv_normalize_url( $url ) {
 	return $host . $path . ( $query ? '?' . implode( '&', $query ) : '' );
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * 8a-ii. ADDRESS HANDOVER  (2.11.1)
+ *     When the video base matches an address other content already uses (base "videos" on a site whose
+ *     posts live at /blog/videos/<postname>/), XRV's rewrite rule would claim every one of those
+ *     addresses. XRV now claims an address only when a PUBLISHED video with that slug exists AND has been
+ *     handed the address. Otherwise WordPress resolves the request as if XRV's rules were not there, so
+ *     the page that lives there today (an old post, the category's paged archive or feed) keeps serving.
+ *
+ *     "Not handed over yet" = the video's dedicated URL is its own address: the old page still owns it.
+ *     Removing the dedicated URL (wp xrv handover) hands the address to XRV, one video, ten videos or the
+ *     whole library at a time; putting it back hands the address back. With nothing else at the address,
+ *     XRV serves it regardless, so this can never produce a 404 or a redirect loop.
+ * ------------------------------------------------------------------------------------------------- */
+
+/** The ID of the published video with this slug, or 0. */
+function xrv_published_video_id( $slug ) {
+	$slug = sanitize_title( (string) $slug );
+	if ( '' === $slug ) {
+		return 0;
+	}
+	$ids = get_posts( array(
+		'post_type'        => 'xroad_video',
+		'name'             => $slug,
+		'post_status'      => 'publish',
+		'numberposts'      => 1,
+		'fields'           => 'ids',
+		'no_found_rows'    => true,
+		'suppress_filters' => true,
+	) );
+	return $ids ? (int) $ids[0] : 0;
+}
+
+/** True while a video has not been handed its own address: its dedicated URL IS that address. */
+function xrv_video_defers( $pid ) {
+	$dest = xrv_dedicated_target( $pid );
+	return '' !== $dest && xrv_is_same_url( $dest, (string) get_permalink( $pid ) );
+}
+
+/**
+ * The query vars WordPress would have produced for this request if XRV's own rewrite rules did not exist,
+ * or null when no other rule matches. A careful mirror of WP::parse_request(): the same rule list in the
+ * same order, the same verbose page-rule check, the same public query vars with $_POST / $_GET precedence,
+ * post-type query vars mapped to post_type + name, and the same post_type and numeric-slug clean-ups.
+ */
+function xrv_fallback_query_vars( $wp ) {
+	global $wp_rewrite;
+	if ( ! ( $wp instanceof WP ) || ! ( $wp_rewrite instanceof WP_Rewrite ) || ! $wp_rewrite->using_permalinks() ) {
+		return null;
+	}
+	$rules = $wp_rewrite->wp_rewrite_rules();
+	$path  = (string) $wp->request;
+	if ( '' === $path || empty( $rules ) ) {
+		return null;
+	}
+	// Every rule generated from XRV's permastruct starts with its literal prefix ("blog/videos/"): the
+	// single-video rule and its attachment / embed / trackback / comment-page siblings. Step past all of them.
+	$prefix = '';
+	if ( isset( $wp_rewrite->extra_permastructs['xroad_video']['struct'] ) ) {
+		$struct = ltrim( (string) $wp_rewrite->extra_permastructs['xroad_video']['struct'], '/' );
+		$cut    = strpos( $struct, '%xroad_video%' );
+		$prefix = ( false === $cut ) ? '' : substr( $struct, 0, $cut );
+	}
+	$perma = null;
+	foreach ( (array) $rules as $match => $query ) {
+		if ( '' !== $prefix && 0 === strpos( (string) $match, $prefix ) ) {
+			continue;
+		}
+		if ( ! preg_match( "#^$match#", $path, $m ) && ! preg_match( "#^$match#", urldecode( $path ), $m ) ) {
+			continue;
+		}
+		$q = preg_replace( '!^.+\?!', '', (string) $query );
+		if ( preg_match( '/(^|&)xroad_video=/', $q ) ) {
+			continue; // one of XRV's own rules: the ones we are stepping past
+		}
+		if ( $wp_rewrite->use_verbose_page_rules && preg_match( '/pagename=\$matches\[([0-9]+)\]/', $q, $vm ) ) {
+			$page = get_page_by_path( $m[ $vm[1] ] );
+			if ( ! $page ) {
+				continue;
+			}
+			$st = get_post_status_object( $page->post_status );
+			if ( $st && ! $st->public && ! $st->protected && ! $st->private && $st->exclude_from_search ) {
+				continue;
+			}
+		}
+		parse_str( addslashes( WP_MatchesMapRegex::apply( $q, $m ) ), $perma );
+		break;
+	}
+	if ( null === $perma ) {
+		return null;
+	}
+	$pt_vars = array();
+	foreach ( get_post_types( array(), 'objects' ) as $pt => $t ) {
+		if ( is_post_type_viewable( $t ) && $t->query_var ) {
+			$pt_vars[ $t->query_var ] = $pt;
+		}
+	}
+	$out = array();
+	// phpcs:disable WordPress.Security.NonceVerification -- mirrors core's own query-var parsing; read-only.
+	foreach ( (array) $wp->public_query_vars as $var ) {
+		if ( isset( $wp->extra_query_vars[ $var ] ) ) {
+			$out[ $var ] = $wp->extra_query_vars[ $var ];
+		} elseif ( isset( $_POST[ $var ] ) ) {
+			$out[ $var ] = $_POST[ $var ];
+		} elseif ( isset( $_GET[ $var ] ) ) {
+			$out[ $var ] = $_GET[ $var ];
+		} elseif ( isset( $perma[ $var ] ) ) {
+			$out[ $var ] = $perma[ $var ];
+		}
+		if ( ! empty( $out[ $var ] ) ) {
+			$out[ $var ] = is_array( $out[ $var ] ) ? array_map( 'strval', $out[ $var ] ) : (string) $out[ $var ];
+			if ( isset( $pt_vars[ $var ] ) ) {
+				$out['post_type'] = $pt_vars[ $var ];
+				$out['name']      = $out[ $var ];
+			}
+		}
+	}
+	// phpcs:enable
+	foreach ( get_taxonomies( array(), 'objects' ) as $t ) {
+		if ( $t->query_var && isset( $out[ $t->query_var ] ) && is_string( $out[ $t->query_var ] ) ) {
+			$out[ $t->query_var ] = str_replace( ' ', '+', $out[ $t->query_var ] );
+		}
+	}
+	if ( isset( $out['post_type'] ) ) {
+		$queryable = get_post_types( array( 'publicly_queryable' => true ) );
+		if ( ! is_array( $out['post_type'] ) ) {
+			if ( ! in_array( $out['post_type'], $queryable, true ) ) {
+				unset( $out['post_type'] );
+			}
+		} else {
+			$out['post_type'] = array_intersect( $out['post_type'], $queryable );
+		}
+	}
+	foreach ( (array) $wp->private_query_vars as $var ) {
+		if ( isset( $wp->extra_query_vars[ $var ] ) ) {
+			$out[ $var ] = $wp->extra_query_vars[ $var ];
+		}
+	}
+	return function_exists( 'wp_resolve_numeric_slug_conflicts' ) ? wp_resolve_numeric_slug_conflicts( $out ) : $out;
+}
+
+/** Does a set of query vars find anything (the page that lives at the address today)? */
+function xrv_query_has_content( $vars ) {
+	$q = new WP_Query( array_merge( (array) $vars, array( 'fields' => 'ids', 'no_found_rows' => true ) ) );
+	return $q->have_posts();
+}
+
+/**
+ * The step-aside itself, on the main request: when XRV's rule matched an address whose video is not
+ * published, or not handed over yet, and other content lives there, WordPress serves that content.
+ * `?preview=true` always shows the XRV page, so editors can check a video before handing it over.
+ * The xrv_handover_query_vars filter can veto per request.
+ */
+add_filter( 'request', 'xrv_request_handover', 1 );
+function xrv_request_handover( $qv ) {
+	global $wp;
+	if ( is_admin() || empty( $qv['xroad_video'] ) || ! empty( $qv['preview'] ) ) {
+		return $qv;
+	}
+	if ( ! ( $wp instanceof WP ) || false === strpos( (string) $wp->matched_query, 'xroad_video=' ) ) {
+		return $qv; // only addresses XRV's rewrite rules claimed (not ?xroad_video= query strings)
+	}
+	$pid = xrv_published_video_id( is_array( $qv['xroad_video'] ) ? '' : $qv['xroad_video'] );
+	if ( $pid && ! xrv_video_defers( $pid ) ) {
+		return $qv; // handed over: XRV owns this address
+	}
+	$alt = xrv_fallback_query_vars( $wp );
+	if ( null === $alt || ! xrv_query_has_content( $alt ) ) {
+		return $qv; // nothing else lives here: XRV (or its 404 for an unpublished video) stands
+	}
+	return (array) apply_filters( 'xrv_handover_query_vars', $alt, $qv, $pid );
+}
+
+/**
+ * Who serves a video's own address right now, for the editor, Settings and `wp xrv list`:
+ * array( 'state' => xrv | old | redirect | home | draft, 'url' => its own address, 'to' => redirect target ).
+ */
+function xrv_address_state( $pid ) {
+	$post = get_post( $pid );
+	$own  = (string) get_permalink( $pid );
+	if ( ! $post || 'publish' !== $post->post_status ) {
+		return array( 'state' => 'draft', 'url' => $own, 'to' => '' );
+	}
+	$dest = xrv_dedicated_target( $pid );
+	if ( '' !== $dest && ! xrv_is_same_url( $dest, $own ) ) {
+		return array( 'state' => 'redirect', 'url' => $own, 'to' => $dest );
+	}
+	if ( '' !== $dest && xrv_address_has_other_content( $own ) ) {
+		return array( 'state' => 'old', 'url' => $own, 'to' => '' );
+	}
+	if ( '0' === (string) get_post_meta( $pid, '_xrv_watch_page', true ) ) {
+		return array( 'state' => 'home', 'url' => $own, 'to' => home_url( '/' ) );
+	}
+	return array( 'state' => 'xrv', 'url' => $own, 'to' => '' );
+}
+
+/** Would anything other than XRV answer at this site-internal address? (Matches it against the rewrite rules.) */
+function xrv_address_has_other_content( $url ) {
+	$path = trim( (string) wp_parse_url( $url, PHP_URL_PATH ), '/' );
+	$home = trim( (string) wp_parse_url( home_url(), PHP_URL_PATH ), '/' );
+	if ( '' !== $home && 0 === strpos( $path . '/', $home . '/' ) ) {
+		$path = trim( substr( $path, strlen( $home ) ), '/' );
+	}
+	if ( '' === $path ) {
+		return false;
+	}
+	$probe                   = new WP();
+	$probe->request          = $path;
+	$probe->public_query_vars = isset( $GLOBALS['wp'] ) && $GLOBALS['wp'] instanceof WP ? $GLOBALS['wp']->public_query_vars : $probe->public_query_vars;
+	$probe->extra_query_vars = array();
+	$saved_get  = $_GET;  // phpcs:ignore WordPress.Security.NonceVerification
+	$saved_post = $_POST; // phpcs:ignore WordPress.Security.NonceVerification
+	$_GET  = array();
+	$_POST = array();
+	$alt   = xrv_fallback_query_vars( $probe );
+	$_GET  = $saved_get;
+	$_POST = $saved_post;
+	return null !== $alt && xrv_query_has_content( $alt );
+}
+
 /* 2.11.0: priority 20, AFTER do_shortcode (11). At the default priority the facade ran first and
  * do_shortcode then executed any [video src=…] typed into a description: it could load a third party
  * before the click and corrupted the JSON-LD. The watch page passes its own display settings
@@ -3424,7 +3643,7 @@ function xrv_render_meta_box( $post ) {
 		$ded_set  = xrv_get_settings();
 		$ded_code = ( 302 === (int) $ded_set['dedicated_status'] ) ? 302 : 301;
 		if ( xrv_is_same_url( $ded_target, (string) get_permalink( $post->ID ) ) ) {
-			$ded_what = esc_html__( 'This is the video\'s own address, so it is ignored: no redirect is sent and the watch page settings above apply as usual.', 'xroad-videos' );
+			$ded_what = esc_html__( 'This is the video\'s own address, so the address has not been handed over yet: the page that lives there today keeps serving it and XRV steps aside (XRV serves it only when nothing else lives there). Hand it over with wp xrv handover.', 'xroad-videos' );
 		} else {
 			/* translators: %d: HTTP redirect status code, 301 or 302. */
 			$ded_what = esc_html( sprintf( __( 'This video\'s own address redirects here with a %d (Settings, Dedicated URL redirect; the xrv_dedicated_redirect_status filter can change it per video), and the gallery card title links here. It takes priority over the watch page checkbox and the slug above.', 'xroad-videos' ), $ded_code ) );
@@ -5625,6 +5844,15 @@ function xrv_admin_column( $col, $id ) {
 	echo $on
 		? '<span style="color:#1a9d57;font-weight:600">On</span>'
 		: '<span style="color:#8a8d91">Off</span>';
+	// 2.11.1: who serves the video's own address while a migration hands addresses over.
+	if ( '' !== (string) get_post_meta( $id, '_xrv_dedicated_url', true ) ) {
+		$st = xrv_address_state( $id );
+		if ( 'old' === $st['state'] ) {
+			echo '<br><span style="color:#8a6a2a;font-size:12px">' . esc_html__( 'Old page serves its address (not handed over)', 'xroad-videos' ) . '</span>';
+		} elseif ( 'redirect' === $st['state'] ) {
+			echo '<br><span style="color:#8a6a2a;font-size:12px">' . esc_html__( 'Redirects to its dedicated URL', 'xroad-videos' ) . '</span>';
+		}
+	}
 }
 
 /* =================================================================================================
@@ -6551,7 +6779,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		if ( array_key_exists( 'dedicated_url', $v ) ) {
 			$d['meta._xrv_dedicated_url'] = '' === $v['dedicated_url'] ? null : $v['dedicated_url'];
 			if ( '' !== $v['dedicated_url'] && '' !== $slug && untrailingslashit( $v['dedicated_url'] ) === untrailingslashit( xrv_cli_video_url( $slug ) ) ) {
-				$out['warnings'][] = 'dedicated_url equals the video\'s own URL';
+				$out['warnings'][] = 'dedicated_url equals the video\'s own URL: the page that lives there keeps serving it until `wp xrv handover` hands it to XRV';
 			}
 		}
 		if ( isset( $v['poster_id'] ) ) {
@@ -7439,7 +7667,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 				if ( 'category' === $t->taxonomy && false !== strpos( (string) get_option( 'permalink_structure' ), '%category%' ) ) {
 					$shadow++;
 					$posts   = get_posts( array( 'category' => $t->term_id, 'numberposts' => 5, 'post_status' => 'publish', 'fields' => 'ids' ) );
-					$lines[] = sprintf( '  SHADOW: category "%s" (%d post(s)): its posts live at /%s/<postname>/ and the video rules would take those URLs first', html_entity_decode( $t->name, ENT_QUOTES, 'UTF-8' ), $t->count, $path );
+					$lines[] = sprintf( '  SHADOW: category "%s" (%d post(s)): its posts live at /%s/<postname>/; XRV takes one of those addresses only for a published video that has been handed it (no dedicated URL at that address), and every other post keeps serving', html_entity_decode( $t->name, ENT_QUOTES, 'UTF-8' ), $t->count, $path );
 					foreach ( $posts as $p ) {
 						$lines[] = '          e.g. ' . get_permalink( $p );
 					}
@@ -7474,7 +7702,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		}
 		$lines[] = sprintf( 'Dedicated URLs that will NOT match the new permalink (those videos keep redirecting to them): %d', count( $differ ) );
 		$lines   = array_merge( $lines, $differ );
-		$lines[] = sprintf( 'Dedicated URLs that will EQUAL the new permalink (no redirect any more; the watch page serves there): %d', count( $equal ) );
+		$lines[] = sprintf( 'Dedicated URLs that will EQUAL the new permalink (the page there keeps serving it until `wp xrv handover`; with nothing there, XRV serves it): %d', count( $equal ) );
 		$lines   = array_merge( $lines, $equal );
 		return array( 'lines' => $lines, 'shadow' => $shadow, 'differ' => count( $differ ), 'equal' => count( $equal ) );
 	}
@@ -7922,8 +8150,8 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			$force = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'force', false );
 			$src   = XRV_CLI_Log::open( $args[0] );
 			$kind  = (string) $src->data['kind'];
-			if ( ! in_array( $kind, array( 'import', 'collection', 'apply' ), true ) ) {
-				WP_CLI::error( sprintf( 'A "%s" log cannot be rolled back (import, collection and apply logs can).', $kind ) );
+			if ( ! in_array( $kind, array( 'import', 'collection', 'apply', 'handover' ), true ) ) {
+				WP_CLI::error( sprintf( 'A "%s" log cannot be rolled back (import, collection, apply and handover logs can).', $kind ) );
 			}
 			if ( ! empty( $src->data['dry_run'] ) ) {
 				WP_CLI::error( 'That is a dry-run log: it wrote nothing, so there is nothing to roll back.' );
@@ -7950,6 +8178,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			if ( ! $dry ) {
 				$src->data['rolled_back'][] = array( 'at' => xrv_cli_now(), 'by' => $rb->path, 'state' => $rb->data['state'] );
 				$src->save();
+				if ( $changed && 'handover' === $kind ) {
+					xrv_cli_purge_caches(); // the addresses changed hands again
+				}
 				if ( $changed ) {
 					do_action( 'xrv_library_changed', array_values( array_unique( array_map( 'intval', $changed ) ) ) );
 				}
@@ -8111,6 +8342,271 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			$log->finish( 'complete', array( 'summary' => array( 'file' => $dry ? null : realpath( $file ), 'contents' => $sum ) ) );
 			WP_CLI::log( 'Run log: ' . $log->path );
 			WP_CLI::success( ( $dry ? 'Would export ' : 'Exported ' ) . $sum . ( $dry ? '.' : ' to ' . $file ) );
+		}
+
+		/**
+		 * Hand video addresses to XRV, or back to the pages that held them (a batch, or everything at once).
+		 *
+		 * A video whose dedicated URL is its own address has not been handed over: the page that lives
+		 * there today (an old post) keeps serving it and XRV steps aside. Handing over removes the
+		 * dedicated URL (remembered in _xrv_handover_from), so XRV serves the address from the next request;
+		 * --to=old puts it back. A dedicated URL that points somewhere else is handled the same way: handing
+		 * over stops that redirect. Purges the object cache (and WP Engine's caches) after a real run.
+		 * Run with the global --user=<admin> flag. Takes the shared library lock and writes a run log
+		 * (kind "handover") that `wp xrv rollback` can undo.
+		 *
+		 * ## OPTIONS
+		 *
+		 * [<ids>]
+		 * : Comma-separated video IDs: "provider:id" or a bare YouTube ID.
+		 *
+		 * [--all]
+		 * : Instead of IDs: every video that still has a dedicated URL (--to=xrv), or every video this
+		 * command handed over (--to=old).
+		 *
+		 * [--to=<to>]
+		 * : Who serves the address afterwards.
+		 * ---
+		 * default: xrv
+		 * options:
+		 *   - xrv
+		 *   - old
+		 * ---
+		 *
+		 * [--force]
+		 * : Also hand over videos whose watch page is off (their address then redirects home).
+		 *
+		 * [--log=<path>]
+		 * : Run-log file or directory. Default: wp-content/xrv-runs/.
+		 *
+		 * [--dry-run]
+		 * : Print what would change; write nothing but a run log marked dry_run.
+		 *
+		 * ## EXAMPLES
+		 *
+		 *     wp xrv handover yahxL3E6azk,4LAX2feihbE --dry-run --user=admin
+		 *     wp xrv handover yahxL3E6azk,4LAX2feihbE --user=admin
+		 *     wp xrv handover yahxL3E6azk --to=old --user=admin
+		 *     wp xrv handover --all --user=admin
+		 *
+		 * @when after_wp_load
+		 */
+		public function handover( $args, $assoc ) {
+			xrv_cli_require_admin();
+			$dry = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', false );
+			$all = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'all', false );
+			$force = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'force', false );
+			$to  = isset( $assoc['to'] ) ? strtolower( (string) $assoc['to'] ) : 'xrv';
+			if ( ! in_array( $to, array( 'xrv', 'old' ), true ) ) {
+				WP_CLI::error( '--to must be xrv or old.' );
+			}
+			if ( $all === ! empty( $args[0] ) ) {
+				WP_CLI::error( 'Give comma-separated video IDs, or --all (not both).' );
+			}
+			$targets = array();
+			$errors  = array();
+			if ( $all ) {
+				$targets = get_posts( array(
+					'post_type'   => 'xroad_video',
+					'post_status' => array( 'publish', 'draft', 'pending', 'private', 'future' ),
+					'numberposts' => -1,
+					'fields'      => 'ids',
+					'meta_key'    => ( 'xrv' === $to ) ? '_xrv_dedicated_url' : '_xrv_handover_from',
+					'orderby'     => 'ID',
+					'order'       => 'ASC',
+				) );
+			} else {
+				foreach ( explode( ',', (string) $args[0] ) as $ref ) {
+					if ( '' === trim( $ref ) ) {
+						continue;
+					}
+					$p = xrv_cli_parse_ref( $ref );
+					if ( is_wp_error( $p ) ) {
+						$errors[] = $p->get_error_message();
+						continue;
+					}
+					$found = array_values( array_filter( xrv_cli_find_videos( $p[0], $p[1] ), function ( $id ) {
+						return 'trash' !== get_post_status( $id );
+					} ) );
+					if ( ! $found ) {
+						$errors[] = sprintf( '"%s": no XRV video with that ID', trim( $ref ) );
+						continue;
+					}
+					$targets[] = $found[0];
+				}
+			}
+			if ( $errors ) {
+				foreach ( $errors as $e ) {
+					WP_CLI::warning( $e );
+				}
+				WP_CLI::error( sprintf( '%d error(s); nothing was written.', count( $errors ) ) );
+			}
+			$targets = array_values( array_unique( array_map( 'intval', $targets ) ) );
+			if ( ! $targets ) {
+				WP_CLI::success( 'Nothing to hand ' . ( 'xrv' === $to ? 'over.' : 'back.' ) );
+				return;
+			}
+			$run_id = XRV_CLI_Log::new_id();
+			if ( ! $dry ) {
+				xrv_cli_lock( $run_id, 'handover' );
+			}
+			$log     = XRV_CLI_Log::start( 'handover', 'handover', $args, $assoc, $dry, isset( $assoc['log'] ) ? $assoc['log'] : '', $run_id );
+			$log->data['to'] = $to;
+			$total   = count( $targets );
+			$changed = array();
+			$fails   = 0;
+			$labels  = array(
+				'xrv'      => 'XRV serves its address',
+				'old'      => 'the page that lives at its address serves it',
+				'redirect' => 'its address redirects to %s',
+				'home'     => 'watch page off: its address redirects home',
+				'draft'    => 'still a draft: the page at its address serves it until it is published',
+			);
+			foreach ( $targets as $i => $pid ) {
+				$ref  = xrv_cli_video_ref( $pid );
+				$ref  = '' !== $ref ? $ref : 'post:' . $pid;
+				$ded  = xrv_cli_field_get( $pid, 'meta._xrv_dedicated_url' );
+				$from = xrv_cli_field_get( $pid, 'meta._xrv_handover_from' );
+				$e    = array( 'key' => $ref, 'post_id' => $pid, 'status' => 'skipped', 'message' => '', 'warnings' => array() );
+				$want = array();
+				if ( 'xrv' === $to ) {
+					if ( null === $ded || '' === $ded ) {
+						$e['message'] = 'already handed over (no dedicated URL)';
+					} elseif ( '0' === (string) get_post_meta( $pid, '_xrv_watch_page', true ) && ! $force ) {
+						$e['message'] = 'kept: its watch page is off, so XRV would redirect this address home. Turn the watch page on first, or pass --force';
+					} else {
+						$want = array( 'meta._xrv_dedicated_url' => null, 'meta._xrv_handover_from' => $ded );
+					}
+				} elseif ( null !== $from && '' !== $from ) {
+					$want = array( 'meta._xrv_dedicated_url' => $from, 'meta._xrv_handover_from' => null );
+				} elseif ( null !== $ded && '' !== $ded ) {
+					$e['message'] = 'already with the old page (it has a dedicated URL)';
+				} else {
+					$e['status']  = 'failed';
+					$e['message'] = 'no earlier address recorded for this video; undo with `wp xrv rollback <handover log>` instead';
+				}
+				if ( $want ) {
+					$d          = xrv_cli_diff( $pid, $want );
+					$e['diffs'] = $d['diffs'];
+					if ( $dry ) {
+						$e['status']  = 'would-update';
+						$e['message'] = 'xrv' === $to ? 'would hand the address to XRV' : 'would hand the address back to ' . xrv_cli_relative_url( $from );
+					} else {
+						$errs = xrv_cli_fields_set( $pid, $d['set'] );
+						$e['status']   = $errs ? 'failed' : 'updated';
+						$e['before']   = $d['before'];
+						$e['after']    = $d['set'];
+						$e['warnings'] = array_merge( $e['warnings'], $errs );
+						$changed[]     = $pid;
+						xrv_lock_heartbeat( $run_id );
+					}
+				}
+				if ( 'publish' !== get_post_status( $pid ) && 'xrv' === $to ) {
+					$e['warnings'][] = 'not published yet: XRV serves the address once the video is published';
+				}
+				if ( ! $dry && 'failed' !== $e['status'] ) {
+					$st = xrv_address_state( $pid );
+					$e['address'] = $st;
+					$e['message'] = trim( $e['message'] . '; now ' . sprintf( $labels[ $st['state'] ], xrv_cli_relative_url( $st['to'] ) ) . ' (' . xrv_cli_relative_url( $st['url'] ) . ')', '; ' );
+				}
+				if ( 'failed' === $e['status'] ) {
+					$fails++;
+				}
+				$log->put( $ref, $e );
+				xrv_cli_print_entry( $i + 1, $total, $e );
+			}
+			$log->finish( $fails ? 'partial' : 'complete', array( 'summary' => xrv_cli_log_counts( $log ) ) );
+			if ( ! $dry ) {
+				if ( $changed ) {
+					xrv_cli_purge_caches();
+					do_action( 'xrv_library_changed', $changed );
+				}
+				xrv_lock_release( $run_id );
+			}
+			WP_CLI::log( 'Run log: ' . $log->path );
+			if ( $fails ) {
+				WP_CLI::warning( sprintf( '%d video(s) could not be changed; see above.', $fails ) );
+			}
+			WP_CLI::success( $dry ? 'Dry run finished; nothing was written.' : sprintf( '%d address(es) handed %s.', count( $changed ), 'xrv' === $to ? 'to XRV' : 'back' ) );
+		}
+
+		/**
+		 * List videos and who serves each one's own address right now.
+		 *
+		 * States: xrv (XRV serves it), old (not handed over: the page that lives there serves it),
+		 * redirect (its dedicated URL points elsewhere), home (watch page off), draft (not published).
+		 *
+		 * ## OPTIONS
+		 *
+		 * [<ids>]
+		 * : Comma-separated video IDs ("provider:id" or a bare YouTube ID). Default: every video.
+		 *
+		 * [--state=<state>]
+		 * : Only videos in this state: xrv, old, redirect, home or draft.
+		 *
+		 * [--format=<format>]
+		 * : table, csv, json, count or ids.
+		 * ---
+		 * default: table
+		 * ---
+		 *
+		 * ## EXAMPLES
+		 *
+		 *     wp xrv list --user=admin
+		 *     wp xrv list --state=old --format=csv --user=admin
+		 *
+		 * @subcommand list
+		 * @when after_wp_load
+		 */
+		public function list_( $args, $assoc ) {
+			$ids = array();
+			if ( ! empty( $args[0] ) ) {
+				foreach ( explode( ',', (string) $args[0] ) as $ref ) {
+					$p = xrv_cli_parse_ref( $ref );
+					if ( is_wp_error( $p ) ) {
+						WP_CLI::error( $p->get_error_message() );
+					}
+					$ids = array_merge( $ids, xrv_cli_find_videos( $p[0], $p[1] ) );
+				}
+				if ( ! $ids ) {
+					WP_CLI::error( 'No XRV video has those IDs.' );
+				}
+			}
+			$posts = get_posts( array(
+				'post_type'   => 'xroad_video',
+				'post_status' => array( 'publish', 'draft', 'pending', 'private', 'future' ),
+				'numberposts' => -1,
+				'post__in'    => $ids,
+				'orderby'     => 'menu_order date ID',
+				'order'       => 'ASC',
+			) );
+			$want = isset( $assoc['state'] ) ? strtolower( (string) $assoc['state'] ) : '';
+			$rows = array();
+			foreach ( $posts as $p ) {
+				$st = xrv_address_state( $p->ID );
+				if ( '' !== $want && $want !== $st['state'] ) {
+					continue;
+				}
+				$rows[] = array(
+					'ID'      => $p->ID,
+					'video'   => xrv_cli_video_ref( $p->ID ),
+					'status'  => $p->post_status,
+					'state'   => $st['state'],
+					'address' => xrv_cli_relative_url( $st['url'] ),
+					'to'      => xrv_cli_relative_url( $st['to'] ),
+					'title'   => html_entity_decode( get_the_title( $p ), ENT_QUOTES, 'UTF-8' ),
+				);
+			}
+			$format = isset( $assoc['format'] ) ? (string) $assoc['format'] : 'table';
+			if ( 'ids' === $format ) {
+				WP_CLI::log( implode( ' ', wp_list_pluck( $rows, 'ID' ) ) );
+				return;
+			}
+			if ( 'count' === $format ) {
+				WP_CLI::log( (string) count( $rows ) );
+				return;
+			}
+			\WP_CLI\Utils\format_items( $format, $rows, array( 'ID', 'video', 'status', 'state', 'address', 'to', 'title' ) );
 		}
 
 		// XRV-CLI-CLASS-END

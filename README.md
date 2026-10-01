@@ -30,7 +30,7 @@ This is the ["facade" pattern](https://stackoverflow.com/questions/5242429/what-
 - **Three REST-exposed taxonomies** (`xrv_series`, `xrv_audience`, `xrv_topic`); sites define their own terms.
 - **Multi-source.** One `_xrv_provider` switch routes YouTube, Vimeo, Wistia, Loom, Dailymotion, and self-hosted files, auto-detected from the pasted URL. Hosted videos load on click as the host's privacy-enhanced iframe (Vimeo with `dnt=1`); self-hosted files play in a native `<video>` element with zero third-party contact ever. Vimeo unlisted and domain-private videos keep their privacy hash, and galleries can mix sources in a single grid.
 
-- **WP-CLI** (`wp xrv import | collection set | apply | export | rollback`) for scripted, resumable migrations: dry runs with per-field diffs, a JSON run log per run, and an exact rollback. See [IMPORT.md](IMPORT.md#8-wp-cli).
+- **WP-CLI** (`wp xrv import | collection set | apply | export | handover | list | rollback`) for scripted, resumable migrations: dry runs with per-field diffs, a JSON run log per run, and an exact rollback. Video addresses can be handed from old pages to XRV in batches or all at once, at the same URLs. See [IMPORT.md](IMPORT.md#8-wp-cli).
 
 No page builder, ACF, jQuery, or build step. The inline-asset architecture (CSS, JS, and SVG emitted once per request) survives a performance plugin's unused-CSS pass and moves between themes unchanged.
 
@@ -139,6 +139,7 @@ Single-file plugin. Either upload `xroad-videos.php` to `wp-content/plugins/xroa
 | `xrv_poster_sizes` | The `sizes` attribute of card posters. Args: `$sizes` (`'(max-width: 782px) 100vw, 480px'`), `$attachment_id`. |
 | `xrv_single_chrome_css` | The small CSS that hides the theme's byline and featured image on a watch page. Arg: `$css`. |
 | `xrv_video_language` | `inLanguage` on a watch page's VideoObject. Args: `$lang` (`'en'`), `$post_id`. |
+| `xrv_handover_query_vars` | The query vars WordPress serves when XRV steps aside at an address it has not been handed (the old page's). Args: `$alt_vars`, `$xrv_vars`, `$post_id` (0 when no published video has that slug). Return `$xrv_vars` to make XRV serve anyway. |
 | `xrv_lock_stale_after` | Seconds after which a write lock with no heartbeat (a killed sync or WP-CLI run) can be taken over. Default 900. |
 
 Action: `xrv_library_changed` fires with an array of post IDs after channel sync or a WP-CLI command writes videos (hook a cache purge to it).
@@ -206,6 +207,28 @@ On play, the plugin pushes to `window.dataLayer`:
 Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag reading those data-layer variables. Because the facade never refreshes the page, it avoids the attribution corruption that page-refresh consent workarounds cause.
 
 ## Changelog
+
+### 2.11.1
+
+Front-end routing and WP-CLI. A migration can now hand video addresses from the old pages to XRV **in batches or all at once**, at the same URLs. Sites whose video base doesn't share addresses with other content see no change.
+
+**Behaviour fixes you may notice**
+
+- **XRV steps aside at addresses it hasn't been handed.** When the video base matches addresses other content already uses (for example base `videos` on a site whose posts live at `/blog/videos/<postname>/`), 2.11.0 claimed every one of them, so an old page whose XRV video was a draft, or not handed over yet, returned a 404. XRV now serves such an address only for a published video that has been handed it; otherwise WordPress resolves the address as if XRV's rules weren't there, and the page that lives there keeps serving (including its attachment and comment-page URLs). With nothing else at the address, XRV serves it as before, so there is no 404 and no redirect loop.
+- **A dedicated URL equal to the video's own address now means "not handed over yet".** The old page keeps that address until the dedicated URL is removed. 2.11.0 ignored such a dedicated URL and served XRV.
+
+**New**
+
+- **`wp xrv handover <ids> | --all`** hands addresses to XRV (or back, with `--to=old`) for one batch or everything left. It purges the object cache (and WP Engine's caches), writes a run log, and `wp xrv rollback <handover log>` undoes it. Videos whose watch page is off are kept unless `--force`, because handing them over would redirect the address home.
+- **`wp xrv list [--state=xrv|old|redirect|home|draft]`** shows who serves each video's own address.
+- The All Videos **Watch page** column notes when the old page still serves a video's address, or when it redirects to its dedicated URL. The video editor's dedicated-URL notice explains the same.
+- Adding `?preview=true` to an address shows the XRV page before it is handed over.
+- Filter **`xrv_handover_query_vars`** (`$alt_vars`, `$xrv_vars`, `$post_id`) can veto a step-aside per request.
+
+**Upgrading and rollback**
+
+- No settings change; nothing to migrate.
+- Before downgrading to 2.11.0 with the video base on the old addresses, hand every address over (`wp xrv handover --all`) or move the base back first: 2.11.0 claims every address under the base and would 404 the old pages.
 
 ### 2.11.0
 
