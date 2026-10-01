@@ -18,6 +18,6 @@ Most questions are answered in the [README](README.md): the full shortcode and b
 
 ## Filing a good bug report
 
-The bug report form asks for your WordPress version, PHP version, plugin version, the provider involved, your consent mode, and your consent manager. The single most useful thing you can include is whether any third-party request fired **before** you clicked play (check DevTools, Network tab, on a hard reload), since that is the guarantee the plugin is built to keep.
+The bug report form asks for your WordPress version, PHP version, plugin version, the provider involved, your consent mode, and your consent manager. The single most useful thing you can include is whether any third-party request or connection happened **before** you clicked play (check DevTools, Network tab, on a hard reload; then hover and Tab onto a poster and look for `link[rel=preconnect]` or `link[rel=dns-prefetch]` to a video host in the DOM, since a connection hint never appears in the Network tab), since that is the guarantee the plugin is built to keep.
 
 This is software maintained by [Crossroad Media](https://crossroad.us). Best-effort support is provided through the channels above; there is no paid support tier or SLA at this time.

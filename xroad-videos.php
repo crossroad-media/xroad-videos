@@ -4,15 +4,16 @@
  * Plugin URI:        https://crossroad.us
  * Description:        Privacy-first, click-to-load video gallery. A curated custom-post-type model
  *                     (editors add and order each video) that renders a server-side masonry grid of
- *                     LOCALLY stored thumbnails and makes ZERO network calls to YouTube or Google until a
- *                     visitor clicks play, so no consent manager has anything to block and no banner,
+ *                     LOCALLY stored thumbnails and, with the default settings, makes ZERO network calls or
+ *                     connections to YouTube or Google until a visitor clicks play (an opt-in hover warm-up can
+ *                     preconnect), so no consent manager has anything to block and no banner,
  *                     warning overlay, or black player can ever appear. A drop-in alternative to Smash
  *                     Balloon YouTube Feed for sites running a cookie/consent manager. On click it injects
  *                     a youtube-nocookie.com iframe and pushes a video_play event to dataLayer. Self-
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.10.0
+ * Version:           2.11.0
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -60,7 +61,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.10.0' );
+	define( 'XRV_VERSION', '2.11.0' );
 }
 
 /* =================================================================================================
@@ -80,6 +81,56 @@ function xrv_permalinks() {
 		'archive' => '',
 	) );
 }
+
+/* 2.11.0: the site's permalink front ("blog" for /blog/%category%/%postname%/), without slashes.
+ * Video URLs are built with_front, so the front is already part of every video URL. */
+function xrv_permalink_front() {
+	global $wp_rewrite;
+	return ( $wp_rewrite instanceof WP_Rewrite ) ? trim( (string) $wp_rewrite->front, '/' ) : '';
+}
+
+/* 2.11.0: sanitize one URL base the way 2.10.0 did (sanitize_title), but REJECT a base that repeats the
+ * permalink front ("blog/videos" on an /blog/ site) instead of mangling it into "blogvideos".
+ * Returns the base, $fallback for an empty value, or WP_Error( 'xrv_base_has_front' ). */
+function xrv_sanitize_permalink_base( $raw, $fallback = '' ) {
+	$raw   = is_scalar( $raw ) ? trim( (string) $raw ) : '';
+	$front = strtolower( xrv_permalink_front() );
+	if ( '' !== $front ) {
+		$probe = strtolower( trim( $raw, "/ \t" ) );
+		if ( $probe === $front || 0 === strpos( $probe, $front . '/' ) ) {
+			/* translators: %s: the site's permalink front, e.g. "blog". */
+			return new WP_Error( 'xrv_base_has_front', sprintf( __( 'Enter the base without the permalink front: "%1$s" is added automatically (so "videos" gives /%1$s/videos/{slug}/).', 'xroad-videos' ), $front ) );
+		}
+	}
+	$base = sanitize_title( $raw );
+	return '' === $base ? (string) $fallback : $base;
+}
+
+/* 2.11.0: the ONE writer for the video URL structure (Settings form and WP-CLI). Returns the stored
+ * array or a WP_Error; the option hooks below rebuild the rewrite rules whenever the value changes. */
+function xrv_set_permalinks( $single, $archive ) {
+	$s = xrv_sanitize_permalink_base( $single, 'video' );
+	if ( is_wp_error( $s ) ) { return $s; }
+	$a = xrv_sanitize_permalink_base( $archive, '' );
+	if ( is_wp_error( $a ) ) { return $a; }
+	$new = array( 'single' => $s, 'archive' => $a );
+	update_option( 'xrv_permalinks', $new );
+	return $new;
+}
+
+/* 2.11.0: re-register the post type with the current bases, then flush, so a changed (or restored, or
+ * deleted) xrv_permalinks takes effect in the same request with no gap and no stale rules. */
+function xrv_rebuild_video_rewrites() {
+	// Unregister first: re-registering alone adds the new archive rule but never removes the old one.
+	if ( function_exists( 'unregister_post_type' ) && post_type_exists( 'xroad_video' ) ) {
+		unregister_post_type( 'xroad_video' );
+	}
+	xrv_register_data_model();
+	flush_rewrite_rules();
+}
+add_action( 'add_option_xrv_permalinks', 'xrv_rebuild_video_rewrites', 10, 0 );
+add_action( 'update_option_xrv_permalinks', 'xrv_rebuild_video_rewrites', 10, 0 );
+add_action( 'delete_option_xrv_permalinks', 'xrv_rebuild_video_rewrites', 10, 0 );
 
 add_action( 'init', 'xrv_register_data_model' );
 function xrv_register_data_model() {
@@ -107,7 +158,7 @@ function xrv_register_data_model() {
 		// A video is defined entirely by its meta (URL, poster, taxonomy), not post body — so we drop
 		// 'editor' to collapse the screen to a single title field + the Video Details box. The front-end
 		// single page is built from meta by xrv_single_content(), so no post_content is needed.
-		'supports'      => array( 'title', 'thumbnail', 'page-attributes' ), // page-attributes => menu_order for manual drag-ordering
+		'supports'      => array( 'title', 'thumbnail', 'page-attributes' ), // page-attributes => menu_order: the numeric Order field (Post Attributes)
 	) );
 
 	// Three controlled-vocabulary taxonomies, each mapping to one filter group: series, audience, topic.
@@ -130,7 +181,7 @@ function xrv_register_data_model() {
 	}
 
 	// 2.9.0 (Galleries anywhere): a "Collection" is a named, reusable, *placeable* gallery — a saved layout
-	// over either a hand-picked, drag-ordered set of videos OR a taxonomy filter. Config-only: it has no
+	// over a hand-picked set of videos, ordered with up / down buttons in its editor. Config-only: it has no
 	// public single page (it is dropped into pages/templates via [xroad-videos collection="slug"] or the
 	// block), so publicly_queryable / rewrite / has_archive are all off — it adds ZERO front-end rewrite
 	// rules, so no flush is needed for it to work. Slug = post_name (looked up with get_page_by_path);
@@ -232,7 +283,16 @@ function xrv_activate() {
 	update_option( 'xrv_version', XRV_VERSION );
 	flush_rewrite_rules();
 }
-register_deactivation_hook( __FILE__, 'flush_rewrite_rules' );
+register_deactivation_hook( __FILE__, 'xrv_deactivate_rewrites' );
+/* 2.11.0: a bare flush on deactivation still saw xroad_video registered (init already ran in this request),
+ * so it wrote the video rules straight back. Unregister the post type first (that drops its permastruct and
+ * archive rules), then flush. unregister_post_type() is WP 4.5+, hence the guard. */
+function xrv_deactivate_rewrites() {
+	if ( function_exists( 'unregister_post_type' ) && post_type_exists( 'xroad_video' ) ) {
+		unregister_post_type( 'xroad_video' );
+	}
+	flush_rewrite_rules();
+}
 
 /* On a plugin UPDATE (a fresh activation already flushes), re-flush rewrite rules once when the stored
  * version changes, so a changed default base (e.g. /video/) starts resolving without a manual re-save. */
@@ -252,19 +312,43 @@ function xrv_lock_urls_handler() {
 	if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'forbidden' ); }
 	check_admin_referer( 'xrv_lock_urls' );
 	// Changeable, but every change is gated behind the confirmation box (the editor must have run the
-	// two-part test in the UI). On confirm we re-register the CPT with the new base and flush rewrite rules.
-	$saved = false;
+	// two-part test in the UI). 2.11.0: xrv_set_permalinks() is the one writer (its option hooks re-register
+	// the CPT and flush). A rejected base comes back as a WP_Error; only a whitelisted CODE goes into the
+	// redirect, and the Settings card maps it to fixed text, so nothing typed is ever echoed back.
+	$args = array( 'xrv_urls' => '0' );
 	if ( ! empty( $_POST['xrv_confirm'] ) ) {
-		$single  = isset( $_POST['xrv_single'] ) ? sanitize_title( wp_unslash( $_POST['xrv_single'] ) ) : '';
-		$archive = isset( $_POST['xrv_archive'] ) ? sanitize_title( wp_unslash( $_POST['xrv_archive'] ) ) : '';
-		if ( '' === $single ) { $single = 'video'; }
-		update_option( 'xrv_permalinks', array( 'single' => $single, 'archive' => $archive ) );
-		xrv_register_data_model();   // re-register the CPT with the new base, then flush so the new rules are written now
-		flush_rewrite_rules();
-		$saved = true;
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- sanitized by xrv_set_permalinks()
+		$single  = isset( $_POST['xrv_single'] ) ? wp_unslash( $_POST['xrv_single'] ) : '';
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- sanitized by xrv_set_permalinks()
+		$archive = isset( $_POST['xrv_archive'] ) ? wp_unslash( $_POST['xrv_archive'] ) : '';
+		$fired   = did_action( 'add_option_xrv_permalinks' ) + did_action( 'update_option_xrv_permalinks' );
+		$result  = xrv_set_permalinks( $single, $archive );
+		if ( is_wp_error( $result ) ) {
+			$args = array(
+				'xrv_urls' => 'err',
+				'xrv_code' => ( 'xrv_base_has_front' === $result->get_error_code() ) ? 'base_has_front' : 'invalid',
+			);
+		} else {
+			// An unchanged value fires no option hook, so rebuild here: saving the same bases again stays a
+			// manual "repair the video rewrite rules" button.
+			if ( did_action( 'add_option_xrv_permalinks' ) + did_action( 'update_option_xrv_permalinks' ) === $fired ) {
+				xrv_rebuild_video_rewrites();
+			}
+			$args = array( 'xrv_urls' => '1' );
+		}
 	}
-	wp_safe_redirect( add_query_arg( 'xrv_urls', $saved ? '1' : '0', admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) );
+	wp_safe_redirect( add_query_arg( $args, admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) . '#xrv-sec-urls' );
 	exit;
+}
+
+/* 2.11.0: the full public address for a video base, permalink front included (video URLs are built
+ * with_front), e.g. xrv_video_base_url( 'videos', 'example-video' ) gives
+ * https://example.org/blog/videos/example-video/ on an /blog/%category%/%postname%/ site.
+ * An empty $slug gives the base itself (the archive URL); an empty $base too gives home plus the front. */
+function xrv_video_base_url( $base, $slug = '' ) {
+	$parts = array( xrv_permalink_front(), trim( (string) $base, '/' ), trim( (string) $slug, '/' ) );
+	$path  = implode( '/', array_filter( $parts, 'strlen' ) );
+	return home_url( user_trailingslashit( '/' . $path ) );
 }
 
 /* =================================================================================================
@@ -637,6 +721,80 @@ function xrv_iso_to_seconds( $iso ) {
 	return ( (int) $d->d * 86400 ) + ( (int) $d->h * 3600 ) + ( (int) $d->i * 60 ) + (int) $d->s;
 }
 
+/** Format a Unix timestamp in the SITE timezone. wp_date() is WP 5.3+; date_i18n() covers the 5.0 floor. */
+function xrv_local_date( $format, $ts ) {
+	if ( function_exists( 'wp_date' ) ) { return (string) wp_date( $format, (int) $ts ); }
+	return (string) date_i18n( $format, (int) $ts + (int) round( (float) get_option( 'gmt_offset' ) * HOUR_IN_SECONDS ) );
+}
+
+/**
+ * 2.11.0: normalise an upload date to a site-local YYYY-MM-DD, or '' when it is not a real date. A bare
+ * YYYY-MM-DD is accepted only when checkdate() passes; a Unix timestamp or an ISO 8601 date-time WITH a
+ * zone (what the YouTube API returns) is converted to the SITE-LOCAL day; anything else is rejected.
+ */
+function xrv_normalize_ymd( $v ) {
+	if ( ! is_scalar( $v ) ) { return ''; }
+	$v = trim( (string) $v );
+	if ( '' === $v ) { return ''; }
+	if ( preg_match( '/^(\d{4})-(\d{2})-(\d{2})$/', $v, $m ) ) {
+		return checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) ? $v : '';
+	}
+	$ts = null;
+	if ( preg_match( '/^\d{9,11}$/', $v ) ) {
+		$ts = (int) $v;
+	} elseif ( preg_match( '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i', $v ) ) {
+		$t  = strtotime( $v );
+		$ts = ( false === $t ) ? null : $t;
+	}
+	return ( null === $ts ) ? '' : xrv_local_date( 'Y-m-d', $ts );
+}
+
+/**
+ * 2.11.0: the ONE resolved day for a video, shared by the card date, data-when, the newest/oldest sort
+ * key and both JSON-LD emitters: the normalised _xrv_upload_date, else the post's own (local) date.
+ */
+function xrv_video_ymd( $id ) {
+	$ymd = xrv_normalize_ymd( get_post_meta( $id, '_xrv_upload_date', true ) );
+	if ( '' === $ymd ) {
+		$p   = get_post( $id );
+		$ymd = ( $p && '0000-00-00 00:00:00' !== $p->post_date ) ? (string) mysql2date( 'Y-m-d', $p->post_date, false ) : '';
+	}
+	return $ymd;
+}
+
+/**
+ * 2.11.0: sanitize_textarea_field() deletes every percent-encoded octet (%20, %2F, the "50% o" in
+ * "50% off"), which mangles URLs and prose in descriptions. Shield each % behind a private-use code point
+ * while sanitizing, then restore it. Used for every multi-line text field (description, transcript,
+ * chapters) on the editor, importer, sync and WP-CLI paths.
+ */
+function xrv_sanitize_multiline( $v ) {
+	if ( ! is_scalar( $v ) ) { return ''; }
+	$shield = "\xEE\x80\x80"; // U+E000
+	return str_replace( $shield, '%', sanitize_textarea_field( str_replace( '%', $shield, (string) $v ) ) );
+}
+
+/**
+ * 2.11.0: true only when an attachment belongs to this ONE video and nothing else uses it: parented to the
+ * video, not the site default poster, not an ad-hoc embed poster, and not the poster, mobile poster or
+ * featured image of any other post. Every force-delete of a poster goes through this check.
+ */
+function xrv_attachment_is_exclusive( $att_id, $post_id ) {
+	$att_id  = (int) $att_id;
+	$post_id = (int) $post_id;
+	if ( ! $att_id || 'attachment' !== get_post_type( $att_id ) ) { return false; }
+	if ( (int) wp_get_post_parent_id( $att_id ) !== $post_id ) { return false; }
+	if ( $att_id === (int) xrv_get_settings()['default_thumb_id'] ) { return false; }
+	if ( in_array( $att_id, array_map( 'intval', (array) get_option( 'xrv_adhoc_thumbs', array() ) ), true ) ) { return false; }
+	global $wpdb;
+	$others = (int) $wpdb->get_var( $wpdb->prepare(
+		"SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key IN ('_thumbnail_id','_xrv_local_thumb_id','_xrv_mobile_thumb_id') AND meta_value = %s AND post_id <> %d",
+		(string) $att_id,
+		$post_id
+	) );
+	return 0 === $others;
+}
+
 /**
  * Resolve the attachment ID used as a card's poster, in priority order:
  *   1. the per-video poster (a custom upload OR the auto-sideloaded YouTube thumbnail) — `_xrv_local_thumb_id`
@@ -712,7 +870,8 @@ function xrv_mobile_poster_url( $post_id ) {
 
 /* =================================================================================================
  * 5. THE RENDERER
- *    Queries every video ordered by menu_order (the editor's manual drag-order), prints the full markup
+ *    Queries every video in curated order (each video's numeric Order field, then date, then ID; 2.11.0
+ *    adds newest / oldest / title, sorted in PHP), prints the full markup
  *    server-side — inline critical CSS, the SVG sprite, the filter bar, one card per video, the inline
  *    facade + filter JS, and the JSON-LD graph — and returns it as one string. Theme-agnostic; nothing
  *    here references Divi. Shortcode attributes pre-filter the query and set the column width.
@@ -726,25 +885,247 @@ function xrv_is_short( $post_id, $source_url = '' ) {
 	return false !== strpos( $source_url, '/shorts/' );
 }
 
-/* 2.9.0: resolve a saved Collection (by slug or numeric ID) into base atts for xrv_render. Returns null when
- * the collection does not exist. A collection is a hand-picked, ordered set of videos plus a layout; the
- * ordered ids become an `ids` list. An EMPTY collection renders nothing (ids => '-1', a non-matching id),
- * never the whole library. */
+/* 2.9.0: resolve a saved Collection (by slug or numeric ID) into base atts for xrv_render. A collection is a
+ * hand-picked, ordered set of videos plus a layout (and, since 2.11.0, an order); the ordered ids become an
+ * `ids` list. 2.11.0: only a PUBLISHED collection resolves. Unknown, trashed, draft or deleted returns null
+ * (xrv_render then prints nothing publicly, never the whole library); a numeric value must be a positive ID
+ * (collection="0" used to reach get_post( 0 ), i.e. the current global post); an EMPTY collection comes back
+ * with 'empty' => true and renders "No videos found." without a query (the old '-1' sentinel was absint()ed
+ * by WP_Query into post ID 1). */
 function xrv_collection_atts( $slug ) {
-	$slug = (string) $slug;
-	$post = is_numeric( $slug )
-		? get_post( (int) $slug )
-		: get_page_by_path( sanitize_title( $slug ), OBJECT, 'xrv_collection' );
-	if ( ! $post || 'xrv_collection' !== $post->post_type ) {
+	$slug = trim( (string) $slug );
+	if ( '' === $slug ) {
 		return null;
 	}
-	$ids  = trim( (string) get_post_meta( $post->ID, '_xrvc_video_ids', true ) );
+	if ( ctype_digit( $slug ) ) {
+		$pid  = absint( $slug );
+		$post = $pid ? get_post( $pid ) : null;
+	} else {
+		$post = get_page_by_path( sanitize_title( $slug ), OBJECT, 'xrv_collection' );
+	}
+	if ( ! $post || 'xrv_collection' !== $post->post_type || 'publish' !== $post->post_status ) {
+		return null;
+	}
+	$ids  = array_filter( array_map( 'absint', preg_split( '/[\s,]+/', (string) get_post_meta( $post->ID, '_xrvc_video_ids', true ) ) ) );
 	$atts = array(
-		'layout' => (string) get_post_meta( $post->ID, '_xrvc_layout', true ),
-		'ids'    => '' !== $ids ? $ids : '-1', // empty collection => non-matching id => "No videos found", not the whole library
+		'layout'  => (string) get_post_meta( $post->ID, '_xrvc_layout', true ),
+		'orderby' => (string) get_post_meta( $post->ID, '_xrvc_orderby', true ),
+		'ids'     => implode( ',', $ids ),
 	);
-	// Drop an empty layout so it inherits the site default; `ids` is always set.
-	return array_filter( $atts, function( $v ) { return '' !== $v && null !== $v; } );
+	// Drop an empty layout / order so they inherit the site default.
+	$atts = array_filter( $atts, function( $v ) { return '' !== $v; } );
+	$atts['empty'] = empty( $ids );
+	return $atts;
+}
+
+/* 2.11.0: an editor-only explanation (never shown to visitors) for a placement that renders nothing. */
+function xrv_editor_notice( $html ) {
+	return current_user_can( 'edit_posts' )
+		? '<span class="xrv-editor-notice" style="display:inline-block;padding:8px 12px;border:1px dashed #f3d199;background:#fff8ef;border-radius:6px;font-size:13px;color:#7a4f00">' . $html . '</span>'
+		: '';
+}
+
+/* 2.11.0: esc_html() / esc_attr() that also encode [ and ], so title or description text can never form a
+ * shortcode when the rendered gallery passes through do_shortcode again. The zero-padded &#091; / &#093; form
+ * matters: do_shortcode() ends with unescape_invalid_shortcodes(), which turns &#91; back into a bare [, which
+ * a second pass would then execute (a page builder module running do_shortcode, or the block path, which
+ * renders in do_blocks at the_content priority 9, BEFORE do_shortcode at 11). */
+function xrv_esc_html( $s ) {
+	return str_replace( array( '[', ']' ), array( '&#091;', '&#093;' ), esc_html( (string) $s ) );
+}
+function xrv_esc_attr( $s ) {
+	return str_replace( array( '[', ']' ), array( '&#091;', '&#093;' ), esc_attr( (string) $s ) );
+}
+
+/* 2.11.0: a shortcode / block switch, parsed with the existing list: '0', 'false', 'no', 'off' are off. */
+function xrv_att_on( $v ) {
+	if ( is_bool( $v ) ) { return $v; }
+	if ( ! is_scalar( $v ) ) { return false; }
+	return ! in_array( strtolower( trim( (string) $v ) ), array( '0', 'false', 'no', 'off' ), true );
+}
+function xrv_att_enum( $v, $allowed, $default ) {
+	$v = is_scalar( $v ) ? strtolower( trim( (string) $v ) ) : '';
+	return in_array( $v, $allowed, true ) ? $v : $default;
+}
+
+/**
+ * 2.11.0: every per-gallery display option, normalised ONCE from a merged settings + attributes array (the
+ * shortcode_atts() result, or xrv_get_settings() for a watch page or embed). The card, the carousel and the
+ * root read only this array, so a gallery, a watch page and an [xroad-video] embed behave alike.
+ */
+function xrv_display_opts( $a ) {
+	$d = xrv_settings_defaults();
+	$a = is_array( $a ) ? $a : array();
+	$g = function( $k ) use ( $a, $d ) {
+		return array_key_exists( $k, $a ) ? $a[ $k ] : ( isset( $d[ $k ] ) ? $d[ $k ] : '' );
+	};
+	$privacy = is_scalar( $g( 'privacy_url' ) ) ? trim( (string) $g( 'privacy_url' ) ) : '';
+	return array(
+		'playback'        => xrv_att_enum( $g( 'playback' ), array( 'inline', 'lightbox', 'lightbox-desktop', 'lightbox-mobile' ), 'lightbox' ),
+		'lb_details'      => xrv_att_on( $g( 'lightbox_details' ) ),
+		'lb_desc'         => xrv_att_enum( $g( 'lightbox_desc' ), array( 'collapsed', 'full' ), 'collapsed' ),
+		'lb_page_link'    => xrv_att_on( $g( 'lightbox_page_link' ) ),
+		'consent'         => xrv_att_enum( $g( 'consent_notice' ), array( 'off', 'strict', 'geo' ), 'off' ),
+		'consent_text'    => (string) $g( 'consent_text' ),
+		'consent_btn'     => (string) $g( 'consent_button' ),
+		'consent_decline' => (string) $g( 'consent_decline' ),
+		'privacy_url'     => '' !== $privacy ? esc_url_raw( $privacy ) : esc_url_raw( (string) get_privacy_policy_url() ),
+		'card_meta'       => xrv_att_enum( $g( 'card_meta' ), array( 'full', 'compact', 'title' ), 'full' ),
+		'hover'           => xrv_att_enum( $g( 'hover_style' ), array( 'zoom', 'dim', 'none' ), 'zoom' ),
+		'align'           => xrv_att_enum( $g( 'card_align' ), array( 'auto', 'left', 'center' ), 'auto' ),
+		'card_date'       => xrv_att_on( $g( 'card_date' ) ),
+		'desc_chars'      => max( 0, (int) $g( 'desc_chars' ) ),
+		'show_duration'   => xrv_att_on( $g( 'show_duration' ) ),
+		'subscribe_icon'  => xrv_att_enum( $g( 'subscribe_icon' ), array( 'brand', 'mono' ), 'brand' ),
+		'thumb_link'      => xrv_att_enum( $g( 'thumb_link' ), array( 'none', 'watch' ), 'none' ),
+		'orderby'         => xrv_att_enum( $g( 'orderby' ), array( 'curated', 'newest', 'oldest', 'title' ), 'curated' ),
+		'preconnect'      => xrv_att_on( $g( 'preconnect' ) ),
+		'desc_mode'       => 'plain',
+	);
+}
+
+/**
+ * 2.11.0: the root element's class + data attributes, shared by the gallery root and BOTH single roots (the
+ * watch page / [xroad-video id] and [xroad-video url]). In 2.10.0 the single roots carried only
+ * data-playback, so a watch page or embed ignored geo / strict consent and always warmed up on hover.
+ */
+function xrv_root_attrs( $o, $classes = array(), $data = array() ) {
+	$cls = array_merge( array( 'xrv' ), (array) $classes, array( 'xrv--hover-' . $o['hover'], 'xrv--align-' . $o['align'] ) );
+	if ( ! $o['show_duration'] ) { $cls[] = 'xrv--nodur'; }
+	if ( 'mono' === $o['subscribe_icon'] ) { $cls[] = 'xrv--yt-mono'; }
+	$attrs = array_merge( array(
+		'data-playback'        => $o['playback'],
+		'data-lb-details'      => $o['lb_details'] ? '1' : '0',
+		'data-lb-desc'         => $o['lb_desc'],
+		'data-lb-link'         => $o['lb_page_link'] ? '1' : '0',
+		'data-consent'         => $o['consent'],
+		'data-consent-text'    => $o['consent_text'],
+		'data-consent-btn'     => $o['consent_btn'],
+		'data-consent-decline' => $o['consent_decline'],
+		'data-privacy'         => $o['privacy_url'],
+		'data-preconnect'      => $o['preconnect'] ? '1' : '0',
+		'data-i18n-more'       => __( 'Show more', 'xroad-videos' ),
+		'data-i18n-less'       => __( 'Show less', 'xroad-videos' ),
+		'data-i18n-page'       => __( 'Open video page', 'xroad-videos' ),
+		'data-i18n-close'      => __( 'Close video', 'xroad-videos' ),
+	), (array) $data );
+	if ( 'geo' === $o['consent'] ) {
+		$attrs['data-region-url'] = rest_url( 'xrv/v1/region' );
+	}
+	$out = ' class="' . esc_attr( implode( ' ', $cls ) ) . '"';
+	foreach ( $attrs as $k => $v ) {
+		$v    = (string) $v;
+		$out .= ' ' . $k . '="' . ( in_array( $k, array( 'data-privacy', 'data-region-url' ), true ) ? esc_url( $v ) : xrv_esc_attr( $v ) ) . '"';
+	}
+	return $out;
+}
+
+/**
+ * 2.11.0: order a query's posts for orderby newest | oldest | title, in PHP and BEFORE the records loop, so
+ * the facet counts and `limit` see the same set the visitor sees. Newest = the resolved upload day
+ * (xrv_video_ymd), then the exact publish time (_xrv_published_at, else the post's GMT date), then post ID.
+ * Title = the plain title (tags stripped, entities decoded, accents folded), then post ID. Every key ends in
+ * the post ID, so the order is total and identical on every page load.
+ */
+function xrv_sort_posts( $posts, $orderby ) {
+	if ( ! in_array( $orderby, array( 'newest', 'oldest', 'title' ), true ) ) {
+		return $posts;
+	}
+	$k = array();
+	foreach ( $posts as $p ) {
+		if ( 'title' === $orderby ) {
+			$t = remove_accents( html_entity_decode( wp_strip_all_tags( (string) $p->post_title ), ENT_QUOTES, 'UTF-8' ) );
+			$k[ $p->ID ] = function_exists( 'mb_strtolower' ) ? mb_strtolower( $t, 'UTF-8' ) : strtolower( $t );
+			continue;
+		}
+		$pub = strtotime( (string) get_post_meta( $p->ID, '_xrv_published_at', true ) );
+		if ( false === $pub ) {
+			$gmt = (string) $p->post_date_gmt;
+			$pub = ( '' !== $gmt && '0000-00-00 00:00:00' !== $gmt ) ? strtotime( $gmt . ' UTC' ) : strtotime( (string) $p->post_date );
+		}
+		$k[ $p->ID ] = array( xrv_video_ymd( $p->ID ), (int) $pub );
+	}
+	usort( $posts, function( $a, $b ) use ( $k, $orderby ) {
+		if ( 'title' === $orderby ) {
+			$c = strcmp( $k[ $a->ID ], $k[ $b->ID ] );
+			return 0 !== $c ? $c : ( $a->ID <=> $b->ID );
+		}
+		$c = strcmp( $k[ $a->ID ][0], $k[ $b->ID ][0] );
+		if ( 0 === $c ) { $c = $k[ $a->ID ][1] <=> $k[ $b->ID ][1]; }
+		if ( 0 === $c ) { $c = $a->ID <=> $b->ID; }
+		return ( 'newest' === $orderby ) ? -$c : $c;
+	} );
+	return $posts;
+}
+
+/**
+ * 2.11.0 (desc_chars): trim a description to at most $max characters at a word boundary and add "…". Multibyte
+ * safe; every preg_* call is NULL-guarded (it returns NULL on invalid UTF-8). The full text stays in
+ * data-desc for the lightbox; only the visible card paragraph is trimmed.
+ */
+function xrv_trim_desc( $text, $max ) {
+	$text = (string) $text;
+	$max  = (int) $max;
+	if ( $max < 1 ) {
+		return $text;
+	}
+	$flat = preg_replace( '/\s+/u', ' ', $text );
+	if ( null === $flat ) {
+		$flat = preg_replace( '/\s+/', ' ', $text );
+	}
+	$flat = trim( null === $flat ? $text : $flat );
+	if ( mb_strlen( $flat, 'UTF-8' ) <= $max ) {
+		return $text;
+	}
+	$cut  = mb_substr( $flat, 0, $max, 'UTF-8' );
+	$next = mb_substr( $flat, $max, 1, 'UTF-8' );
+	if ( ' ' !== $next ) {
+		// Mid-word: back up to the previous space, unless that would throw away most of the text.
+		$short = preg_replace( '/\s+\S*$/u', '', $cut );
+		if ( null !== $short && '' !== $short && mb_strlen( $short, 'UTF-8' ) >= (int) floor( $max * 0.6 ) ) {
+			$cut = $short;
+		}
+	}
+	$cut = rtrim( $cut, " \t\n\r\0\x0B,;:.-" );
+	return $cut . "\u{2026}";
+}
+
+/* 2.11.0 (card_date): the visible card date, <time datetime="Y-m-d">, formatted in the site timezone with
+ * the xrv_card_date_format filter (default 'F j, Y'). wp_date() is WP 5.3+; date_i18n() covers 5.0. */
+function xrv_card_date_html( $ymd ) {
+	$fmt   = (string) apply_filters( 'xrv_card_date_format', 'F j, Y' );
+	$label = '';
+	if ( function_exists( 'wp_date' ) && function_exists( 'wp_timezone' ) ) {
+		$dt = date_create( $ymd . ' 12:00:00', wp_timezone() );
+		if ( $dt ) { $label = (string) wp_date( $fmt, $dt->getTimestamp() ); }
+	} else {
+		$ts = strtotime( $ymd . ' 12:00:00' );
+		if ( $ts ) { $label = (string) date_i18n( $fmt, $ts ); }
+	}
+	return '' === $label ? '' : '<time class="xrv-date" datetime="' . esc_attr( $ymd ) . '">' . xrv_esc_html( $label ) . '</time>';
+}
+
+/* 2.11.0 (watch_desc = rich): the description with its line breaks kept and web addresses made clickable.
+ * Only <a href> and <br> survive wp_kses; links to other sites get rel="nofollow noopener" (internal links
+ * get none). wp_is_internal_link() is WP 6.2+, so older sites compare the host with home_url(). */
+function xrv_rich_desc_html( $text ) {
+	// Escape < > & only: an escaped quote (&quot;) would be swallowed into a URL that ends right before it.
+	// Quotes are harmless in element text, and wp_kses below re-checks everything.
+	$html = make_clickable( htmlspecialchars( (string) $text, ENT_NOQUOTES, 'UTF-8' ) );
+	$html = nl2br( $html, false );
+	$html = wp_kses( $html, array( 'a' => array( 'href' => true ), 'br' => array() ) );
+	$home = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+	$html = preg_replace_callback( '/<a href="([^"]*)">/i', function( $m ) use ( $home ) {
+		$href     = html_entity_decode( $m[1], ENT_QUOTES, 'UTF-8' );
+		$internal = function_exists( 'wp_is_internal_link' )
+			? wp_is_internal_link( $href )
+			: ( '' !== $home && strtolower( (string) wp_parse_url( $href, PHP_URL_HOST ) ) === $home );
+		return '<a href="' . $m[1] . '"' . ( $internal ? '' : ' rel="nofollow noopener"' ) . '>';
+	}, $html );
+	if ( null === $html ) {
+		return xrv_esc_html( $text );
+	}
+	return str_replace( array( '[', ']' ), array( '&#091;', '&#093;' ), $html );
 }
 
 function xrv_render( $atts = array() ) {
@@ -752,14 +1133,32 @@ function xrv_render( $atts = array() ) {
 	// Drop empty attrs so a blank shortcode value OR an unset/"site default" block control falls through to
 	// the site defaults below (instead of overriding them with an empty string).
 	$atts = array_filter( (array) $atts, function( $v ) { return '' !== $v && null !== $v; } );
+	// 2.11.0: "0 = site default" on the block's range controls (or a stray per_page="0") means unset. The '0'
+	// used to survive the filter above, and max( 1, 0 ) then showed one card per page.
+	foreach ( array( 'per_page', 'load_more' ) as $k ) {
+		if ( isset( $atts[ $k ] ) && (int) $atts[ $k ] < 1 ) { unset( $atts[ $k ] ); }
+	}
 
 	// 2.9.0: a `collection` resolves a saved Collection's config into the base atts; any attribute passed
-	// explicitly on the shortcode/block still overrides the collection. (Unknown/empty slug falls through to
-	// normal rendering.) A hand-picked collection arrives here as an ordered `ids` list.
-	if ( ! empty( $atts['collection'] ) ) {
-		$cfg = xrv_collection_atts( $atts['collection'] );
+	// explicitly on the shortcode/block still overrides the collection. A hand-picked collection arrives here
+	// as an ordered `ids` list. 2.11.0: an unknown / trashed / draft / deleted collection (or collection="0")
+	// renders NOTHING publicly, never the whole library, and returns BEFORE xrv_head_assets_once() so a later
+	// gallery on the same page still prints the shared assets.
+	$collection_empty = false;
+	if ( isset( $atts['collection'] ) ) {
+		$cslug = (string) $atts['collection'];
+		$cfg   = xrv_collection_atts( $cslug );
 		unset( $atts['collection'] );
-		if ( is_array( $cfg ) ) { $atts = array_merge( $cfg, $atts ); } // explicit atts win over collection config
+		if ( null === $cfg ) {
+			/* translators: %s: the collection slug used on the shortcode or block. */
+			return xrv_editor_notice( sprintf( esc_html__( 'XRV: there is no published collection "%s". Check the slug under XRV Video > Collections. Visitors see nothing here.', 'xroad-videos' ), xrv_esc_html( $cslug ) ) );
+		}
+		$collection_empty = ! empty( $cfg['empty'] ) && ! isset( $atts['ids'] );
+		unset( $cfg['empty'] );
+		$atts = array_merge( $cfg, $atts ); // explicit atts win over collection config
+	}
+	if ( $collection_empty ) {
+		return '<p>No videos found.</p>'; // a real collection with nothing in it yet
 	}
 
 	$s = xrv_get_settings(); // site-wide defaults (Videos -> Settings); explicit shortcode/block attrs override these
@@ -788,25 +1187,34 @@ function xrv_render( $atts = array() ) {
 		'privacy_url'     => $s['privacy_url'],      // privacy policy link in the notice; defaults to the WP privacy page
 		'shorts'   => $s['shorts_default'],          // all | only | hide — YouTube Shorts (vertical 9:16) handling for this gallery
 		'ids'      => '',                            // 2.9.0: explicit ordered post-id list (hand-picked collection); when set, it is the exact set + order
+		// 2.11.0 display options; each defaults to its site setting (see xrv_display_opts).
+		'orderby'            => $s['orderby'],            // curated | newest | oldest | title
+		'hover_style'        => $s['hover_style'],        // zoom | dim | none
+		'card_align'         => $s['card_align'],         // auto | left | center
+		'card_date'          => $s['card_date'],          // show the upload date on each card (1/0)
+		'desc_chars'         => $s['desc_chars'],         // trim the visible card description to N characters (0 = no trim)
+		'show_duration'      => $s['show_duration'],      // duration badge on the poster (1/0)
+		'subscribe_icon'     => $s['subscribe_icon'],     // brand | mono
+		'lightbox_desc'      => $s['lightbox_desc'],      // collapsed | full
+		'lightbox_page_link' => $s['lightbox_page_link'], // "Open video page" link in the lightbox caption (1/0)
+		'thumb_link'         => $s['thumb_link'],         // none | watch: the poster is also a link to the video's page
+		'preconnect'         => $s['preconnect'],         // warm up the video host on hover / focus (1/0)
 	), $atts, 'xroad-videos' );
 
+	// 2.11.0: every display option normalised once; the card, the carousel and the root read only $o.
 	// Playback: 'lightbox' (pop-out modal on every device) | 'inline' (plays in the card) | device-scoped
 	// 'lightbox-desktop' / 'lightbox-mobile' (modal on that device class, inline on the other). The desktop /
 	// mobile split is decided CLIENT-SIDE at click time (viewport width), so the page stays fully cacheable.
-	$playback = in_array( $atts['playback'], array( 'inline', 'lightbox', 'lightbox-desktop', 'lightbox-mobile' ), true ) ? $atts['playback'] : 'lightbox';
-	// Lightbox details panel (title + relative date + collapsible description, à la a YouTube watch caption).
-	// Lightbox-only; inline playback already shows the caption beneath the card.
-	$lb_details = ! in_array( strtolower( (string) $atts['lightbox_details'] ), array( '0', 'false', 'no', 'off' ), true );
-	$layout   = in_array( $atts['layout'], array( 'grid', 'carousel', 'library' ), true ) ? $atts['layout'] : 'grid';
-	$controls = ! in_array( strtolower( (string) $atts['controls'] ), array( 'false', '0', 'no', 'off' ), true );
+	$o = xrv_display_opts( $atts );
+
+	$layout    = in_array( $atts['layout'], array( 'grid', 'carousel', 'library' ), true ) ? $atts['layout'] : 'grid';
+	$controls  = ! in_array( strtolower( (string) $atts['controls'] ), array( 'false', '0', 'no', 'off' ), true );
 	$filter_ui = ( 'chips' === strtolower( (string) $atts['filter_ui'] ) ) ? 'chips' : 'select';
-	$cn = strtolower( (string) $atts['consent_notice'] );
-	$consent_notice = in_array( $cn, array( 'strict', 'geo' ), true ) ? $cn : 'off';
-	$card_meta = in_array( strtolower( (string) $atts['card_meta'] ), array( 'full', 'compact', 'title' ), true ) ? strtolower( (string) $atts['card_meta'] ) : 'full';
-	$privacy_url = '' !== $atts['privacy_url'] ? esc_url( $atts['privacy_url'] ) : esc_url( (string) get_privacy_policy_url() );
+	$card_meta = $o['card_meta'];
 	$per_page  = max( 1, (int) $atts['per_page'] );
 	$load_step = max( 1, (int) $atts['load_more'] );
 	$subscribe_url = esc_url( $atts['subscribe_url'] );
+	$limit     = (int) $atts['limit'];
 
 	$tax_query = array();
 	foreach ( array( 'xrv_series' => 'series', 'xrv_audience' => 'audience', 'xrv_topic' => 'topic' ) as $tax => $key ) {
@@ -816,11 +1224,13 @@ function xrv_render( $atts = array() ) {
 		}
 	}
 
+	// The query is ALWAYS in curated order (the editor's Order numbers, then date, then ID, so equal Order
+	// values tie-break identically on every load); a newest / oldest / title order is applied in PHP below.
 	$query_args = array(
 		'post_type'      => 'xroad_video',
 		'post_status'    => 'publish',
-		'posts_per_page' => (int) $atts['limit'] === 0 ? -1 : (int) $atts['limit'],
-		'orderby'        => 'menu_order',  // the editor's drag-order controls the grid sequence
+		'posts_per_page' => ( 'curated' === $o['orderby'] && $limit > 0 ) ? $limit : -1,
+		'orderby'        => 'menu_order date ID',
 		'order'          => 'ASC',
 	);
 	if ( $tax_query ) {
@@ -833,11 +1243,11 @@ function xrv_render( $atts = array() ) {
 	elseif ( 'hide' === $shorts ) { $query_args['meta_query'] = array( array( 'key' => '_xrv_short', 'compare' => 'NOT EXISTS' ) ); }
 
 	// 2.9.0: an explicit ordered id list (a hand-picked collection, or `[xroad-videos ids="12,7,30"]`) is the
-	// exact set AND order — it takes precedence over taxonomy and Shorts filtering.
-	$ids = array_filter( array_map( 'intval', preg_split( '/[\s,]+/', (string) $atts['ids'] ) ) );
+	// exact set AND its curated order. It takes precedence over taxonomy and Shorts filtering.
+	$ids = array_values( array_filter( array_map( 'absint', preg_split( '/[\s,]+/', (string) $atts['ids'] ) ) ) );
 	if ( $ids ) {
 		$query_args['post__in']       = $ids;
-		$query_args['orderby']        = 'post__in'; // preserve the hand-picked drag order
+		$query_args['orderby']        = 'post__in'; // preserve the hand-picked order
 		$query_args['posts_per_page'] = count( $ids );
 		unset( $query_args['tax_query'], $query_args['meta_query'] );
 	}
@@ -847,12 +1257,25 @@ function xrv_render( $atts = array() ) {
 		return '<p>No videos found.</p>';
 	}
 
+	// 2.11.0: note each post's curated rank, apply the requested order, then `limit`, all BEFORE the records
+	// loop, so the facet counts below describe exactly the cards that are printed. (An `ids` list keeps its
+	// 2.10.0 behaviour of ignoring `limit`.)
+	$posts = $q->posts;
+	$cpos  = array();
+	foreach ( $posts as $i => $p ) {
+		$cpos[ $p->ID ] = $i;
+	}
+	$posts = xrv_sort_posts( $posts, $o['orderby'] );
+	if ( $limit > 0 && ! $ids ) {
+		$posts = array_slice( $posts, 0, $limit );
+	}
+
 	// First pass: normalise a record per post so we can both count facets and render.
 	$records = array();
 	$facet   = array( 'series' => array(), 'audience' => array(), 'topic' => array() );
 	$tax_for = array( 'series' => 'xrv_series', 'audience' => 'xrv_audience', 'topic' => 'xrv_topic' );
 
-	foreach ( $q->posts as $p ) {
+	foreach ( $posts as $p ) {
 		$id = $p->ID;
 
 		// ponytail: a video with no platform ID can't play and would render a dead card; keep it out of the grid.
@@ -869,8 +1292,10 @@ function xrv_render( $atts = array() ) {
 			$slugs = is_array( $terms ) ? wp_list_pluck( $terms, 'slug' ) : array();
 			$term_map[ $tax ] = $slugs;
 			$groups[ $group ] = $slugs;
-			foreach ( $slugs as $s ) {
-				$facet[ $group ][ $s ] = ( $facet[ $group ][ $s ] ?? 0 ) + 1;
+			// 2.11.0: the loop variable was $s, which overwrote the settings array (a PHP 8 fatal on any later
+			// $s[...] read once a video had terms).
+			foreach ( $slugs as $slug ) {
+				$facet[ $group ][ $slug ] = ( $facet[ $group ][ $slug ] ?? 0 ) + 1;
 			}
 		}
 		$provider  = (string) get_post_meta( $id, '_xrv_provider', true );
@@ -879,9 +1304,10 @@ function xrv_render( $atts = array() ) {
 		// Title link target: a legacy custom URL wins; else the video's own watch page when on; else none.
 		$custom_url = (string) get_post_meta( $id, '_xrv_dedicated_url', true );
 		$watch_on   = '0' !== (string) get_post_meta( $id, '_xrv_watch_page', true ); // default on
-		$dedicated  = '' !== $custom_url ? $custom_url : ( $watch_on ? (string) get_permalink( $id ) : '' );
+		$watch_url  = $watch_on ? (string) get_permalink( $id ) : '';
+		$dedicated  = '' !== $custom_url ? $custom_url : $watch_url;
 		$dur_iso   = (string) get_post_meta( $id, '_xrv_duration_iso', true );
-		$upload    = (string) get_post_meta( $id, '_xrv_upload_date', true );
+		$ymd       = xrv_video_ymd( $id ); // 2.11.0: the one resolved day (normalised upload date, else the post date)
 		$thumb_id  = (int) get_post_meta( $id, '_xrv_local_thumb_id', true );
 		$poster_ss = xrv_poster_srcset( xrv_effective_thumb_id( $id, $thumb_id ) );
 
@@ -897,7 +1323,8 @@ function xrv_render( $atts = array() ) {
 			'dur_iso'    => $dur_iso,
 			'dur_clock'  => xrv_iso_to_clock( $dur_iso ),
 			'dur_sec'    => xrv_iso_to_seconds( $dur_iso ),
-			'upload'     => $upload,
+			'upload'     => $ymd,
+			'ymd'        => $ymd,
 			'poster'     => xrv_local_poster_url( $id, $thumb_id ),
 			'poster_mobile' => xrv_mobile_poster_url( $id ),
 			'poster_srcset' => $poster_ss['srcset'],
@@ -905,16 +1332,20 @@ function xrv_render( $atts = array() ) {
 			'series'     => $groups['series'],
 			'audience'   => $groups['audience'],
 			'topic'      => $groups['topic'],
-			'date_key'   => $upload !== '' ? (int) preg_replace( '/\D/', '', $upload ) : 0,
+			'date_key'   => '' !== $ymd ? (int) str_replace( '-', '', $ymd ) : 0,
 			'search'     => xrv_build_search_index( $id, $term_map, $desc ),
 			'is_short'   => xrv_is_short( $id ),
+			// Set only when this video's own watch page is actually SERVED (on, and no dedicated URL sending
+			// visitors elsewhere): it becomes the VideoObject @id in the gallery schema.
+			'watch_url'  => ( '' === $custom_url && $watch_on ) ? $watch_url : '',
+			'cpos'       => $cpos[ $id ],
 		);
 	}
 	wp_reset_postdata();
 
 	$total = count( $records );
 
-	// The featured carousel (library/carousel layout) is the first N records in curated (menu_order) order.
+	// The featured carousel (library/carousel layout) is the first N records in the gallery's order.
 	$featured_limit = max( 1, (int) $atts['featured_limit'] );
 	$featured       = array_slice( $records, 0, $featured_limit );
 
@@ -939,16 +1370,16 @@ function xrv_render( $atts = array() ) {
 
 	ob_start();
 	?>
-<div class="xrv xrv--<?php echo esc_attr( $layout ); ?>" data-playback="<?php echo esc_attr( $playback ); ?>" data-lb-details="<?php echo $lb_details ? '1' : '0'; ?>" data-layout="<?php echo esc_attr( $layout ); ?>" data-consent="<?php echo esc_attr( $consent_notice ); ?>" data-consent-text="<?php echo esc_attr( $atts['consent_text'] ); ?>" data-consent-btn="<?php echo esc_attr( $atts['consent_button'] ); ?>" data-consent-decline="<?php echo esc_attr( $atts['consent_decline'] ); ?>" data-privacy="<?php echo esc_attr( $privacy_url ); ?>"<?php if ( 'geo' === $consent_notice ) : ?> data-region-url="<?php echo esc_url( rest_url( 'xrv/v1/region' ) ); ?>"<?php endif; ?>>
+<div<?php echo xrv_root_attrs( $o, array( 'xrv--' . $layout ), array( 'data-layout' => $layout, 'data-sort' => $o['orderby'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput -- every value escaped in xrv_root_attrs ?>>
 	<?php echo xrv_head_assets_once(); ?>
 
 	<?php if ( 'library' !== $layout && '' !== $atts['heading'] ) : ?>
-		<h2 class="xrv-section-title"><?php echo esc_html( $atts['heading'] ); ?></h2>
+		<h2 class="xrv-section-title"><?php echo xrv_esc_html( $atts['heading'] ); ?></h2>
 	<?php endif; ?>
 
 	<?php if ( $show_carousel ) : ?>
 		<?php if ( 'library' === $layout ) : ?><h2 class="xrv-section-title">Featured Videos</h2><?php endif; ?>
-		<?php echo xrv_render_carousel( $featured, $caro_cols, $card_meta ); ?>
+		<?php echo xrv_render_carousel( $featured, $caro_cols, $card_meta, $o ); ?>
 	<?php endif; ?>
 
 	<?php if ( $show_grid ) : ?>
@@ -970,10 +1401,10 @@ function xrv_render( $atts = array() ) {
 					<div class="xrv-sortwrap">
 						<?php $sort_id = wp_unique_id( 'xrv-sort-' ); // per-instance so the label/for pairing survives multiple galleries on one page ?><label for="<?php echo esc_attr( $sort_id ); ?>">Sort</label>
 						<select id="<?php echo esc_attr( $sort_id ); ?>" class="xrv-sort">
-							<option value="curated">Curated order</option>
-							<option value="newest">Newest first</option>
-							<option value="oldest">Oldest first</option>
-							<option value="title">Title (A&ndash;Z)</option>
+							<option value="curated"<?php selected( $o['orderby'], 'curated' ); ?>>Curated order</option>
+							<option value="newest"<?php selected( $o['orderby'], 'newest' ); ?>>Newest first</option>
+							<option value="oldest"<?php selected( $o['orderby'], 'oldest' ); ?>>Oldest first</option>
+							<option value="title"<?php selected( $o['orderby'], 'title' ); ?>>Title (A&ndash;Z)</option>
 							<option value="short">Shortest first</option>
 							<option value="long">Longest first</option>
 						</select>
@@ -997,7 +1428,13 @@ function xrv_render( $atts = array() ) {
 			<?php endif; ?>
 
 			<div class="<?php echo esc_attr( $grid_class ); ?>" style="<?php echo esc_attr( $grid_style ); ?>" data-perpage="<?php echo (int) $per_page; ?>" data-loadstep="<?php echo (int) $load_step; ?>">
-				<?php foreach ( $records as $i => $r ) { echo xrv_render_card( $r, $card_meta, 0 === $i ); } // first card eager + high priority = the LCP image ?>
+				<?php
+				// First card eager + high priority = the LCP image. 2.11.0: cards past per_page are printed with
+				// `hidden`, so a delayed or failed script never flashes the whole library (JS takes over on init).
+				foreach ( $records as $i => $r ) {
+					echo xrv_render_card( $r, $card_meta, 0 === $i, $o + array( 'pos' => $i, 'hidden' => $i >= $per_page ) );
+				}
+				?>
 			</div>
 
 			<div class="xrv-empty" style="display:none">
@@ -1006,9 +1443,9 @@ function xrv_render( $atts = array() ) {
 			</div>
 
 			<div class="xrv-more">
-				<button type="button" class="xrv-loadmore" style="display:none">Load More&hellip;</button>
+				<button type="button" class="xrv-loadmore"<?php echo ( $total > $per_page ) ? '' : ' style="display:none"'; ?>>Load More&hellip;</button>
 				<?php if ( $subscribe_url !== '' ) : ?>
-					<a class="xrv-subscribe" href="<?php echo esc_url( $subscribe_url ); ?>" target="_blank" rel="noopener"><svg class="xrv-yt" viewBox="0 0 24 24" aria-hidden="true"><use href="#xrv-i-yt"/></svg> <?php echo esc_html( $atts['subscribe_label'] ); ?></a>
+					<a class="xrv-subscribe" href="<?php echo esc_url( $subscribe_url ); ?>" target="_blank" rel="noopener"><svg class="xrv-yt" viewBox="0 0 24 24" aria-hidden="true"><use href="#xrv-i-yt"/></svg> <?php echo xrv_esc_html( $atts['subscribe_label'] ); ?></a>
 				<?php endif; ?>
 			</div>
 		</section>
@@ -1031,7 +1468,7 @@ function xrv_render( $atts = array() ) {
  *     mobile) with prev/next arrows and pagination dots. Reuses the same facade card; cards play in the
  *     lightbox. Pure CSS + a small vanilla controller (see xrv_inline_js).
  * ------------------------------------------------------------------------------------------------- */
-function xrv_render_carousel( $records, $cols, $card_meta = 'full' ) {
+function xrv_render_carousel( $records, $cols, $card_meta = 'full', $opts = array() ) {
 	if ( empty( $records ) ) {
 		return '';
 	}
@@ -1042,7 +1479,7 @@ function xrv_render_carousel( $records, $cols, $card_meta = 'full' ) {
 		<button type="button" class="xrv-caro-arrow xrv-caro-prev" aria-label="Previous videos">&#8249;</button>
 		<div class="xrv-caro-viewport">
 			<div class="xrv-caro-track">
-				<?php foreach ( $records as $r ) { echo xrv_render_card( $r, $card_meta ); } ?>
+				<?php foreach ( $records as $i => $r ) { echo xrv_render_card( $r, $card_meta, false, (array) $opts + array( 'pos' => $i ) ); } ?>
 			</div>
 		</div>
 		<button type="button" class="xrv-caro-arrow xrv-caro-next" aria-label="More videos">&#8250;</button>
@@ -1055,19 +1492,30 @@ function xrv_render_carousel( $records, $cols, $card_meta = 'full' ) {
 /* -------------------------------------------------------------------------------------------------
  * 5a. One video card. The initial state is a LOCAL poster + a native <button> play control. No iframe,
  *     no third-party request, no cookie. The facade JS swaps in the youtube-nocookie iframe on click.
+ *     2.11.0: $opts carries the display options (xrv_display_opts) plus per-card pos / hidden. With
+ *     thumb_link = watch the poster is an <a> to the same page as the title: a plain primary click still
+ *     plays (the JS cancels the navigation), a modified or middle click opens the page.
  * ------------------------------------------------------------------------------------------------- */
-function xrv_render_card( $r, $meta = 'full', $eager = false ) {
-	$title    = $r['title'];
+function xrv_render_card( $r, $meta = 'full', $eager = false, $opts = array() ) {
+	$o = array_merge( array(
+		'card_date'  => false,
+		'desc_chars' => 0,
+		'thumb_link' => 'none',
+		'desc_mode'  => 'plain',
+		'hidden'     => false,
+		'pos'        => null,
+	), (array) $opts );
+	$title     = $r['title'];
 	$dedicated = $r['dedicated'];
 
 	// Tag chips: the display names across the three facet taxonomies, de-duplicated.
 	$tags_html = '';
 	$seen = array();
 	foreach ( array( 'xrv_series' => $r['series'], 'xrv_audience' => $r['audience'], 'xrv_topic' => $r['topic'] ) as $tax => $slugs ) {
-		foreach ( $slugs as $s ) {
-			$t = get_term_by( 'slug', $s, $tax );
+		foreach ( $slugs as $slug ) {
+			$t = get_term_by( 'slug', $slug, $tax );
 			if ( $t && empty( $seen[ $t->name ] ) ) {
-				$tags_html .= '<span>' . esc_html( $t->name ) . '</span>';
+				$tags_html .= '<span>' . xrv_esc_html( $t->name ) . '</span>';
 				$seen[ $t->name ] = true;
 			}
 		}
@@ -1075,18 +1523,28 @@ function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 
 	$poster = $r['poster'];
 
+	// The resolved day (2.11.0: one source for the card date, data-when, the sort key and the schema).
+	$ymd = isset( $r['ymd'] ) ? (string) $r['ymd'] : xrv_normalize_ymd( $r['upload'] ?? '' );
+
 	// Relative upload date ("2 months ago") for the lightbox details panel — rendered server-side so the
-	// modal can show it without any client-side date math. Empty when the video has no stored upload date.
+	// modal can show it without any client-side date math. Empty when the video has no date.
 	$when = '';
-	if ( '' !== ( $r['upload'] ?? '' ) ) {
-		$ts = strtotime( (string) $r['upload'] );
-		if ( $ts ) { $when = human_time_diff( $ts ) . ' ago'; }
+	if ( '' !== $ymd ) {
+		$ts = strtotime( $ymd );
+		/* translators: %s: a human time difference such as "2 months". */
+		if ( $ts ) { $when = sprintf( __( '%s ago', 'xroad-videos' ), human_time_diff( $ts ) ); }
 	}
+
+	$desc_full   = (string) $r['desc'];
+	$desc_vis    = ( (int) $o['desc_chars'] > 0 ) ? xrv_trim_desc( $desc_full, (int) $o['desc_chars'] ) : $desc_full;
+	$link_poster = ( 'watch' === $o['thumb_link'] && '' !== $dedicated );
+	/* translators: %s: the video title. */
+	$play_label  = sprintf( __( 'Play video: %s', 'xroad-videos' ), $title );
 
 	ob_start();
 	?>
-	<figure class="xrv-card"<?php if ( ! empty( $r['is_short'] ) ) echo ' data-short="1"'; ?>
-		data-vid="<?php echo esc_attr( $r['vid'] ); ?>"
+	<figure class="xrv-card"<?php if ( ! empty( $r['is_short'] ) ) echo ' data-short="1"'; ?><?php if ( ! empty( $o['hidden'] ) ) echo ' hidden'; ?>
+		data-vid="<?php echo xrv_esc_attr( $r['vid'] ); ?>"
 		data-provider="<?php echo esc_attr( $r['provider'] ); ?>"
 		data-hash="<?php echo esc_attr( $r['hash'] ?? '' ); ?>"
 		data-series="<?php echo esc_attr( implode( ' ', $r['series'] ) ); ?>"
@@ -1094,16 +1552,22 @@ function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 		data-topic="<?php echo esc_attr( implode( ' ', $r['topic'] ) ); ?>"
 		data-date="<?php echo esc_attr( $r['date_key'] ); ?>"
 		data-seconds="<?php echo (int) ( $r['dur_sec'] ?? 0 ); ?>"
-		data-title="<?php echo esc_attr( strtolower( $title ) ); ?>"
-		<?php if ( '' !== $when ) : ?>data-when="<?php echo esc_attr( $when ); ?>" <?php endif; ?>
-		<?php if ( '' !== $r['desc'] ) : ?>data-desc="<?php echo esc_attr( $r['desc'] ); ?>" <?php endif; ?>
-		data-search="<?php echo esc_attr( $r['search'] ); ?>">
+		data-title="<?php echo xrv_esc_attr( strtolower( $title ) ); ?>"
+		<?php if ( null !== $o['pos'] ) : ?>data-pos="<?php echo (int) $o['pos']; ?>" <?php endif; ?>
+		<?php if ( isset( $r['cpos'] ) ) : ?>data-cpos="<?php echo (int) $r['cpos']; ?>" <?php endif; ?>
+		<?php if ( '' !== $when ) : ?>data-when="<?php echo xrv_esc_attr( $when ); ?>" <?php endif; ?>
+		<?php if ( '' !== $desc_full ) : ?>data-desc="<?php echo xrv_esc_attr( $desc_full ); ?>" <?php endif; ?>
+		data-search="<?php echo xrv_esc_attr( $r['search'] ); ?>">
 		<div class="xrv-frame">
-			<button type="button" class="xrv-facade" aria-label="Play video: <?php echo esc_attr( $title ); ?>">
+			<?php if ( $link_poster ) : ?>
+			<a class="xrv-facade no-prefetch" href="<?php echo esc_url( $dedicated ); ?>" draggable="false" aria-label="<?php echo xrv_esc_attr( $play_label ); ?>">
+			<?php else : ?>
+			<button type="button" class="xrv-facade" aria-label="<?php echo xrv_esc_attr( $play_label ); ?>">
+			<?php endif; ?>
 				<?php if ( $poster !== '' ) : ?>
 					<?php $mobile = $r['poster_mobile'] ?? ''; $use_pic = ( '' !== $mobile && empty( $r['is_short'] ) ); ?>
 					<?php if ( $use_pic ) : ?><picture><source media="(max-width: 600px)" srcset="<?php echo esc_url( $mobile ); ?>"><?php endif; ?>
-					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>"<?php if ( ! empty( $r['poster_srcset'] ) ) : ?> srcset="<?php echo esc_attr( $r['poster_srcset'] ); ?>" sizes="<?php echo esc_attr( $r['poster_sizes'] ); ?>"<?php endif; ?> width="480" height="360" loading="<?php echo $eager ? 'eager' : 'lazy'; ?>"<?php echo $eager ? ' fetchpriority="high"' : ''; ?> decoding="async" alt="<?php echo esc_attr( $title ); ?>"><?php if ( $use_pic ) : ?></picture><?php endif; ?>
+					<img class="xrv-thumb" src="<?php echo esc_url( $poster ); ?>"<?php if ( ! empty( $r['poster_srcset'] ) ) : ?> srcset="<?php echo esc_attr( $r['poster_srcset'] ); ?>" sizes="<?php echo esc_attr( $r['poster_sizes'] ); ?>"<?php endif; ?> width="480" height="360" loading="<?php echo $eager ? 'eager' : 'lazy'; ?>"<?php echo $eager ? ' fetchpriority="high"' : ''; ?> decoding="async" alt="<?php echo xrv_esc_attr( $title ); ?>"><?php if ( $use_pic ) : ?></picture><?php endif; ?>
 				<?php else : ?>
 					<span class="xrv-thumb xrv-thumb--ph" aria-hidden="true"></span>
 				<?php endif; ?>
@@ -1111,11 +1575,15 @@ function xrv_render_card( $r, $meta = 'full', $eager = false ) {
 				<?php if ( $r['dur_clock'] !== '' ) : ?>
 					<span class="xrv-dur"><?php echo esc_html( $r['dur_clock'] ); ?></span>
 				<?php endif; ?>
-			</button>
+			<?php echo $link_poster ? '</a>' : '</button>'; ?>
 		</div>
 		<figcaption class="xrv-cap">
-			<h3 class="xrv-title"><?php if ( $dedicated !== '' ) : ?><a class="xrv-title-link" href="<?php echo esc_url( $dedicated ); ?>"><?php echo esc_html( $title ); ?></a><?php else : echo esc_html( $title ); endif; ?></h3>
-			<?php if ( 'title' !== $meta && $r['desc'] !== '' ) : ?><p class="xrv-desc"><?php echo esc_html( $r['desc'] ); ?></p><?php endif; ?>
+			<h3 class="xrv-title"><?php if ( $dedicated !== '' ) : ?><a class="xrv-title-link" href="<?php echo esc_url( $dedicated ); ?>"><?php echo xrv_esc_html( $title ); ?></a><?php else : echo xrv_esc_html( $title ); endif; ?></h3>
+			<?php if ( ! empty( $o['card_date'] ) && '' !== $ymd ) { echo xrv_card_date_html( $ymd ); } ?>
+			<?php if ( 'title' !== $meta && '' !== $desc_full ) : ?>
+				<?php if ( 'rich' === $o['desc_mode'] ) : ?><p class="xrv-desc xrv-desc--rich"><?php echo xrv_rich_desc_html( $desc_full ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped then wp_kses'd in the helper ?></p>
+				<?php else : ?><p class="xrv-desc"><?php echo xrv_esc_html( $desc_vis ); ?></p><?php endif; ?>
+			<?php endif; ?>
 			<?php if ( 'full' === $meta && $tags_html !== '' ) : ?><p class="xrv-tags"><?php echo $tags_html; ?></p><?php endif; ?>
 		</figcaption>
 	</figure>
@@ -1255,12 +1723,17 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 			continue; // a record with no video ID cannot emit a valid VideoObject.
 		}
 
-		$node = array(
-			'@type' => 'VideoObject',
-			'name'  => $r['title'],
-		);
+		// 2.11.0: decode the title's HTML entities (get_the_title() texturizes "Doctor's" into
+		// "Doctor&#8217;s", which JSON-LD printed literally). @id is the watch page's own VideoObject @id,
+		// added only when that page is actually served, so the two nodes merge into one entity.
+		$name = html_entity_decode( (string) $r['title'], ENT_QUOTES, 'UTF-8' );
+		$node = array( '@type' => 'VideoObject' );
+		if ( ! empty( $r['watch_url'] ) ) {
+			$node['@id'] = $r['watch_url'] . '#video';
+		}
+		$node['name'] = $name;
 
-		$desc = $r['desc'] !== '' ? $r['desc'] : $r['title'];
+		$desc = $r['desc'] !== '' ? $r['desc'] : $name;
 		$node['description'] = $desc;
 
 		// thumbnailUrl: the LOCAL upload first (what the page actually renders), then the platform URL.
@@ -1272,8 +1745,9 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 		if ( '' !== $rt ) { $thumbs[] = $rt; }
 		$node['thumbnailUrl'] = $thumbs;
 
-		if ( $r['upload'] !== '' ) {
-			$node['uploadDate'] = $r['upload'];
+		$upload = isset( $r['ymd'] ) ? (string) $r['ymd'] : (string) $r['upload']; // 2.11.0: the resolved day (xrv_video_ymd)
+		if ( $upload !== '' ) {
+			$node['uploadDate'] = $upload;
 		}
 		if ( $r['dur_iso'] !== '' ) {
 			$node['duration'] = $r['dur_iso'];
@@ -1282,6 +1756,10 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 		$node['contentUrl'] = ! empty( $r['source_url'] ) ? $r['source_url'] : xrv_watch_url( $r['vid'], $r['provider'] );
 		$node['embedUrl']   = xrv_embed_url( $r['vid'], $r['provider'], isset( $r['hash'] ) ? $r['hash'] : '' );
 		$node['publisher']  = $org_ref;
+		// 2.11.0: url = the page the card's title (and a linked poster) points to.
+		if ( ! empty( $r['dedicated'] ) ) {
+			$node['url'] = ( 0 === strpos( (string) $r['dedicated'], '/' ) && 0 !== strpos( (string) $r['dedicated'], '//' ) ) ? home_url( $r['dedicated'] ) : $r['dedicated'];
+		}
 
 		// Let sites extend a single VideoObject node (e.g. add `about`, `transcript`, `regionsAllowed`).
 		$node = apply_filters( 'xrv_video_schema', $node, $r );
@@ -1295,11 +1773,11 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 	$org_node = array(
 		'@type' => 'Organization',
 		'@id'   => $org_id,
-		'name'  => get_bloginfo( 'name' ),
+		'name'  => html_entity_decode( get_bloginfo( 'name' ), ENT_QUOTES, 'UTF-8' ),
 		'url'   => home_url( '/' ),
 	);
 
-	$list_name = apply_filters( 'xrv_list_name', get_bloginfo( 'name' ) . ' video library' );
+	$list_name = html_entity_decode( (string) apply_filters( 'xrv_list_name', get_bloginfo( 'name' ) . ' video library' ), ENT_QUOTES, 'UTF-8' );
 
 	$collection = array(
 		'@type'      => 'CollectionPage',
@@ -1323,7 +1801,18 @@ function xrv_schema_jsonld( $records, $page_url = '' ) {
 		'@graph'   => array( $org_node, $collection ),
 	);
 
-	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP ) . '</script>' . "\n";
+	return xrv_jsonld_script( $graph );
+}
+
+/* 2.11.0: print a JSON-LD graph. Brackets INSIDE JSON strings are written as [ / ], so a
+ * description containing [video src=…] can never become a shortcode if the page passes through
+ * do_shortcode after us (the block path). Structural brackets (arrays) are untouched. */
+function xrv_jsonld_script( $graph ) {
+	$json = (string) wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP );
+	$safe = preg_replace_callback( '/"[^"\\\\]*(?:\\\\.[^"\\\\]*)*"/s', function( $m ) {
+		return str_replace( array( '[', ']' ), array( '\u005b', '\u005d' ), $m[0] );
+	}, $json );
+	return "\n" . '<script type="application/ld+json">' . ( null === $safe ? $json : $safe ) . '</script>' . "\n";
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -1375,11 +1864,10 @@ function xrv_single_video_schema( $post_id ) {
 		return '';
 	}
 
-	$title  = get_the_title( $post_id );
+	$title  = html_entity_decode( get_the_title( $post_id ), ENT_QUOTES, 'UTF-8' ); // 2.11.0: no literal &#8217; in the name
 	$desc   = (string) get_post_meta( $post_id, '_xrv_description', true );
 	$desc   = $desc !== '' ? $desc : $title;
-	$upload = (string) get_post_meta( $post_id, '_xrv_upload_date', true );
-	$upload = $upload !== '' ? $upload : get_the_date( 'Y-m-d', $post_id ); // uploadDate is required
+	$upload = xrv_video_ymd( $post_id ); // uploadDate is required: the normalised upload date, else the post date
 	$dur    = (string) get_post_meta( $post_id, '_xrv_duration_iso', true );
 	$thumb  = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
 	$source = (string) get_post_meta( $post_id, '_xrv_source_url', true );
@@ -1443,11 +1931,11 @@ function xrv_single_video_schema( $post_id ) {
 	$graph = array(
 		'@context' => 'https://schema.org',
 		'@graph'   => array(
-			array( '@type' => 'Organization', '@id' => xrv_org_id(), 'name' => get_bloginfo( 'name' ), 'url' => home_url( '/' ) ),
+			array( '@type' => 'Organization', '@id' => xrv_org_id(), 'name' => html_entity_decode( get_bloginfo( 'name' ), ENT_QUOTES, 'UTF-8' ), 'url' => home_url( '/' ) ),
 			$node,
 		),
 	);
-	return "\n" . '<script type="application/ld+json">' . wp_json_encode( $graph, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP ) . '</script>' . "\n";
+	return xrv_jsonld_script( $graph );
 }
 
 /* =================================================================================================
@@ -1465,7 +1953,10 @@ function xrv_head_assets_once() {
 	static $done = false;
 	if ( $done ) { return ''; }
 	$done = true;
-	return xrv_icon_sprite() . "\n" . xrv_inline_css() . xrv_dynamic_css();
+	// 2.11.0: the no-JS / blocked-JS restore for cards printed past per_page with the hidden attribute (the
+	// script reveals them in pages; without it, every card shows and the Load more button hides).
+	$noscript = '<noscript><style>.xrv .xrv-grid .xrv-card[hidden]{display:block!important}.xrv .xrv-loadmore{display:none!important}</style></noscript>';
+	return xrv_icon_sprite() . "\n" . xrv_inline_css() . xrv_dynamic_css() . $noscript;
 }
 
 /* Per-site brand override for the play-button color combo (Settings -> Play button color). Emits the two
@@ -1484,7 +1975,26 @@ function xrv_footer_js_once() {
 	static $done = false;
 	if ( $done ) { return ''; }
 	$done = true;
-	return xrv_inline_js();
+	return xrv_inline_script_tag( 'xrv-js', xrv_inline_js() );
+}
+
+/* 2.11.0: the inline script tag with a stable id (xrv-js, like the xrv-css style) and the
+ * xrv_inline_script_attrs filter, so a performance plugin's delay / defer / combine step can be told to leave
+ * the facade alone, e.g. add_filter( 'xrv_inline_script_attrs', fn() => array( 'data-no-optimize' => '1',
+ * 'data-no-defer' => '1', 'nowprocket' => true ) ). A true value prints a bare attribute. */
+function xrv_inline_script_tag( $id, $js ) {
+	$attrs = (array) apply_filters( 'xrv_inline_script_attrs', array(), $id );
+	$out   = '<script id="' . esc_attr( $id ) . '"';
+	foreach ( $attrs as $k => $v ) {
+		$k = preg_replace( '/[^A-Za-z0-9_:\-]/', '', (string) $k );
+		if ( '' === $k || 'id' === strtolower( $k ) || false === $v || null === $v ) { continue; }
+		$out .= ( true === $v ) ? ' ' . $k : ' ' . $k . '="' . esc_attr( (string) $v ) . '"';
+	}
+	// The body sits inside an HTML comment (<!-- ... //-->, read by JS engines as two line comments). Block
+	// themes run wptexturize() over the whole rendered template, and its HTML splitter treats a JS "<" (as in
+	// "a <= b") as the start of a tag and rewrites every "&" up to the next ">" as "&#038;", which breaks
+	// "&&". wptexturize skips comments entirely. The script contains no "-->" and no "</script".
+	return $out . ">\n<!--\n" . $js . "\n//-->\n</script>";
 }
 
 function xrv_icon_sprite() {
@@ -1493,17 +2003,18 @@ function xrv_icon_sprite() {
 <symbol id="xrv-i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
 <symbol id="xrv-i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
 <symbol id="xrv-i-arrow" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
-<symbol id="xrv-i-yt" viewBox="0 0 24 24"><path fill="#FF0000" d="M23 7.5a3 3 0 0 0-2.1-2.1C19 4.9 12 4.9 12 4.9s-7 0-8.9.5A3 3 0 0 0 1 7.5 31 31 0 0 0 .5 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1c1.9.5 8.9.5 8.9.5s7 0 8.9-.5a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.5 12 31 31 0 0 0 23 7.5z"/><path fill="#fff" d="M9.75 15.5l6-3.5-6-3.5z"/></symbol>
+<symbol id="xrv-i-yt" viewBox="0 0 24 24"><path style="fill:var(--xrv-yt-body,#FF0000);fill-rule:var(--xrv-yt-rule,nonzero)" d="M23 7.5a3 3 0 0 0-2.1-2.1C19 4.9 12 4.9 12 4.9s-7 0-8.9.5A3 3 0 0 0 1 7.5 31 31 0 0 0 .5 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1c1.9.5 8.9.5 8.9.5s7 0 8.9-.5a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.5 12 31 31 0 0 0 23 7.5zM9.75 15.5l6-3.5-6-3.5z"/><path style="fill:var(--xrv-yt-play,#fff)" d="M9.75 15.5l6-3.5-6-3.5z"/></symbol>
 </defs></svg>
 SVG;
 }
 
 function xrv_inline_css() {
 	return <<<'CSS'
-<style>
+<style id="xrv-css">
 .xrv{font-family:var(--xrv-font, 'Gotham',Helvetica,Arial,sans-serif) !important;color:var(--xrv-text,#1a2332) !important;line-height:1.55 !important;max-width:1180px;margin:0 auto;padding:0}
 .xrv *,.xrv *::before,.xrv *::after{box-sizing:border-box}
 .xrv h3{font-family:inherit !important;line-height:1.3 !important;margin:0;font-weight:700;text-align:left}
+.xrv h3.xrv-title{font-weight:var(--xrv-title-weight,700)}
 .xrv p{margin:0}
 .xrv a{color:var(--xrv-link,#017A8E);text-decoration:none}
 .xrv a:hover{text-decoration:underline}
@@ -1536,11 +2047,15 @@ function xrv_inline_css() {
 .xrv-reset:focus-visible{outline:3px solid rgba(1,154,179,.5);outline-offset:2px}
 .xrv-grid{column-gap:20px}
 .xrv-card{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin:0 0 24px;display:inline-block;width:100%;content-visibility:auto;contain-intrinsic-size:auto 320px}
+.xrv .xrv-card[hidden]{display:none!important}
 .xrv-frame{position:relative;width:100%}
-.xrv-facade{display:block;position:relative;width:100%;padding:0;margin:0;border:none;background:#0a1622;border-radius:6px;overflow:hidden;cursor:pointer;aspect-ratio:16/9;line-height:0}
+.xrv-facade{display:block;position:relative;width:100%;padding:0;margin:0;border:none;background:#0a1622;border-radius:var(--xrv-radius,6px);overflow:hidden;cursor:pointer;aspect-ratio:16/9;line-height:0}
+.xrv a.xrv-facade,.xrv a.xrv-facade:hover{color:inherit;text-decoration:none !important;-webkit-user-drag:none}
 .xrv-card[data-short],.xrv-card[data-provider="tiktok"]{max-width:300px;margin-left:auto;margin-right:auto}
 .xrv-card[data-short] .xrv-facade,.xrv-card[data-short] .xrv-iframe,.xrv-card[data-provider="tiktok"] .xrv-facade,.xrv-card[data-provider="tiktok"] .xrv-iframe{aspect-ratio:9/16}
-.xrv-facade:focus-visible{outline:3px solid var(--xrv-accent,#019AB3);outline-offset:3px}
+.xrv-facade:focus-visible{outline:none}
+.xrv-facade:focus-visible::after{content:"";position:absolute;inset:0;z-index:3;border-radius:inherit;box-shadow:inset 0 0 0 3px var(--xrv-accent,#019AB3),inset 0 0 0 5px #fff;pointer-events:none}
+@media (forced-colors:active){.xrv-facade:focus-visible{outline:3px solid CanvasText;outline-offset:-3px}}
 .xrv-thumb{display:block;width:100%;height:100%;object-fit:cover;border:0;transition:transform .3s ease,opacity .2s ease}
 .xrv-thumb--ph{background:linear-gradient(135deg,var(--xrv-primary,#013C60),var(--xrv-link,#017A8E))}
 .xrv-facade:hover .xrv-thumb{transform:scale(1.04);opacity:.92}
@@ -1550,12 +2065,12 @@ function xrv_inline_css() {
 .xrv-facade:hover .xrv-play{transform:translate(-50%,-50%) scale(1.08)}
 .xrv-facade:hover .xrv-play__bg{fill:var(--xrv-play-hover,var(--xrv-action,#007A53));fill-opacity:1}
 .xrv-dur{position:absolute;right:8px;bottom:8px;background:rgba(10,22,34,.85);color:#fff;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:3px;font-variant-numeric:tabular-nums}
-.xrv-iframe,.xrv-video{display:block;width:100%;aspect-ratio:16/9;border:0;border-radius:6px}
+.xrv-iframe,.xrv-video{display:block;width:100%;aspect-ratio:16/9;border:0;border-radius:var(--xrv-radius,6px)}
 .xrv-video{background:#000;object-fit:contain}
 .xrv-cap{padding:12px 2px 0}
 .xrv-consent-note{font-size:11.5px;color:var(--xrv-muted,#5a6573);line-height:1.4;margin:7px 0 0}
 .xrv-consent-note a{color:var(--xrv-link,#017A8E)}
-.xrv-consent{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;padding:18px;text-align:center;background:rgba(10,22,34,.88);border-radius:6px;z-index:4}
+.xrv-consent{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;padding:18px;text-align:center;background:rgba(10,22,34,.88);border-radius:var(--xrv-radius,6px);z-index:4}
 .xrv-consent-msg{color:#fff;font-size:13.5px;line-height:1.45;margin:0;max-width:34em}
 .xrv-consent-go{background:var(--xrv-primary,#013C60);color:#fff;border:0;border-radius:4px;padding:9px 20px;font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;transition:background .15s ease}
 .xrv-consent-go:hover{background:var(--xrv-action,#007A53)}
@@ -1566,12 +2081,15 @@ function xrv_inline_css() {
 .xrv-consent-x{position:absolute;top:7px;right:10px;background:transparent;border:0;color:rgba(255,255,255,.7);font-size:22px;line-height:1;cursor:pointer;padding:2px 7px;border-radius:3px}
 .xrv-consent-x:hover{color:#fff}
 .xrv-consent-link{color:#cfe9e0;font-size:12px}
-.xrv-title{font-size:16px !important;font-weight:700;color:var(--xrv-primary,#013C60) !important;margin:0 0 6px !important;line-height:1.2 !important}
+.xrv-title{font-size:var(--xrv-title-size,16px) !important;font-weight:var(--xrv-title-weight,700);color:var(--xrv-title-color,var(--xrv-primary,#013C60)) !important;margin:0 0 6px !important;line-height:1.2 !important}
 .xrv-title-link{color:inherit !important;text-decoration:none !important}
 .xrv-title-link:hover,.xrv-title-link:focus{text-decoration:underline !important}
+.xrv-date{display:block;margin:-2px 0 7px;font-size:12.5px;line-height:1.3;color:var(--xrv-date-color,var(--xrv-muted,#5a6573));font-variant-numeric:tabular-nums}
 /* Match the production carousel caption (13px / 1.3) and cap the blurb at ~5 lines so cards stay uniform. */
 .xrv-desc{font-size:13px;color:var(--xrv-desc,#4a5663);line-height:1.3;margin:0 0 9px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;line-clamp:5;overflow:hidden}
 .xrv--single .xrv-desc{-webkit-line-clamp:unset;line-clamp:unset;display:block;overflow:visible;font-size:14px;margin-bottom:14px}
+.xrv--single .xrv-grid{column-count:1 !important}
+.xrv-desc--rich a{word-break:break-word}
 .xrv-tags{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11.5px;color:var(--xrv-muted,#5a6573);margin:0 0 9px}
 .xrv-tags span::before{content:"#";color:var(--xrv-border,#c4ccd6);margin-right:1px}
 .xrv-page-link{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:700;letter-spacing:.02em;color:var(--xrv-link,#017A8E) !important}
@@ -1579,7 +2097,7 @@ function xrv_inline_css() {
 .xrv-page-link:hover{text-decoration:none !important}
 .xrv-page-link:hover .xrv-ic{transform:translateX(3px)}
 .xrv-empty{text-align:center;padding:50px 20px;color:var(--xrv-muted,#5a6573)}
-.xrv-empty h3{color:var(--xrv-text,#1a2332) !important;font-size:18px !important;margin-bottom:6px !important}
+.xrv-empty h3{color:var(--xrv-text,#1a2332) !important;font-size:18px !important;margin-bottom:6px !important;text-align:center}
 @media (max-width:880px){
 .xrv-grid{column-width:auto !important;column-count:2 !important}
 .xrv-ft{flex-basis:100%}
@@ -1587,7 +2105,9 @@ function xrv_inline_css() {
 @media (max-width:560px){
 .xrv-grid{column-count:1 !important}
 .xrv-bar{flex-direction:column;align-items:stretch}
+.xrv-search{flex:0 0 auto}
 .xrv-ctrls{flex-direction:column;align-items:stretch;gap:10px}
+.xrv-fselwrap label,.xrv-sortwrap label{flex:0 0 78px}
 .xrv-fselwrap,.xrv-sortwrap{justify-content:space-between}
 .xrv-fselwrap select,.xrv-sortwrap select{max-width:none;flex:1 1 auto;margin-left:10px}
 }
@@ -1608,7 +2128,11 @@ function xrv_inline_css() {
 .xrv-caro-track{display:flex;flex-wrap:nowrap;transition:transform .4s ease;will-change:transform}
 .xrv-caro-track .xrv-card{flex:0 0 33.3333%;max-width:33.3333%;box-sizing:border-box;padding:0 12px;margin:0}
 .xrv-carousel .xrv-cap{text-align:center}
+.xrv-carousel .xrv-title{text-align:center}
 .xrv-carousel .xrv-tags,.xrv-carousel .xrv-page-link{display:none}
+.xrv--align-center .xrv-cap,.xrv--align-center .xrv-title{text-align:center}
+.xrv--align-center .xrv-tags{justify-content:center}
+.xrv--align-left .xrv-carousel .xrv-cap,.xrv--align-left .xrv-carousel .xrv-title{text-align:left}
 .xrv-caro-arrow{position:absolute;top:calc(50% - 38px);transform:translateY(-50%);z-index:5;width:42px;height:42px;border-radius:50%;border:1px solid #d4dae2;background:#fff;color:var(--xrv-primary,#013C60);font-size:24px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(1,60,96,.12)}
 .xrv-caro-arrow:hover{background:var(--xrv-primary,#013C60);color:#fff;border-color:var(--xrv-primary,#013C60)}
 .xrv-caro-arrow:disabled{opacity:.35;cursor:default;background:#fff;color:var(--xrv-primary,#013C60);border-color:#d4dae2}
@@ -1633,18 +2157,20 @@ function xrv_inline_css() {
 }
 /* Load more + subscribe row (under the browse grid) */
 .xrv-more{display:flex;justify-content:center;align-items:center;gap:14px;flex-wrap:wrap;margin-top:36px}
-.xrv-loadmore{background:var(--xrv-text,#1a2332);color:#fff;border:none;font-family:inherit;font-size:14px;font-weight:600;letter-spacing:.01em;padding:13px 28px;border-radius:5px;cursor:pointer;transition:background .15s ease}
-.xrv-loadmore:hover{background:var(--xrv-primary,#013C60)}
+.xrv-loadmore{background:var(--xrv-loadmore-bg,var(--xrv-text,#1a2332));color:var(--xrv-loadmore-color,#fff);border:none;font-family:inherit;font-size:14px;font-weight:var(--xrv-button-weight,600);letter-spacing:.01em;padding:13px 28px;border-radius:var(--xrv-loadmore-radius,5px);cursor:pointer;transition:background .15s ease}
+.xrv-loadmore:hover{background:var(--xrv-loadmore-hover-bg,var(--xrv-primary,#013C60))}
 .xrv-loadmore:focus-visible{outline:3px solid rgba(1,154,179,.5);outline-offset:2px}
-.xrv-subscribe{display:inline-flex;align-items:center;gap:9px;background:var(--xrv-subscribe,#00AA77);color:#fff !important;text-decoration:none !important;font-family:inherit;font-size:14px;font-weight:600;padding:12px 22px;border-radius:5px;transition:background .15s ease}
+.xrv-subscribe{display:inline-flex;align-items:center;gap:9px;background:var(--xrv-subscribe,#00AA77);color:#fff !important;text-decoration:none !important;font-family:inherit;font-size:14px;font-weight:var(--xrv-button-weight,600);padding:12px 22px;border-radius:5px;transition:background .15s ease}
 .xrv-subscribe:hover{background:var(--xrv-action,#007A53);text-decoration:none !important}
 .xrv-subscribe:focus-visible{outline:3px solid rgba(1,154,179,.5);outline-offset:2px}
 .xrv-yt{width:22px;height:22px;flex:0 0 auto;vertical-align:-5px}
+.xrv--yt-mono .xrv-yt{--xrv-yt-body:currentColor;--xrv-yt-play:transparent;--xrv-yt-rule:evenodd}
 /* Lightbox modal. UNSCOPED on purpose: the overlay is appended to <body>, outside the .xrv wrapper. */
-.xrv-modal{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:24px;font-family:var(--xrv-font, 'Gotham',Helvetica,Arial,sans-serif)}
+.xrv-modal{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:56px 24px 24px;font-family:var(--xrv-font, 'Gotham',Helvetica,Arial,sans-serif)}
 .xrv-modal[hidden]{display:none}
 .xrv-modal__backdrop{position:absolute;inset:0;background:rgba(8,16,28,.85)}
-.xrv-modal__dialog{position:relative;width:100%;max-width:1100px;display:flex;flex-direction:column;max-height:calc(100vh - 56px)}
+.xrv-modal__dialog{position:relative;width:100%;max-width:min(1100px,calc((100vh - 80px) * 16 / 9));max-width:min(1100px,calc((100dvh - 80px) * 16 / 9));display:flex;flex-direction:column;max-height:calc(100vh - 80px);max-height:calc(100dvh - 80px)}
+.xrv-modal--has-caption .xrv-modal__dialog{max-width:min(1100px,max(320px,calc((100vh - 216px) * 16 / 9)));max-width:min(1100px,max(320px,calc((100dvh - 216px) * 16 / 9)))}
 .xrv-modal__frame{position:relative;width:100%;flex:none;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.55)}
 .xrv-modal--has-caption .xrv-modal__dialog{filter:drop-shadow(0 24px 70px rgba(0,0,0,.55))}
 .xrv-modal--has-caption .xrv-modal__frame{border-radius:8px 8px 0 0;box-shadow:none}
@@ -1652,8 +2178,10 @@ function xrv_inline_css() {
 .xrv-modal__head{border-bottom:1px solid #e6e6eb;padding-bottom:13px;margin-bottom:14px}
 .xrv-modal__title{margin:0 0 4px;font-size:20px;line-height:1.3;font-weight:700;color:var(--xrv-primary,#16263a)}
 .xrv-modal__meta{font-size:13px;color:#5a6b7b}
-.xrv-modal__desc{font-size:14px;line-height:1.55;color:#3c4a57;white-space:pre-line;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden}
-.xrv-modal__desc.is-open{-webkit-line-clamp:unset;display:block;overflow:visible}
+.xrv-modal__desc{font-size:14px;line-height:1.55;color:#3c4a57;white-space:pre-line;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden}
+.xrv-modal__desc.is-open,.xrv-modal__desc--full{-webkit-line-clamp:unset;display:block;overflow:visible}
+.xrv-modal__page{display:inline-block;margin-top:7px;font-size:13px;font-weight:600;color:var(--xrv-link,#017A8E);text-decoration:underline;text-underline-offset:2px}
+.xrv-modal__page:focus-visible{outline:2px solid var(--xrv-accent,#019AB3);outline-offset:2px}
 .xrv-modal__more{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:12px;padding:8px 12px;font-family:inherit;font-size:13px;font-weight:600;color:var(--xrv-primary,#16263a);background:#f3f4f5;border:0;border-radius:8px;cursor:pointer}
 .xrv-modal__more:hover{background:#eceef0}
 .xrv-modal__more:focus-visible{outline:2px solid var(--xrv-accent,#019AB3);outline-offset:2px}
@@ -1661,13 +2189,45 @@ function xrv_inline_css() {
 .xrv-modal__more.is-open svg{transform:rotate(180deg)}
 .xrv-modal__frame .xrv-iframe,.xrv-modal__frame .xrv-video{position:absolute;inset:0;width:100%;height:100%;aspect-ratio:auto;border-radius:8px}
 .xrv-modal--short .xrv-modal__dialog{max-width:none;width:auto;display:flex;flex-direction:row;align-items:center;justify-content:center}
-.xrv-modal--short .xrv-modal__frame{aspect-ratio:9/16;width:auto;height:min(86vh,760px);max-width:94vw}
+.xrv-modal--short .xrv-modal__frame{aspect-ratio:9/16;width:auto;height:min(calc(100vh - 80px),760px);height:min(calc(100dvh - 80px),760px);max-width:94vw}
 .xrv-modal__frame iframe,.xrv-modal__frame video{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}
 .xrv-modal__close{position:absolute;top:-46px;right:0;width:38px;height:38px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.55);color:#fff;border-radius:50%;cursor:pointer;font-size:18px;line-height:1;padding:0}
 .xrv-modal__close:hover{background:rgba(255,255,255,.28)}
 .xrv-modal__close:focus-visible{outline:3px solid var(--xrv-accent,#019AB3);outline-offset:2px}
 body.xrv-modal-open{overflow:hidden}
-@media (max-width:600px){.xrv-modal{padding:14px}.xrv-modal__close{top:-42px}.xrv-modal__caption{padding:14px 16px 16px}.xrv-modal__title{font-size:18px;line-height:1.25}}
+@media (max-width:600px){.xrv-modal{padding:52px 14px 14px}.xrv-modal__close{top:-42px}.xrv-modal__caption{padding:14px 16px 16px}.xrv-modal__title{font-size:18px;line-height:1.25}}
+/* Landscape phones (844x390): the player takes the full height and the caption becomes a scrollable
+   column beside it; the close button moves to the right-hand margin. */
+@media (orientation:landscape) and (max-height:520px){
+	.xrv-modal{padding:12px 60px 12px 12px}
+	.xrv-modal__dialog,.xrv-modal--has-caption .xrv-modal__dialog{max-width:min(calc(100vw - 72px),calc((100vh - 24px) * 16 / 9));max-width:min(calc(100vw - 72px),calc((100dvh - 24px) * 16 / 9));max-height:calc(100vh - 24px);max-height:calc(100dvh - 24px)}
+	.xrv-modal--has-caption .xrv-modal__dialog{flex-direction:row;max-width:calc(100vw - 72px)}
+	.xrv-modal--has-caption .xrv-modal__frame{width:min(calc(100vw - 292px),calc((100vh - 24px) * 16 / 9));width:min(calc(100vw - 292px),calc((100dvh - 24px) * 16 / 9));border-radius:8px 0 0 8px;align-self:center}
+	.xrv-modal--has-caption .xrv-modal__caption{flex:1 1 0;min-width:0;border-radius:0 8px 8px 0;padding:12px 14px}
+	.xrv-modal__close{top:0;right:-48px}
+	.xrv-modal__title{font-size:16px}
+}
+/* 2.11.0 hover styles. Zoom is the base rules above. Dim and None neutralise them on every device (so a
+   touch tap never leaves a zoomed card behind); Dim's overlay fades in on hover for hover-capable pointers
+   and on keyboard focus everywhere. The play colour stays the idle colour for both. */
+.xrv--hover-dim .xrv-facade::before{content:"";position:absolute;inset:0;z-index:1;background:rgba(0,0,0,.6);opacity:0;transition:opacity .2s ease;pointer-events:none}
+.xrv--hover-dim .xrv-play,.xrv--hover-dim .xrv-dur{z-index:2}
+.xrv--hover-dim .xrv-play{transition:opacity .2s ease}
+.xrv--hover-dim .xrv-facade:hover .xrv-thumb,.xrv--hover-none .xrv-facade:hover .xrv-thumb{transform:none;opacity:1}
+.xrv--hover-dim .xrv-facade:hover .xrv-play,.xrv--hover-none .xrv-facade:hover .xrv-play{transform:translate(-50%,-50%)}
+.xrv--hover-dim .xrv-facade:hover .xrv-play__bg,.xrv--hover-none .xrv-facade:hover .xrv-play__bg,.xrv--hover-dim .xrv-facade:focus-visible .xrv-play__bg,.xrv--hover-none .xrv-facade:focus-visible .xrv-play__bg{fill:var(--xrv-play,var(--xrv-primary,#013C60));fill-opacity:.92}
+@media (hover:hover){
+	.xrv--hover-dim .xrv-facade:hover::before{opacity:1}
+	.xrv--hover-dim .xrv-facade:hover .xrv-play{opacity:.5}
+}
+.xrv--hover-dim .xrv-facade:focus-visible::before{opacity:1}
+.xrv--hover-dim .xrv-facade:focus-visible .xrv-play{opacity:.5}
+.xrv--nodur .xrv-dur{display:none}
+@media (prefers-reduced-motion:reduce){
+	.xrv-thumb,.xrv-play,.xrv-play__bg,.xrv-facade::before,.xrv-caro-track,.xrv-page-link .xrv-ic,.xrv-modal__more svg,.xrv-chip,.xrv-loadmore,.xrv-subscribe{transition:none !important}
+	.xrv-facade:hover .xrv-thumb{transform:none !important}
+	.xrv-facade:hover .xrv-play{transform:translate(-50%,-50%) !important}
+}
 /* Shorts shelf: shorts="only" lays the verticals out as a horizontal, thumb-swipeable scroll-snap strip. */
 .xrv-grid--shelf{display:flex;gap:16px;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;padding-bottom:12px;scrollbar-width:thin}
 .xrv-grid--shelf::-webkit-scrollbar{height:8px}
@@ -1679,7 +2239,6 @@ CSS;
 
 function xrv_inline_js() {
 	return <<<'JS'
-<script>
 (function(){
 	/* ---- Shared lightbox modal (one per page, lazy, appended to <body>) ---- */
 	function xrvGetModal(){
@@ -1700,40 +2259,53 @@ function xrv_inline_js() {
 		return m;
 	}
 	var xrvLastFocus = null;
-	// The optional details panel under the player: title + relative date + a description that opens with a
-	// "Description" toggle (a watch-page-style caption). Built from the card's data-* attributes, text-only.
-	function xrvBuildCaption(title, when, desc){
+	var xrvPreconnected = {}; // host => 1: one preconnect per host per page (opt-in, see initRoot)
+	// The optional details panel under the player: title + relative date + an optional "Open video page" link
+	// + the description, either in full or collapsed to four lines behind Show more / Show less. Built from
+	// the card's data-* attributes, text-only; the labels come from the gallery root (translatable).
+	function xrvBuildCaption(info){
+		var t = info.i18n || {};
 		var cap = document.createElement('div'); cap.className = 'xrv-modal__caption';
 		var head = document.createElement('div'); head.className = 'xrv-modal__head';
-		var h = document.createElement('h2'); h.className = 'xrv-modal__title'; h.textContent = title || ''; head.appendChild(h);
-		if(when){ var mt = document.createElement('div'); mt.className = 'xrv-modal__meta'; mt.textContent = when; head.appendChild(mt); }
+		var h = document.createElement('h2'); h.className = 'xrv-modal__title'; h.textContent = info.title || ''; head.appendChild(h);
+		if(info.when){ var mt = document.createElement('div'); mt.className = 'xrv-modal__meta'; mt.textContent = info.when; head.appendChild(mt); }
+		if(info.pageUrl){ var pl = document.createElement('a'); pl.className = 'xrv-modal__page'; pl.href = info.pageUrl; pl.textContent = t.page || 'Open video page'; head.appendChild(pl); }
 		cap.appendChild(head);
-		if(desc){
-			var d = document.createElement('div'); d.className = 'xrv-modal__desc'; d.textContent = desc; cap.appendChild(d);
-			var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'xrv-modal__more'; btn.setAttribute('aria-expanded', 'false');
-			btn.innerHTML = '<span>Description</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-			btn.addEventListener('click', function(){ var ex = d.classList.toggle('is-open'); btn.classList.toggle('is-open', ex); btn.setAttribute('aria-expanded', ex ? 'true' : 'false'); });
-			cap.appendChild(btn);
+		if(info.desc){
+			var full = (info.descMode === 'full');
+			var d = document.createElement('div'); d.className = 'xrv-modal__desc' + (full ? ' xrv-modal__desc--full' : ''); d.textContent = info.desc; cap.appendChild(d);
+			if(!full){
+				var more = t.more || 'Show more', less = t.less || 'Show less';
+				var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'xrv-modal__more'; btn.setAttribute('aria-expanded', 'false');
+				btn.innerHTML = '<span></span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+				var lbl = btn.querySelector('span'); lbl.textContent = more;
+				btn.addEventListener('click', function(){ var ex = d.classList.toggle('is-open'); btn.classList.toggle('is-open', ex); btn.setAttribute('aria-expanded', ex ? 'true' : 'false'); lbl.textContent = ex ? less : more; });
+				cap.appendChild(btn);
+			}
 		}
 		return cap;
 	}
-	function xrvOpenModal(node, title, isShort, when, desc, showDetails){
+	function xrvOpenModal(node, info){
+		info = info || {};
+		var title = info.title || '', isShort = !!info.isShort;
 		var m = xrvGetModal();
-		m.classList.toggle('xrv-modal--short', !!isShort);
+		m.classList.toggle('xrv-modal--short', isShort);
 		var dlg = m.querySelector('.xrv-modal__dialog');
 		var frame = m.querySelector('.xrv-modal__frame');
 		frame.innerHTML = '';
 		frame.appendChild(node);
 		var oldCap = dlg.querySelector('.xrv-modal__caption'); if(oldCap){ oldCap.parentNode.removeChild(oldCap); }
 		// Shorts stay player-only (a 9:16 tower + caption would overflow); the caption is a desktop/landscape device.
-		var hasCap = !!(showDetails && !isShort && (title || desc || when));
-		if(hasCap){ dlg.appendChild(xrvBuildCaption(title, when, desc)); }
+		var hasCap = !!(info.details && !isShort && (title || info.desc || info.when));
+		if(hasCap){ dlg.appendChild(xrvBuildCaption(info)); }
 		m.classList.toggle('xrv-modal--has-caption', hasCap);
 		m.setAttribute('aria-label', title || 'Video player');
+		// The close button's accessible name is set on EVERY open (galleries on one page may differ in language).
+		var cl = m.querySelector('.xrv-modal__close'); if(cl){ cl.setAttribute('aria-label', (info.i18n && info.i18n.close) || 'Close video'); }
 		xrvLastFocus = document.activeElement;
 		m.removeAttribute('hidden');
 		document.body.classList.add('xrv-modal-open');
-		// Drop the "Description" toggle when the text already fits (nothing to expand) — measured post-layout.
+		// Drop the Show more toggle when the text already fits (nothing to expand), measured post-layout.
 		if(hasCap){ var dd = dlg.querySelector('.xrv-modal__desc'), more = dlg.querySelector('.xrv-modal__more'); if(dd && more && dd.scrollHeight <= dd.clientHeight + 1){ more.style.display = 'none'; } }
 		var c = m.querySelector('.xrv-modal__close'); if(c) c.focus();
 	}
@@ -1800,6 +2372,9 @@ function xrv_inline_js() {
 			return (playbackMode === 'inline') ? 'inline' : 'lightbox';
 		}
 		var lbDetails = ROOT.getAttribute('data-lb-details') !== '0'; // show title/date/description inside the lightbox
+		var lbDesc = ROOT.getAttribute('data-lb-desc') === 'full' ? 'full' : 'collapsed'; // 2.11.0
+		var lbLink = ROOT.getAttribute('data-lb-link') === '1';                           // 2.11.0: "Open video page"
+		var i18n = { more: ROOT.getAttribute('data-i18n-more'), less: ROOT.getAttribute('data-i18n-less'), page: ROOT.getAttribute('data-i18n-page'), close: ROOT.getAttribute('data-i18n-close') };
 
 		// ---- Informed-consent notice (consent_notice = off | strict | geo) ----
 		// The facade still makes ZERO third-party requests until a click. This only governs whether an
@@ -1851,15 +2426,15 @@ function xrv_inline_js() {
 			var titleEl = card.querySelector('.xrv-title');
 			var title = titleEl ? titleEl.textContent.trim() : 'Video player';
 			var short = !!card.dataset.short;
-			var when = card.getAttribute('data-when') || '';
-			var desc = card.getAttribute('data-desc') || '';
+			var titleLink = card.querySelector('.xrv-title-link');
+			var info = { title:title, isShort:short, when:(card.getAttribute('data-when') || ''), desc:(card.getAttribute('data-desc') || ''), details:lbDetails, descMode:lbDesc, pageUrl:((lbLink && titleLink) ? titleLink.href : ''), i18n:i18n };
 			var node = xrvEmbedNode(provider, id, hash, title, short);
 			if(effectivePlayback() === 'inline'){
 				var frame = (btn && btn.closest) ? (btn.closest('.xrv-frame') || btn.parentNode) : card.querySelector('.xrv-frame');
 				if(btn && btn.replaceWith){ btn.replaceWith(node); } else if(frame){ frame.appendChild(node); }
 				if(frame && frame.style){ frame.style.lineHeight = '0'; }
 			} else {
-				xrvOpenModal(node, title, short, when, desc, lbDetails); /* shorts pop in a 9:16 portrait modal (no caption) */
+				xrvOpenModal(node, info); /* shorts pop in a 9:16 portrait modal (no caption) */
 			}
 			window.dataLayer = window.dataLayer || [];
 			window.dataLayer.push({ event:'video_play', video_provider:provider, video_id:id, video_title:title, video_series:(card.getAttribute('data-series') || '').split(' ')[0] });
@@ -1882,31 +2457,51 @@ function xrv_inline_js() {
 			}
 			var btn = e.target && e.target.closest ? e.target.closest('.xrv-facade') : null;
 			if(!btn) return;
+			// thumb_link = watch: the poster is a real link. A plain primary click plays (the navigation is
+			// cancelled here, before the consent check); Ctrl/Cmd/Shift/Alt-click and the middle button
+			// keep the browser's own link behaviour (new tab, new window).
+			if(btn.tagName === 'A'){
+				if(e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+				e.preventDefault();
+			}
 			var card = btn.closest('.xrv-card'); if(!card) return;
 			if(consentRequiredNow() && card.dataset.xrvConsented !== '1'){ showConsentOverlay(card); return; }
 			playCard(card, btn);
 		});
+		// Space plays a linked poster too (a link only answers Enter natively); Enter fires a plain click.
+		ROOT.addEventListener('keydown', function(e){
+			if(e.key !== ' ' && e.key !== 'Spacebar') return;
+			var a = e.target && e.target.closest ? e.target.closest('a.xrv-facade') : null;
+			if(!a) return;
+			e.preventDefault();
+			a.click();
+		});
 
-		// Mask post-click load latency: preconnect on first hover/focus, once per card. SUPPRESSED whenever a
-		// consent gate is required for this view (strict always; geo for EU/UK/EEA) — so a gated visitor's
-		// browser makes ZERO contact with YouTube (not even a DNS/TLS warm-up) until they accept.
-		function preconnect(card){
-			if(consentRequiredNow()) return;
-			if(card.dataset.xrvPre) return;
-			card.dataset.xrvPre = '1';
-			var provider = card.getAttribute('data-provider') || 'youtube';
-			var hosts = { youtube:'https://www.youtube-nocookie.com', vimeo:'https://player.vimeo.com', wistia:'https://fast.wistia.net', loom:'https://www.loom.com', dailymotion:'https://www.dailymotion.com', tiktok:'https://www.tiktok.com' };
-			var host = hosts[provider];
-			if(!host) return; // self-hosted files: nothing third-party to warm up
-			var l = document.createElement('link'); l.rel = 'preconnect'; l.href = host;
-			document.head.appendChild(l);
+		// Optional warm-up (2.11.0: OFF unless the root says data-preconnect="1"). A preconnect opens a DNS +
+		// TLS connection to the video host, which is contact with that host before any click, so the hover /
+		// focus listeners are not even bound by default, never under Strict consent, and the handler re-checks
+		// the geo answer so a consent-gated visitor's browser makes ZERO contact until they accept. One <link>
+		// per host per page, however many cards or galleries there are.
+		if(ROOT.getAttribute('data-preconnect') === '1' && consentMode !== 'strict'){
+			var preconnect = function(card){
+				if(consentRequiredNow()) return;
+				var provider = card.getAttribute('data-provider') || 'youtube';
+				var hosts = { youtube:'https://www.youtube-nocookie.com', vimeo:'https://player.vimeo.com', wistia:'https://fast.wistia.net', loom:'https://www.loom.com', dailymotion:'https://www.dailymotion.com', tiktok:'https://www.tiktok.com' };
+				var host = hosts[provider];
+				if(!host || xrvPreconnected[host]) return; // self-hosted files: nothing third-party to warm up
+				xrvPreconnected[host] = 1;
+				var l = document.createElement('link'); l.rel = 'preconnect'; l.href = host;
+				document.head.appendChild(l);
+			};
+			ROOT.addEventListener('mouseover', function(e){ var c = e.target && e.target.closest ? e.target.closest('.xrv-card') : null; if(c) preconnect(c); });
+			ROOT.addEventListener('focusin', function(e){ var c = e.target && e.target.closest ? e.target.closest('.xrv-card') : null; if(c) preconnect(c); });
 		}
-		ROOT.addEventListener('mouseover', function(e){ var c = e.target && e.target.closest ? e.target.closest('.xrv-card') : null; if(c) preconnect(c); });
-		ROOT.addEventListener('focusin', function(e){ var c = e.target && e.target.closest ? e.target.closest('.xrv-card') : null; if(c) preconnect(c); });
 
 		// ---- Featured carousel (paged, 3/2/1 per view, arrows + dots) ----
+		// try/catch (2.11.0): an error here must never stop the browse-grid init below, which is what
+		// reveals the cards the server printed with `hidden`.
 		var caro = ROOT.querySelector('.xrv-carousel');
-		if(caro){
+		if(caro){ try {
 			var track = caro.querySelector('.xrv-caro-track');
 			var ccards = track ? Array.prototype.slice.call(track.children) : [];
 			var cprev = caro.querySelector('.xrv-caro-prev');
@@ -1929,11 +2524,14 @@ function xrv_inline_js() {
 			if(cnext) cnext.addEventListener('click', function(){ if(page<pageCount()-1){ page++; renderCaro(); } });
 			var crt; window.addEventListener('resize', function(){ clearTimeout(crt); crt = setTimeout(renderCaro, 150); });
 			renderCaro();
-		}
+		} catch(err){ if(window.console && console.error) console.error('XRV carousel', err); } }
 
 		// ---- Browse grid: filter / search / sort (only when the controls + grid are present) ----
 		var grid = ROOT.querySelector('.xrv-grid');
 		if(grid){
+			// The server prints cards past per_page with `hidden` (a no-JS / delayed-JS fallback); from here
+			// the script owns visibility, so clear it before the first apply().
+			Array.prototype.forEach.call(grid.querySelectorAll('.xrv-card[hidden]'), function(c){ c.removeAttribute('hidden'); });
 			var cards = Array.prototype.slice.call(grid.querySelectorAll('.xrv-card'));
 			var shownEl = ROOT.querySelector('.xrv-shown');
 			var totalEl = ROOT.querySelector('.xrv-total');
@@ -1945,14 +2543,29 @@ function xrv_inline_js() {
 			var loadStep = parseInt(grid.getAttribute('data-loadstep'), 10) || 3;
 			var visibleLimit = pageSize;
 			var origOrder = cards.slice();
-			var state = { q:'', series:[], audience:[], topic:[], sort:'curated' };
+			// The gallery's own order (orderby) is the starting sort; the DOM already holds it exactly (with the
+			// server's publish-time and ID tie-breaks), and Reset returns to it.
+			var seed = ROOT.getAttribute('data-sort') || 'curated';
+			var state = { q:'', series:[], audience:[], topic:[], sort:seed };
+			var num = function(el, a){ return +(el.getAttribute(a) || 0); };
 
 			var groupVals = function(card, g){ return (card.getAttribute('data-'+g) || '').split(' ').filter(Boolean); };
 			var matchGroup = function(g, card){ if(state[g].length === 0) return true; var vals = groupVals(card, g); return state[g].some(function(v){ return vals.indexOf(v) > -1; }); };
 			var matchSearch = function(card){ if(!state.q) return true; return (card.getAttribute('data-search') || '').indexOf(state.q) > -1; };
-			var cmp = function(a, b){ var s = state.sort; if(s==='newest') return (+b.getAttribute('data-date'))-(+a.getAttribute('data-date')); if(s==='oldest') return (+a.getAttribute('data-date'))-(+b.getAttribute('data-date')); if(s==='title') return a.getAttribute('data-title').localeCompare(b.getAttribute('data-title')); if(s==='short') return (+a.getAttribute('data-seconds'))-(+b.getAttribute('data-seconds')); if(s==='long') return (+b.getAttribute('data-seconds'))-(+a.getAttribute('data-seconds')); return 0; };
+			// Ties break on the server position (data-pos), so equal dates keep the curated order instead of
+			// whatever the browser's sort leaves; "curated" uses the curated rank (data-cpos).
+			var cmp = function(a, b){
+				var s = state.sort, r = 0;
+				if(s==='newest') r = num(b,'data-date') - num(a,'data-date');
+				else if(s==='oldest') r = num(a,'data-date') - num(b,'data-date');
+				else if(s==='title') r = (a.getAttribute('data-title') || '').localeCompare(b.getAttribute('data-title') || '');
+				else if(s==='short') r = num(a,'data-seconds') - num(b,'data-seconds');
+				else if(s==='long') r = num(b,'data-seconds') - num(a,'data-seconds');
+				else if(s==='curated') r = num(a, a.hasAttribute('data-cpos') ? 'data-cpos' : 'data-pos') - num(b, b.hasAttribute('data-cpos') ? 'data-cpos' : 'data-pos');
+				return r || (num(a,'data-pos') - num(b,'data-pos'));
+			};
 			var apply = function(){
-				var ordered = (state.sort === 'curated') ? origOrder.slice() : cards.slice().sort(cmp);
+				var ordered = (state.sort === seed) ? origOrder.slice() : cards.slice().sort(cmp);
 				ordered.forEach(function(c){ grid.appendChild(c); });
 				var matched = 0, visible = 0;
 				ordered.forEach(function(c){
@@ -1993,9 +2606,9 @@ function xrv_inline_js() {
 			if(loadMoreBtn) loadMoreBtn.addEventListener('click', function(){ visibleLimit += loadStep; apply(); });
 			var resetBtn = ROOT.querySelector('.xrv-reset');
 			if(resetBtn) resetBtn.addEventListener('click', function(){
-				state = { q:'', series:[], audience:[], topic:[], sort:'curated' };
+				state = { q:'', series:[], audience:[], topic:[], sort:seed };
 				if(qEl) qEl.value = '';
-				if(sortEl) sortEl.value = 'curated';
+				if(sortEl) sortEl.value = seed;
 				ROOT.querySelectorAll('.xrv-chip').forEach(function(x){ x.setAttribute('aria-pressed','false'); });
 				ROOT.querySelectorAll('.xrv-fsel').forEach(function(x){ x.value=''; x.setAttribute('data-active','0'); });
 				resetVisible(); apply();
@@ -2008,7 +2621,6 @@ function xrv_inline_js() {
 	if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
 	else init();
 })();
-</script>
 JS;
 }
 
@@ -2061,6 +2673,10 @@ function xrv_register_block() {
 			'subscribe_url' => $str, 'subscribe_label' => $str, 'consent_notice' => $str, 'consent_text' => $str,
 			'consent_button' => $str, 'consent_decline' => $str, 'privacy_url' => $str, 'series' => $str, 'audience' => $str, 'topic' => $str, 'limit' => $str,
 			'collection' => $str, 'ids' => $str, // 2.9.0: render a saved Collection by slug, or an explicit ordered id list
+			// 2.11.0 display options ('' = site default; booleans are 'true' / 'false').
+			'orderby' => $str, 'hover_style' => $str, 'card_align' => $str, 'card_date' => $str, 'desc_chars' => $str,
+			'show_duration' => $str, 'subscribe_icon' => $str, 'lightbox_desc' => $str, 'lightbox_page_link' => $str,
+			'thumb_link' => $str, 'preconnect' => $str,
 		),
 	) );
 }
@@ -2083,7 +2699,12 @@ function xrv_block_editor_js() {
 		edit: function(props){
 			var a = props.attributes, set = props.setAttributes;
 			var f = function(k){ return function(v){ var o={}; o[k]=v; set(o); }; };
-			var num = function(k, def){ return function(v){ var o={}; o[k]=String(v); set(o); }; };
+			// 0 on a range control means "site default": store '' (2.10.0 stored '0', which rendered one card per page).
+			var num = function(k){ return function(v){ var o={}; o[k] = (v && v > 0) ? String(v) : ''; set(o); }; };
+			// Every 2.11.0 control is a select whose first option, '', inherits the site setting.
+			var DEF = {label:'Site default', value:''};
+			var pick = function(k, label, opts, help){ return el(SelectControl, { label:label, help:help, value:a[k]||'', options:[DEF].concat(opts), onChange:f(k) }); };
+			var onOff = function(k, label, onLabel, offLabel, help){ return pick(k, label, [ {label:onLabel, value:'true'}, {label:offLabel, value:'false'} ], help); };
 			var controlsOn = (a.controls !== 'false');
 			return el(Fragment, {},
 				el(InspectorControls, {},
@@ -2099,7 +2720,9 @@ function xrv_block_editor_js() {
 							{label:'Lightbox on desktop, inline on mobile', value:'lightbox-desktop'},
 							{label:'Lightbox on mobile, inline on desktop', value:'lightbox-mobile'},
 							{label:'Inline — all devices', value:'inline'} ], onChange:f('playback') }),
-						el(ToggleControl, { label:'Show details in lightbox', help:'Title, date & a collapsible description below the player (lightbox only).', checked:(a.lightbox_details !== 'false' && a.lightbox_details !== '0'), onChange:function(v){ set({lightbox_details: v?'true':'false'}); } }),
+						onOff('lightbox_details', 'Lightbox details', 'Show title, date & description', 'Player only', 'Shown below the player (lightbox only).'),
+						pick('lightbox_desc', 'Lightbox description', [ {label:'Four lines + Show more', value:'collapsed'}, {label:'Whole description', value:'full'} ]),
+						onOff('lightbox_page_link', 'Lightbox "Open video page" link', 'Show', 'Hide'),
 						el(TextControl, { label:'Fixed columns (blank = responsive)', value:a.columns||'', onChange:f('columns') }),
 						el(TextControl, { label:'Heading (optional)', value:a.heading||'', onChange:f('heading') }),
 						el(ToggleControl, { label:'Show search / sort / filter bar', checked:controlsOn, onChange:function(v){ set({controls: v?'true':'false'}); } })
@@ -2109,8 +2732,19 @@ function xrv_block_editor_js() {
 							{label:'Site default', value:''}, {label:'Show alongside regular', value:'all'}, {label:'Only Shorts (swipe shelf)', value:'only'}, {label:'Hide Shorts', value:'hide'} ], onChange:f('shorts') }),
 						el(RangeControl, { label:'Show before “Load more” (0 = site default)', min:0, max:60, value: parseInt(a.per_page,10)||0, onChange:num('per_page') }),
 						el(RangeControl, { label:'“Load more” step (0 = site default)', min:0, max:24, value: parseInt(a.load_more,10)||0, onChange:num('load_more') }),
+						pick('orderby', 'Order', [ {label:'Curated', value:'curated'}, {label:'Newest first', value:'newest'}, {label:'Oldest first', value:'oldest'}, {label:'Title (A to Z)', value:'title'} ], 'The Sort menu starts here; Reset returns here.'),
+						pick('thumb_link', 'Poster click', [ {label:'Plays the video', value:'none'}, {label:'Plays, and links to the video page', value:'watch'} ]),
 						el(TextControl, { label:'Subscribe URL', value:a.subscribe_url||'', onChange:f('subscribe_url') }),
-						el('p', { style:{ fontSize:'11px', color:'#787c82', margin:'4px 0 0' } }, 'Look, consent, and privacy follow the site defaults in XRV → Settings.')
+						el('p', { style:{ fontSize:'11px', color:'#787c82', margin:'4px 0 0' } }, 'Consent and privacy follow the site defaults in XRV → Settings.')
+					),
+					el(PanelBody, { title:'Card look', initialOpen:false },
+						pick('hover_style', 'Hover effect', [ {label:'Zoom', value:'zoom'}, {label:'Dim', value:'dim'}, {label:'None', value:'none'} ]),
+						pick('card_align', 'Text alignment', [ {label:'Automatic (grid left, carousel centred)', value:'auto'}, {label:'Left', value:'left'}, {label:'Centred', value:'center'} ]),
+						onOff('card_date', 'Upload date on cards', 'Show', 'Hide'),
+						onOff('show_duration', 'Duration badge', 'Show', 'Hide'),
+						el(TextControl, { label:'Trim descriptions to N characters', help:'Blank = site default, 0 = no trim. The lightbox keeps the full text.', type:'number', min:0, value:(a.desc_chars===undefined?'':a.desc_chars), onChange:f('desc_chars') }),
+						pick('subscribe_icon', 'Subscribe icon', [ {label:'YouTube red', value:'brand'}, {label:'Button text colour', value:'mono'} ]),
+						onOff('preconnect', 'Warm-up on hover', 'On (contacts the host on hover)', 'Off', 'Off keeps zero contact with the video host before a click.')
 					),
 					el(PanelBody, { title:'Pre-filter to terms (optional)', initialOpen:false },
 						el(TextControl, { label:'Series slugs (comma-separated)', value:a.series||'', onChange:f('series') }),
@@ -2148,35 +2782,146 @@ JS;
 
 add_action( 'template_redirect', 'xrv_single_redirect' );
 function xrv_single_redirect() {
-	if ( ! is_singular( 'xroad_video' ) ) {
+	if ( ! is_singular( 'xroad_video' ) || is_embed() ) {
+		return; // 2.11.0: an oEmbed iframe always renders the video itself, never a redirect.
+	}
+	$pid = get_queried_object_id();
+	// 2.11.0: an editor's preview renders here too. WP_Query flags ANY ?preview= request as a preview, so
+	// the bypass also needs the right to edit this video; a public ?preview=true still redirects.
+	if ( is_preview() && current_user_can( 'edit_post', $pid ) ) {
 		return;
 	}
-	$pid  = get_queried_object_id();
-	$dest = (string) get_post_meta( $pid, '_xrv_dedicated_url', true );
-	if ( $dest !== '' ) {
-		$status = (int) apply_filters( 'xrv_dedicated_redirect_status', 301 );
-		wp_redirect( esc_url_raw( $dest ), $status );
-		exit;
+	$dest = xrv_dedicated_target( $pid );
+	// A dedicated URL that is this very page (its own permalink, or the address just requested) is ignored:
+	// redirecting to it would loop. That happens once the video base moves to where the dedicated pages lived.
+	if ( '' !== $dest && ! xrv_is_same_url( $dest, xrv_current_request_url() ) && ! xrv_is_same_url( $dest, (string) get_permalink( $pid ) ) ) {
+		$s        = xrv_get_settings();
+		$fallback = ( 302 === (int) $s['dedicated_status'] ) ? 302 : 301; // Settings > Dedicated URL redirect (2.10.0: always 301)
+		$status   = xrv_redirect_status( apply_filters( 'xrv_dedicated_redirect_status', $fallback, $pid ), $fallback );
+		if ( xrv_send_redirect( $dest, $status ) ) {
+			exit;
+		}
 	}
 	// Watch page turned off (explicit '0'): there is no standalone page for this video, so a direct hit
 	// goes home rather than serving a thin orphan. Default (absent/'1') renders the watch page as normal.
-	// ponytail: 302 to home is the lazy "no page"; switch the filter to a 404 if you'd rather de-index hard.
+	// ponytail: 302 to home is the lazy "no page"; return 404 (or 410) from xrv_watch_page_off_status to
+	// de-index hard instead: that serves the theme's 404 template with that status, no redirect.
 	if ( '0' === (string) get_post_meta( $pid, '_xrv_watch_page', true ) ) {
-		wp_redirect( apply_filters( 'xrv_watch_page_off_url', home_url( '/' ), $pid ), (int) apply_filters( 'xrv_watch_page_off_status', 302 ) );
-		exit;
+		$to     = esc_url_raw( (string) apply_filters( 'xrv_watch_page_off_url', home_url( '/' ), $pid ) );
+		$status = apply_filters( 'xrv_watch_page_off_status', 302, $pid );
+		if ( in_array( (int) $status, array( 404, 410 ), true ) ) {
+			global $wp_query;
+			$wp_query->set_404();
+			status_header( (int) $status );
+			nocache_headers();
+			return;
+		}
+		if ( xrv_send_redirect( '' !== $to ? $to : home_url( '/' ), xrv_redirect_status( $status, 302 ) ) ) {
+			exit;
+		}
 	}
 }
 
-add_filter( 'the_content', 'xrv_single_content' );
+/* 2.11.0: a video's dedicated URL as a redirect target ('' when none). A site-relative value ("/path/") is
+ * resolved with home_url(); a protocol-relative "//host/path" is left alone. */
+function xrv_dedicated_target( $pid ) {
+	$raw = trim( (string) get_post_meta( $pid, '_xrv_dedicated_url', true ) );
+	if ( '' === $raw ) {
+		return '';
+	}
+	if ( '/' === $raw[0] && '/' !== substr( $raw, 1, 1 ) ) {
+		$raw = home_url( $raw );
+	}
+	return esc_url_raw( $raw );
+}
+
+/* 2.11.0: keep a (filtered) redirect status to a real redirect code: 301, 302, 307 or 308. Anything else
+ * (a 200, a string, a 404 from an old filter) falls back to $fallback. */
+function xrv_redirect_status( $status, $fallback ) {
+	$status = is_numeric( $status ) ? (int) $status : 0;
+	return in_array( $status, array( 301, 302, 307, 308 ), true ) ? $status : (int) $fallback;
+}
+
+/* 2.11.0: send an XRV redirect. Temporary codes (302 / 307) also send no-cache headers so neither browsers
+ * nor page caches keep them; X-Redirect-By names XRV (wp_redirect's third argument, WP 5.1+; older WP
+ * ignores the extra argument). Returns false when wp_redirect() refused (empty or filtered-out target). */
+function xrv_send_redirect( $url, $status ) {
+	if ( 302 === $status || 307 === $status ) {
+		nocache_headers();
+	}
+	return (bool) wp_redirect( $url, $status, 'XRV' );
+}
+
+/* 2.11.0: the address of the current request, for comparison only (never output or redirected to). */
+function xrv_current_request_url() {
+	// phpcs:disable WordPress.Security.ValidatedSanitizedInput -- compared against stored URLs only.
+	$host = isset( $_SERVER['HTTP_HOST'] ) ? (string) wp_unslash( $_SERVER['HTTP_HOST'] ) : (string) wp_parse_url( home_url(), PHP_URL_HOST );
+	$uri  = isset( $_SERVER['REQUEST_URI'] ) ? (string) wp_unslash( $_SERVER['REQUEST_URI'] ) : '/';
+	// phpcs:enable
+	return ( is_ssl() ? 'https://' : 'http://' ) . $host . $uri;
+}
+
+/* 2.11.0: do two URLs point at the same page? Compared without the scheme, with the host lowercased,
+ * default ports (80 / 443) dropped, the path decoded, lowercased and given one trailing slash, the query
+ * arguments in sorted order, and the fragment ignored. A host-less URL is read against home_url(). The
+ * path is compared case-insensitively on purpose: WordPress answers a mixed-case slug and then
+ * canonical-redirects it, so a case-only difference must count as "same" or the redirect would loop. */
+function xrv_is_same_url( $a, $b ) {
+	$na = xrv_normalize_url( $a );
+	return '' !== $na && xrv_normalize_url( $b ) === $na;
+}
+function xrv_normalize_url( $url ) {
+	$url = trim( (string) $url );
+	if ( '' === $url ) {
+		return '';
+	}
+	$p = wp_parse_url( $url );
+	if ( ! is_array( $p ) ) {
+		return '';
+	}
+	if ( empty( $p['host'] ) ) {
+		$home = wp_parse_url( home_url() );
+		$p['host'] = isset( $home['host'] ) ? $home['host'] : '';
+		$p['port'] = isset( $home['port'] ) ? $home['port'] : 0;
+	}
+	$port  = isset( $p['port'] ) ? (int) $p['port'] : 0;
+	$host  = strtolower( $p['host'] ) . ( ( $port && 80 !== $port && 443 !== $port ) ? ':' . $port : '' );
+	$path  = strtolower( rawurldecode( isset( $p['path'] ) ? (string) $p['path'] : '' ) );
+	$path  = '' === trim( $path, '/' ) ? '/' : '/' . trim( $path, '/' ) . '/';
+	$query = array();
+	if ( isset( $p['query'] ) ) {
+		foreach ( explode( '&', (string) $p['query'] ) as $pair ) {
+			if ( '' !== $pair ) {
+				$query[] = rawurldecode( str_replace( '+', ' ', $pair ) );
+			}
+		}
+		sort( $query, SORT_STRING );
+	}
+	return $host . $path . ( $query ? '?' . implode( '&', $query ) : '' );
+}
+
+/* 2.11.0: priority 20, AFTER do_shortcode (11). At the default priority the facade ran first and
+ * do_shortcode then executed any [video src=…] typed into a description: it could load a third party
+ * before the click and corrupted the JSON-LD. The watch page passes its own display settings
+ * (watch_meta / watch_desc); [xroad-video] embeds keep the plain defaults. */
+add_filter( 'the_content', 'xrv_single_content', 20 );
 function xrv_single_content( $content ) {
 	if ( ! is_singular( 'xroad_video' ) || ! in_the_loop() || ! is_main_query() ) {
 		return $content;
 	}
-	return xrv_render_single( get_the_ID() ) . $content;
+	$s = xrv_get_settings();
+	return xrv_render_single( get_the_ID(), 'inline', array( 'meta' => $s['watch_meta'], 'desc' => $s['watch_desc'], 'watch' => true ) ) . $content;
 }
 
-/** Render one video as a self-contained facade block (reusing the grid's assets, card, and schema). */
-function xrv_render_single( $post_id, $playback = 'inline' ) {
+/**
+ * Render one video as a self-contained facade block (reusing the grid's assets, card, and schema).
+ * 2.11.0: $args['meta'] (full | compact | title) and $args['desc'] (plain | rich) are passed by the watch
+ * page from the watch_meta / watch_desc settings; $args['watch'] loads its poster eagerly (it is the page's
+ * LCP image). [xroad-video] embeds call this without $args and keep the 2.10.0 output. The root now carries
+ * the site's consent, preconnect and display settings, like a gallery root.
+ */
+function xrv_render_single( $post_id, $playback = 'inline', $args = array() ) {
+	$args     = array_merge( array( 'meta' => 'full', 'desc' => 'plain', 'watch' => false ), (array) $args );
 	$playback = ( 'lightbox' === $playback ) ? 'lightbox' : 'inline';
 	$provider = (string) get_post_meta( $post_id, '_xrv_provider', true );
 	$provider = $provider !== '' ? $provider : 'youtube';
@@ -2185,8 +2930,13 @@ function xrv_render_single( $post_id, $playback = 'inline' ) {
 		return ''; // nothing to render; leave the post body as-is.
 	}
 
+	$o = xrv_display_opts( array_merge( xrv_get_settings(), array( 'playback' => $playback ) ) );
+	$o['desc_chars'] = 0; // a video's own page (or an embed) always shows the whole description
+	$o['desc_mode']  = ( 'rich' === $args['desc'] ) ? 'rich' : 'plain';
+	$meta = in_array( $args['meta'], array( 'full', 'compact', 'title' ), true ) ? $args['meta'] : 'full';
+
 	$dur_iso  = (string) get_post_meta( $post_id, '_xrv_duration_iso', true );
-	$upload   = (string) get_post_meta( $post_id, '_xrv_upload_date', true );
+	$upload   = xrv_video_ymd( $post_id );
 	$thumb_id = (int) get_post_meta( $post_id, '_xrv_local_thumb_id', true );
 	$poster_ss = xrv_poster_srcset( xrv_effective_thumb_id( $post_id, $thumb_id ) );
 
@@ -2206,6 +2956,7 @@ function xrv_render_single( $post_id, $playback = 'inline' ) {
 		'dur_iso'    => $dur_iso,
 		'dur_clock'  => xrv_iso_to_clock( $dur_iso ),
 		'upload'     => $upload,
+		'ymd'        => $upload,
 		'poster'     => xrv_local_poster_url( $post_id, $thumb_id ),
 		'poster_mobile' => xrv_mobile_poster_url( $post_id ),
 		'poster_srcset' => $poster_ss['srcset'],
@@ -2213,17 +2964,17 @@ function xrv_render_single( $post_id, $playback = 'inline' ) {
 		'series'     => is_wp_error( $series ) ? array() : $series,
 		'audience'   => is_wp_error( $audience ) ? array() : $audience,
 		'topic'      => is_wp_error( $topic ) ? array() : $topic,
-		'date_key'   => $upload !== '' ? (int) preg_replace( '/\D/', '', $upload ) : 0,
+		'date_key'   => $upload !== '' ? (int) str_replace( '-', '', $upload ) : 0,
 		'search'     => '',
 		'is_short'   => xrv_is_short( $post_id ),
 	);
 
 	ob_start();
 	?>
-<div class="xrv xrv--single" data-playback="<?php echo esc_attr( $playback ); ?>">
+<div<?php echo xrv_root_attrs( $o, array( 'xrv--single' ) ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped in xrv_root_attrs ?>>
 	<?php echo xrv_head_assets_once(); ?>
 	<div class="xrv-grid" style="column-count:1">
-		<?php echo xrv_render_card( $r ); ?>
+		<?php echo xrv_render_card( $r, $meta, ! empty( $args['watch'] ), $o ); ?>
 	</div>
 	<?php echo xrv_footer_js_once(); ?>
 </div>
@@ -2318,12 +3069,15 @@ function xrv_render_single_url( $url, $playback = 'inline', $poster_attr = '', $
 		'is_short'   => ( 'tiktok' === $provider ) || ( false !== strpos( $url, '/shorts/' ) ),
 	);
 
+	// 2.11.0: the same root attributes as a gallery (consent mode, preconnect, display settings).
+	$o = xrv_display_opts( array_merge( xrv_get_settings(), array( 'playback' => ( 'lightbox' === $playback ? 'lightbox' : 'inline' ) ) ) );
+
 	ob_start();
 	?>
-<div class="xrv xrv--single" data-playback="<?php echo esc_attr( 'lightbox' === $playback ? 'lightbox' : 'inline' ); ?>">
+<div<?php echo xrv_root_attrs( $o, array( 'xrv--single' ) ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped in xrv_root_attrs ?>>
 	<?php echo xrv_head_assets_once(); ?>
 	<div class="xrv-grid" style="column-count:1">
-		<?php echo xrv_render_card( $r ); ?>
+		<?php echo xrv_render_card( $r, 'full', false, $o ); ?>
 	</div>
 	<?php echo xrv_footer_js_once(); ?>
 </div>
@@ -2392,6 +3146,7 @@ function xrvc_render_build_box( $post ) {
 
 	$ids    = (string) get_post_meta( $post->ID, '_xrvc_video_ids', true );
 	$layout = (string) get_post_meta( $post->ID, '_xrvc_layout', true );
+	$orderby = (string) get_post_meta( $post->ID, '_xrvc_orderby', true ); // 2.11.0
 	$lib    = xrvc_library_for_picker();
 	$capped = count( $lib ) >= 500;
 	$slug   = (string) $post->post_name;
@@ -2403,7 +3158,7 @@ function xrvc_render_build_box( $post ) {
 		echo '<p class="xrvc-empty">No videos in the library yet. Add videos under <strong>XRV Video &rarr; Add</strong>, then build a collection.</p>';
 	} else {
 		echo '<div class="xrvc-cols">';
-		echo '<div class="xrvc-col"><div class="xrvc-col-h">In this collection <span id="xrvc-count" class="xrvc-pill">0</span></div><div id="xrvc-selected" class="xrvc-list xrvc-selected"></div><p class="xrvc-hint">Use the &uarr; &darr; buttons to order. This order is exactly how the gallery renders.</p></div>';
+		echo '<div class="xrvc-col"><div class="xrvc-col-h">In this collection <span id="xrvc-count" class="xrvc-pill">0</span></div><div id="xrvc-selected" class="xrvc-list xrvc-selected"></div><p class="xrvc-hint">Use the &uarr; &darr; buttons to set the curated order. The gallery shows this order when the collection&rsquo;s Order is Curated (below).</p></div>';
 		echo '<div class="xrvc-col"><div class="xrvc-col-h">Add from library</div><input type="search" id="xrvc-search" class="widefat xrvc-search" placeholder="Search videos&hellip;"><div id="xrvc-lib" class="xrvc-list xrvc-lib"></div>' . ( $capped ? '<p class="xrvc-hint">Showing the first 500 videos.</p>' : '' ) . '</div>';
 		echo '</div>';
 	}
@@ -2412,6 +3167,13 @@ function xrvc_render_build_box( $post ) {
 	echo '<p style="margin:14px 0 0"><label for="_xrvc_layout" style="font-weight:600;display:block;margin-bottom:4px">Layout</label><select id="_xrvc_layout" name="_xrvc_layout">';
 	foreach ( array( '' => 'Site default (grid)', 'grid' => 'Grid', 'carousel' => 'Carousel (featured row)', 'library' => 'Library (featured + grid)' ) as $v => $l ) {
 		echo '<option value="' . esc_attr( $v ) . '"' . selected( $layout, $v, false ) . '>' . esc_html( $l ) . '</option>';
+	}
+	echo '</select></p>';
+
+	// 2.11.0: Order. Curated = the hand-picked order above; Newest / Oldest / Title re-sort the same videos.
+	echo '<p style="margin:14px 0 0"><label for="_xrvc_orderby" style="font-weight:600;display:block;margin-bottom:4px">' . esc_html__( 'Order', 'xroad-videos' ) . '</label><select id="_xrvc_orderby" name="_xrvc_orderby">';
+	foreach ( array( '' => __( 'Site default', 'xroad-videos' ), 'curated' => __( 'Curated (the order above)', 'xroad-videos' ), 'newest' => __( 'Newest first', 'xroad-videos' ), 'oldest' => __( 'Oldest first', 'xroad-videos' ), 'title' => __( 'Title (A to Z)', 'xroad-videos' ) ) as $v => $l ) {
+		echo '<option value="' . esc_attr( $v ) . '"' . selected( $orderby, $v, false ) . '>' . esc_html( $l ) . '</option>';
 	}
 	echo '</select></p>';
 
@@ -2532,6 +3294,9 @@ function xrvc_save_meta( $post_id, $post ) {
 
 	$layout = isset( $_POST['_xrvc_layout'] ) ? strtolower( sanitize_text_field( wp_unslash( $_POST['_xrvc_layout'] ) ) ) : '';
 	update_post_meta( $post_id, '_xrvc_layout', in_array( $layout, array( 'grid', 'carousel', 'library' ), true ) ? $layout : '' );
+
+	$orderby = isset( $_POST['_xrvc_orderby'] ) ? strtolower( sanitize_text_field( wp_unslash( $_POST['_xrvc_orderby'] ) ) ) : '';
+	update_post_meta( $post_id, '_xrvc_orderby', in_array( $orderby, array( 'curated', 'newest', 'oldest', 'title' ), true ) ? $orderby : '' );
 }
 
 add_action( 'add_meta_boxes', 'xrv_add_meta_box' );
@@ -2638,17 +3403,39 @@ function xrv_render_meta_box( $post ) {
 
 	// The watch page's URL slug, editable here and revealed only when the checkbox is on (gallery-only videos
 	// serve no page, so the slug is moot). Reuses the opt-in reveal pattern + the toggle() helper below.
-	$pl_base = (string) ( get_option( 'xrv_permalinks', array() )['single'] ?? '' );
+	// 2.11.0: the prefix is the full address, permalink front included (/blog/videos/ on an /blog/ site).
+	$pl_base = xrv_permalinks()['single'];
 	if ( '' === $pl_base ) { $pl_base = 'video'; }
+	$pl_tail = ( '/' === substr( user_trailingslashit( 'x' ), -1 ) ) ? '/' : '';
 	echo '<div id="xrv-watch-slug" class="xrv-media-field" style="margin:0 0 16px;padding:12px;border:1px solid var(--xr-line);border-radius:10px;background:#fbfbfd;' . ( $watch_on ? '' : 'display:none' ) . '">'
 		. '<label for="xrv_slug" style="display:block;font-weight:600;font-size:13px;margin-bottom:6px">Watch page URL slug</label>'
 		. '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-		. '<span style="color:#787c82;font-size:12px">' . esc_html( trailingslashit( home_url( $pl_base ) ) ) . '</span>'
+		. '<span style="color:#787c82;font-size:12px">' . esc_html( trailingslashit( xrv_video_base_url( $pl_base ) ) ) . '</span>'
 		. '<input type="text" id="xrv_slug" name="xrv_slug" value="' . esc_attr( $post->post_name ) . '" style="flex:1;min-width:200px" placeholder="' . esc_attr( sanitize_title( get_the_title( $post ) ) ) . '">'
-		. '<span style="color:#787c82;font-size:12px">/</span>'
+		. ( '' !== $pl_tail ? '<span style="color:#787c82;font-size:12px">/</span>' : '' )
 		. '</div>'
 		. '<p style="margin:6px 0 0;color:#787c82;font-size:12px">The address of this video&rsquo;s standalone page. Lowercase letters, numbers, and hyphens; leave blank to auto-generate from the title on save.</p>'
 		. '</div>';
+
+	// 2.11.0: a dedicated URL has no field on this screen (it comes from an import or WP-CLI), yet it outranks
+	// the watch page checkbox and the slug above. Show it read-only so editors know what the address does.
+	$ded_target = xrv_dedicated_target( $post->ID );
+	if ( '' !== $ded_target ) {
+		$ded_set  = xrv_get_settings();
+		$ded_code = ( 302 === (int) $ded_set['dedicated_status'] ) ? 302 : 301;
+		if ( xrv_is_same_url( $ded_target, (string) get_permalink( $post->ID ) ) ) {
+			$ded_what = esc_html__( 'This is the video\'s own address, so it is ignored: no redirect is sent and the watch page settings above apply as usual.', 'xroad-videos' );
+		} else {
+			/* translators: %d: HTTP redirect status code, 301 or 302. */
+			$ded_what = esc_html( sprintf( __( 'This video\'s own address redirects here with a %d (Settings, Dedicated URL redirect; the xrv_dedicated_redirect_status filter can change it per video), and the gallery card title links here. It takes priority over the watch page checkbox and the slug above.', 'xroad-videos' ), $ded_code ) );
+		}
+		echo '<div class="xrv-media-field" style="margin:0 0 16px;padding:12px;border:1px solid #f3d199;border-left:4px solid var(--xr-orange);border-radius:10px;background:#fff8ef">'
+			. '<div style="font-weight:600;font-size:13px;margin-bottom:6px">' . esc_html__( 'Dedicated URL (read-only)', 'xroad-videos' ) . '</div>'
+			. '<p style="margin:0 0 6px;word-break:break-all"><a href="' . esc_url( $ded_target ) . '" target="_blank" rel="noopener">' . esc_html( $ded_target ) . '</a></p>'
+			. '<p style="margin:0 0 6px;font-size:12px">' . $ded_what . '</p>' // phpcs:ignore WordPress.Security.EscapeOutput -- escaped above
+			. '<p style="margin:0;color:#787c82;font-size:12px">' . esc_html__( 'Set by an import or WP-CLI (meta key _xrv_dedicated_url). There is no field for it here.', 'xroad-videos' ) . '</p>'
+			. '</div>';
+	}
 
 	// Duration — keep the schema-accurate ISO field, but add a friendly minutes:seconds converter + help.
 	$dur_human = xrv_iso_to_clock( $dur );
@@ -2661,9 +3448,10 @@ function xrv_render_meta_box( $post ) {
 		. '</span></p>';
 	echo xrv_help( 'What is the ISO 8601 duration, and do I need it?', '<p>Usually you don\'t touch it &mdash; for YouTube, Vimeo and friends it fills in automatically. When you do need it, type the running time as <code>minutes:seconds</code> (or <code>h:mm:ss</code>) in the left box and the ISO value fills itself.</p><p><strong>ISO 8601</strong> is the machine format search engines read for the duration rich result: <code>PT12M30S</code> = 12 min 30 sec, <code>PT1H2M</code> = 1 hr 2 min. Prefer a tool? <a href="https://www.google.com/search?q=time+to+ISO+8601+duration+converter" target="_blank" rel="noopener">Open a converter &rarr;</a></p>' ); // phpcs:ignore WordPress.Security.EscapeOutput
 
-	// Upload date — a native date picker beats hand-typing the YYYY-MM-DD format.
+	// Upload date: a native date picker beats hand-typing the YYYY-MM-DD format. Printed normalised (an
+	// unreadable stored value shows blank instead of breaking the picker) and capped at the SITE-local today.
 	echo '<p style="margin:14px 0 14px"><label for="_xrv_upload_date" style="display:block;font-weight:600;margin-bottom:4px">Upload date <span style="font-weight:400;color:#787c82">(optional &mdash; auto where available)</span></label>'
-		. '<input type="date" id="_xrv_upload_date" name="_xrv_upload_date" value="' . esc_attr( $upload ) . '" max="' . esc_attr( gmdate( 'Y-m-d' ) ) . '"></p>';
+		. '<input type="date" id="_xrv_upload_date" name="_xrv_upload_date" value="' . esc_attr( xrv_normalize_ymd( $upload ) ) . '" max="' . esc_attr( current_time( 'Y-m-d' ) ) . '"></p>';
 
 	echo '<details class="xrv-help xrv-help--form" style="margin:16px 0 4px">'
 		. '<summary>Rich video schema <span style="font-weight:400;color:#787c82">(optional &mdash; transcript &amp; key moments for richer Google results / AI citations)</span></summary>'
@@ -2680,7 +3468,7 @@ function xrv_render_meta_box( $post ) {
 	echo '</div></details>';
 
 	echo '<p class="xrv-hint" style="margin:14px 0 2px;color:#646970;font-size:12px">Series, Audience, and Topic are set in the taxonomy boxes in the sidebar. The keyword search index is built automatically.</p>';
-	echo xrv_help( 'How do I control the order videos appear in galleries?', '<p>Drag videos in <strong>All Videos</strong>, or set the <em>Order</em> field under <em>Page Attributes</em>. Galleries render in that sequence.</p>' ); // phpcs:ignore WordPress.Security.EscapeOutput
+	echo xrv_help( 'How do I control the order videos appear in galleries?', '<p>Set the <em>Order</em> number under <em>Post Attributes</em> on each video: lower numbers come first, and equal numbers fall back to the publish date, then the post ID. A gallery can instead sort by newest, oldest or title (Settings &rsaquo; Browse defaults &rsaquo; Default order, or <code>orderby</code> on the shortcode). A collection keeps its own order, set with the up and down buttons on its Collections screen.</p>' ); // phpcs:ignore WordPress.Security.EscapeOutput
 
 	// Editor sugar: the minutes:seconds -> ISO converter and the two opt-in field reveals. Pure progressive
 	// enhancement — with JS off, the ISO field is still typeable and revealed fields default open when set.
@@ -2752,18 +3540,19 @@ function xrv_save_meta( $post_id, $post ) {
 	}
 	update_post_meta( $post_id, '_xrv_provider', $provider );
 
-	// Description + manual metadata.
+	// Description + manual metadata. Percent-preserving: "50%" and "%20" in a URL survive the save (2.11.0).
 	if ( isset( $_POST['_xrv_description'] ) ) {
-		update_post_meta( $post_id, '_xrv_description', sanitize_textarea_field( wp_unslash( $_POST['_xrv_description'] ) ) );
+		update_post_meta( $post_id, '_xrv_description', xrv_sanitize_multiline( wp_unslash( $_POST['_xrv_description'] ) ) );
 	}
 	if ( isset( $_POST['_xrv_transcript'] ) ) {
-		update_post_meta( $post_id, '_xrv_transcript', sanitize_textarea_field( wp_unslash( $_POST['_xrv_transcript'] ) ) );
+		update_post_meta( $post_id, '_xrv_transcript', xrv_sanitize_multiline( wp_unslash( $_POST['_xrv_transcript'] ) ) );
 	}
 	if ( isset( $_POST['_xrv_chapters'] ) ) {
-		update_post_meta( $post_id, '_xrv_chapters', sanitize_textarea_field( wp_unslash( $_POST['_xrv_chapters'] ) ) );
+		update_post_meta( $post_id, '_xrv_chapters', xrv_sanitize_multiline( wp_unslash( $_POST['_xrv_chapters'] ) ) );
 	}
 	$dur    = isset( $_POST['_xrv_duration_iso'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_duration_iso'] ) ) : '';
-	$upload = isset( $_POST['_xrv_upload_date'] ) ? sanitize_text_field( wp_unslash( $_POST['_xrv_upload_date'] ) ) : '';
+	// Stored normalised (site-local YYYY-MM-DD, or '' for anything that is not a real date).
+	$upload = isset( $_POST['_xrv_upload_date'] ) ? xrv_normalize_ymd( sanitize_text_field( wp_unslash( $_POST['_xrv_upload_date'] ) ) ) : '';
 
 	// Derive the platform ID from the pasted URL. Editors never hand-type IDs. For self-hosted files the
 	// media URL itself is the identifier.
@@ -2804,7 +3593,7 @@ function xrv_save_meta( $post_id, $post ) {
 	if ( $desc_blank ) {
 		$od = ! empty( $oembed['description'] ) ? $oembed['description'] : ( ! empty( $oembed['title'] ) ? $oembed['title'] : '' );
 		if ( '' !== $od ) {
-			update_post_meta( $post_id, '_xrv_description', sanitize_textarea_field( mb_substr( $od, 0, 5000 ) ) );
+			update_post_meta( $post_id, '_xrv_description', xrv_sanitize_multiline( mb_substr( $od, 0, 5000 ) ) );
 		}
 	}
 
@@ -3049,47 +3838,101 @@ function xrv_settings_defaults() {
 		'sync_freq'       => 'off',
 		'sync_status'     => 'publish',
 		'sync_max'        => 25,
+		// 2.11.0. Every default reproduces 2.10.0 behaviour except preconnect (a DEFAULT CHANGE: off).
+		'hover_style'        => 'zoom',      // zoom | dim | none: the poster's hover / focus treatment
+		'card_align'         => 'auto',      // auto (grid left, carousel centred) | left | center
+		'card_date'          => 0,           // show the upload date on each card
+		'desc_chars'         => 0,           // trim the visible card description to N characters (0 = no trim)
+		'show_duration'      => 1,           // duration badge on the poster
+		'subscribe_icon'     => 'brand',     // brand (red YouTube mark) | mono (button text colour, triangle cut out)
+		'lightbox_desc'      => 'collapsed', // collapsed (4 lines + Show more) | full
+		'lightbox_page_link' => 0,           // an "Open video page" link in the lightbox caption
+		'thumb_link'         => 'none',      // none (the poster is a play button) | watch (the poster is also a link to the video's page)
+		'orderby'            => 'curated',   // curated | newest | oldest | title
+		'preconnect'         => 0,           // warm up the video host on hover / focus (opt-in since 2.11.0)
+		'dedicated_status'   => 301,         // 301 | 302 for a video's dedicated-URL redirect
+		'watch_meta'         => 'full',      // watch-page card text: full | compact | title
+		'watch_desc'         => 'plain',     // watch-page description: plain | rich (line breaks + links)
+		'sync_since'         => '',          // YYYY-MM-DD: auto-sync skips videos published before this day
 	);
 }
 function xrv_get_settings() {
 	return wp_parse_args( (array) get_option( 'xrv_settings', array() ), xrv_settings_defaults() );
 }
+/* 2.11.0: scalar-safe readers for the settings sanitizer. A missing key falls back to its default, and a
+ * non-scalar (an array posted by a crafted form or a manifest) counts as missing, so the sanitizer never
+ * throws a PHP 8 TypeError and running it twice gives the same result. */
+function xrv_setting_str( $in, $key, $default ) {
+	return ( isset( $in[ $key ] ) && is_scalar( $in[ $key ] ) ) ? trim( (string) $in[ $key ] ) : (string) $default;
+}
+function xrv_setting_enum( $in, $key, $allowed, $default ) {
+	$v = strtolower( xrv_setting_str( $in, $key, $default ) );
+	return in_array( $v, $allowed, true ) ? $v : $default;
+}
+/* Boolean switch values: '', '0', 'false', 'no', 'off' (any case) and false are off; anything else is on. */
+function xrv_is_off( $v ) {
+	if ( is_bool( $v ) ) { return ! $v; }
+	return ! is_scalar( $v ) || in_array( strtolower( trim( (string) $v ) ), array( '', '0', 'false', 'no', 'off' ), true );
+}
+function xrv_setting_bool( $in, $key, $default ) {
+	if ( ! isset( $in[ $key ] ) || ! ( is_scalar( $in[ $key ] ) ) ) { return $default ? 1 : 0; }
+	return xrv_is_off( $in[ $key ] ) ? 0 : 1;
+}
 function xrv_sanitize_settings( $in ) {
-	$d = xrv_settings_defaults(); $in = (array) $in; $out = array();
-	$cn = isset( $in['consent_notice'] ) ? strtolower( $in['consent_notice'] ) : 'off';
-	$out['consent_notice']  = in_array( $cn, array( 'off', 'strict', 'geo' ), true ) ? $cn : 'off';
-	$out['consent_text']    = isset( $in['consent_text'] ) ? sanitize_text_field( $in['consent_text'] ) : $d['consent_text'];
-	$out['consent_button']  = isset( $in['consent_button'] ) ? sanitize_text_field( $in['consent_button'] ) : $d['consent_button'];
-	$out['consent_decline'] = isset( $in['consent_decline'] ) ? sanitize_text_field( $in['consent_decline'] ) : $d['consent_decline'];
-	$out['privacy_url']     = isset( $in['privacy_url'] ) ? esc_url_raw( $in['privacy_url'] ) : '';
-	$pb = isset( $in['playback'] ) ? strtolower( $in['playback'] ) : 'lightbox';
-	$out['playback']        = in_array( $pb, array( 'lightbox', 'lightbox-desktop', 'lightbox-mobile', 'inline' ), true ) ? $pb : 'lightbox';
-	$out['lightbox_details'] = empty( $in['lightbox_details'] ) ? 0 : 1;
-	$out['filter_ui']       = ( isset( $in['filter_ui'] ) && 'chips' === $in['filter_ui'] ) ? 'chips' : 'select';
-	$cm = isset( $in['card_meta'] ) ? strtolower( $in['card_meta'] ) : 'full';
-	$out['card_meta']       = in_array( $cm, array( 'full', 'compact', 'title' ), true ) ? $cm : 'full';
-	$out['per_page']        = max( 1, (int) ( isset( $in['per_page'] ) ? $in['per_page'] : $d['per_page'] ) );
-	$out['load_more']       = max( 1, (int) ( isset( $in['load_more'] ) ? $in['load_more'] : $d['load_more'] ) );
-	$out['subscribe_url']   = isset( $in['subscribe_url'] ) ? esc_url_raw( $in['subscribe_url'] ) : '';
-	$out['subscribe_label'] = isset( $in['subscribe_label'] ) ? sanitize_text_field( $in['subscribe_label'] ) : $d['subscribe_label'];
-	$sd = isset( $in['shorts_default'] ) ? strtolower( $in['shorts_default'] ) : 'all';
-	$out['shorts_default']  = in_array( $sd, array( 'all', 'only', 'hide' ), true ) ? $sd : 'all';
-	$out['default_thumb_id'] = max( 0, (int) ( isset( $in['default_thumb_id'] ) ? $in['default_thumb_id'] : 0 ) );
-	// Play-button color combo: only stored when the override box is ticked, so an unrelated save never
-	// pins a color and clobbers a theme's --xrv-primary/--xrv-action brand tokens. (Admin-context fn.)
-	if ( empty( $in['icon_override'] ) ) {
-		$out['icon_color'] = '';
-		$out['icon_hover'] = '';
-	} else {
-		$out['icon_color'] = isset( $in['icon_color'] ) ? (string) sanitize_hex_color( $in['icon_color'] ) : '';
-		$out['icon_hover'] = isset( $in['icon_hover'] ) ? (string) sanitize_hex_color( $in['icon_hover'] ) : '';
-	}
-	$out['sync_url']        = isset( $in['sync_url'] ) ? esc_url_raw( trim( $in['sync_url'] ) ) : '';
-	$sf = isset( $in['sync_freq'] ) ? strtolower( $in['sync_freq'] ) : 'off';
-	$out['sync_freq']       = in_array( $sf, array( 'off', 'hourly', 'daily', 'weekly', 'monthly' ), true ) ? $sf : 'off';
-	$out['sync_status']     = ( isset( $in['sync_status'] ) && 'draft' === $in['sync_status'] ) ? 'draft' : 'publish';
-	$out['sync_max']        = min( 50, max( 1, (int) ( isset( $in['sync_max'] ) ? $in['sync_max'] : $d['sync_max'] ) ) );
+	$d = xrv_settings_defaults(); $in = is_array( $in ) ? $in : array(); $out = array();
+	$out['consent_notice']  = xrv_setting_enum( $in, 'consent_notice', array( 'off', 'strict', 'geo' ), $d['consent_notice'] );
+	$out['consent_text']    = sanitize_text_field( xrv_setting_str( $in, 'consent_text', $d['consent_text'] ) );
+	$out['consent_button']  = sanitize_text_field( xrv_setting_str( $in, 'consent_button', $d['consent_button'] ) );
+	$out['consent_decline'] = sanitize_text_field( xrv_setting_str( $in, 'consent_decline', $d['consent_decline'] ) );
+	$out['privacy_url']     = esc_url_raw( xrv_setting_str( $in, 'privacy_url', '' ) );
+	$out['playback']        = xrv_setting_enum( $in, 'playback', array( 'lightbox', 'lightbox-desktop', 'lightbox-mobile', 'inline' ), $d['playback'] );
+	$out['lightbox_details'] = xrv_setting_bool( $in, 'lightbox_details', $d['lightbox_details'] );
+	$out['filter_ui']       = xrv_setting_enum( $in, 'filter_ui', array( 'select', 'chips' ), $d['filter_ui'] );
+	$out['card_meta']       = xrv_setting_enum( $in, 'card_meta', array( 'full', 'compact', 'title' ), $d['card_meta'] );
+	$out['per_page']        = max( 1, (int) xrv_setting_str( $in, 'per_page', $d['per_page'] ) );
+	$out['load_more']       = max( 1, (int) xrv_setting_str( $in, 'load_more', $d['load_more'] ) );
+	$out['subscribe_url']   = esc_url_raw( xrv_setting_str( $in, 'subscribe_url', '' ) );
+	$out['subscribe_label'] = sanitize_text_field( xrv_setting_str( $in, 'subscribe_label', $d['subscribe_label'] ) );
+	$out['shorts_default']  = xrv_setting_enum( $in, 'shorts_default', array( 'all', 'only', 'hide' ), $d['shorts_default'] );
+	$out['default_thumb_id'] = max( 0, (int) xrv_setting_str( $in, 'default_thumb_id', 0 ) );
+	// Play-button color combo: only kept while the override is on, so an unrelated save never pins a color
+	// and clobbers a theme's --xrv-primary/--xrv-action brand tokens. The form always posts icon_override
+	// (hidden 0 + checkbox 1) and the flag is now stored; input WITHOUT the key (a 2.10.0 stored value, a
+	// partial array) keeps whatever colors it carries, so a second pass never wipes them.
+	$ic = (string) sanitize_hex_color( xrv_setting_str( $in, 'icon_color', '' ) );
+	$ih = (string) sanitize_hex_color( xrv_setting_str( $in, 'icon_hover', '' ) );
+	$override = isset( $in['icon_override'] ) ? ! xrv_is_off( $in['icon_override'] ) : ( '' !== $ic || '' !== $ih );
+	$out['icon_override']   = $override ? 1 : 0;
+	$out['icon_color']      = $override ? $ic : '';
+	$out['icon_hover']      = $override ? $ih : '';
+	$out['sync_url']        = esc_url_raw( xrv_setting_str( $in, 'sync_url', '' ) );
+	$out['sync_freq']       = xrv_setting_enum( $in, 'sync_freq', array( 'off', 'hourly', 'daily', 'weekly', 'monthly' ), $d['sync_freq'] );
+	$out['sync_status']     = xrv_setting_enum( $in, 'sync_status', array( 'publish', 'draft' ), $d['sync_status'] );
+	$out['sync_max']        = min( 50, max( 1, (int) xrv_setting_str( $in, 'sync_max', $d['sync_max'] ) ) );
+	// 2.11.0 keys.
+	$out['hover_style']        = xrv_setting_enum( $in, 'hover_style', array( 'zoom', 'dim', 'none' ), $d['hover_style'] );
+	$out['card_align']         = xrv_setting_enum( $in, 'card_align', array( 'auto', 'left', 'center' ), $d['card_align'] );
+	$out['card_date']          = xrv_setting_bool( $in, 'card_date', $d['card_date'] );
+	$out['desc_chars']         = min( 2000, max( 0, (int) xrv_setting_str( $in, 'desc_chars', $d['desc_chars'] ) ) );
+	$out['show_duration']      = xrv_setting_bool( $in, 'show_duration', $d['show_duration'] );
+	$out['subscribe_icon']     = xrv_setting_enum( $in, 'subscribe_icon', array( 'brand', 'mono' ), $d['subscribe_icon'] );
+	$out['lightbox_desc']      = xrv_setting_enum( $in, 'lightbox_desc', array( 'collapsed', 'full' ), $d['lightbox_desc'] );
+	$out['lightbox_page_link'] = xrv_setting_bool( $in, 'lightbox_page_link', $d['lightbox_page_link'] );
+	$out['thumb_link']         = xrv_setting_enum( $in, 'thumb_link', array( 'none', 'watch' ), $d['thumb_link'] );
+	$out['orderby']            = xrv_setting_enum( $in, 'orderby', array( 'curated', 'newest', 'oldest', 'title' ), $d['orderby'] );
+	$out['preconnect']         = xrv_setting_bool( $in, 'preconnect', $d['preconnect'] );
+	$out['dedicated_status']   = (int) xrv_setting_enum( $in, 'dedicated_status', array( '301', '302' ), (string) $d['dedicated_status'] );
+	$out['watch_meta']         = xrv_setting_enum( $in, 'watch_meta', array( 'full', 'compact', 'title' ), $d['watch_meta'] );
+	$out['watch_desc']         = xrv_setting_enum( $in, 'watch_desc', array( 'plain', 'rich' ), $d['watch_desc'] );
+	$since = xrv_setting_str( $in, 'sync_since', '' );
+	$out['sync_since']         = ( preg_match( '/^\d{4}-\d{2}-\d{2}$/', $since ) && '' !== xrv_normalize_ymd( $since ) ) ? $since : '';
 	return $out;
+}
+/* 2.11.0: the one way to write a PARTIAL settings array (the WP-CLI apply / rollback path, a migration, a
+ * theme). Merges onto the stored settings, then sanitizes the whole set, so keys the caller did not name
+ * keep their current values instead of falling back to defaults. */
+function xrv_settings_prepare( $partial ) {
+	return xrv_sanitize_settings( array_merge( xrv_get_settings(), is_array( $partial ) ? $partial : array() ) );
 }
 add_action( 'admin_init', 'xrv_register_settings' );
 function xrv_register_settings() {
@@ -3109,20 +3952,99 @@ function xrv_register_settings_page() {
  *     "Sync now" runs it on demand. New videos publish or stay draft per the Settings choice.
  * ================================================================================================= */
 
-/* Public entry point. A short-lived transient lock prevents two runs (e.g. a cron tick overlapping a
- * "Sync now" click) from both inserting the same new video. If a run is already in flight we return the
- * last result untouched rather than duplicating work. The lock self-heals: it expires on its own if a
- * run dies mid-way, so a crash can never wedge sync permanently. */
-function xrv_sync_run() {
-	if ( get_transient( 'xrv_sync_lock' ) ) {
+/* -------------------------------------------------------------------------------------------------
+ * 2.11.0 LIBRARY WRITE LOCK. One writer at a time across channel sync and every WP-CLI run. The lock is
+ * one row in the options table, taken with INSERT IGNORE on the unique option_name, so two processes can
+ * never both take a free lock (add_option() is not atomic: it upserts). The value names the owner (a CLI
+ * run id or a sync token), the command, and a heartbeat the owner refreshes per record. A lock whose
+ * heartbeat is older than the stale window (15 minutes, filter xrv_lock_stale_after) can be taken over,
+ * so a killed SSH session never wedges sync or the next run. Read straight from the database (never the
+ * object cache) so a persistent cache cannot hide a live lock.
+ * ------------------------------------------------------------------------------------------------- */
+function xrv_lock_read() {
+	global $wpdb;
+	$raw = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", 'xrv_lock' ) );
+	if ( null === $raw ) {
+		return null;
+	}
+	$val = json_decode( (string) $raw, true );
+	return is_array( $val ) ? $val : array( 'owner' => '', 'cmd' => '', 'started' => 0, 'heartbeat' => 0, 'raw' => (string) $raw );
+}
+
+/* Take the lock. Returns true (taken, or already ours: a resumed run keeps its run id) or the holder's
+ * array {owner, cmd, started, heartbeat} when someone else holds a live lock. */
+function xrv_lock_acquire( $owner, $cmd = '' ) {
+	global $wpdb;
+	$owner = (string) $owner;
+	$now   = time();
+	$val   = wp_json_encode( array( 'owner' => $owner, 'cmd' => (string) $cmd, 'started' => $now, 'heartbeat' => $now ) );
+	$sql   = "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')";
+	if ( 1 === (int) $wpdb->query( $wpdb->prepare( $sql, 'xrv_lock', $val ) ) ) {
+		return true;
+	}
+	$cur = xrv_lock_read();
+	if ( null === $cur ) { // released between our INSERT and the read: try once more
+		return 1 === (int) $wpdb->query( $wpdb->prepare( $sql, 'xrv_lock', $val ) ) ? true : (array) xrv_lock_read();
+	}
+	if ( $owner === (string) $cur['owner'] ) {
+		xrv_lock_heartbeat( $owner );
+		return true;
+	}
+	$stale = (int) apply_filters( 'xrv_lock_stale_after', 15 * MINUTE_IN_SECONDS );
+	if ( ( $now - (int) $cur['heartbeat'] ) < $stale ) {
+		return $cur;
+	}
+	// Stale: delete only the exact row we judged stale (a live owner's heartbeat changes it), then insert.
+	$old = isset( $cur['raw'] ) ? $cur['raw'] : (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", 'xrv_lock' ) );
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", 'xrv_lock', $old ) );
+	return 1 === (int) $wpdb->query( $wpdb->prepare( $sql, 'xrv_lock', $val ) ) ? true : (array) xrv_lock_read();
+}
+
+/* Refresh the heartbeat. Returns false when the caller no longer owns the lock (it was taken over). */
+function xrv_lock_heartbeat( $owner ) {
+	global $wpdb;
+	$cur = xrv_lock_read();
+	if ( ! is_array( $cur ) || (string) $owner !== (string) $cur['owner'] ) {
+		return false;
+	}
+	unset( $cur['raw'] );
+	$cur['heartbeat'] = time();
+	$wpdb->update( $wpdb->options, array( 'option_value' => wp_json_encode( $cur ) ), array( 'option_name' => 'xrv_lock' ) );
+	return true;
+}
+
+/* Release the lock, only if the caller owns it. */
+function xrv_lock_release( $owner ) {
+	global $wpdb;
+	$cur = xrv_lock_read();
+	if ( ! is_array( $cur ) || (string) $owner !== (string) $cur['owner'] ) {
+		return false;
+	}
+	$wpdb->delete( $wpdb->options, array( 'option_name' => 'xrv_lock' ) );
+	return true;
+}
+
+/* Public entry point (cron and "Sync now"). 2.11.0: a run takes the shared library write lock above under
+ * its own owner token, so a cron tick, a "Sync now" click and a WP-CLI run can never insert at the same
+ * time. The run heartbeats the lock per inserted video and releases it in a finally block; a run that dies
+ * mid-way leaves a lock the next run takes over once it is stale. When another writer holds the lock the
+ * run does nothing and returns the last stored result untouched: a busy result is never written to
+ * xrv_sync_last. Pass $report_busy = true (Sync now) to get a WP_Error naming the holder instead. Cron
+ * passes '' here, which is not true, so a scheduled run always gets the stored result. */
+function xrv_sync_run( $report_busy = false ) {
+	$owner = 'sync-' . time() . '-' . wp_generate_password( 6, false );
+	$got   = xrv_lock_acquire( $owner, 'sync' );
+	if ( true !== $got ) {
+		if ( true === $report_busy ) {
+			return new WP_Error( 'xrv_sync_busy', __( 'Another sync or WP-CLI run is changing the library right now.', 'xroad-videos' ), is_array( $got ) ? $got : array() );
+		}
 		$last = get_option( 'xrv_sync_last', array() );
 		return is_array( $last ) ? $last : array();
 	}
-	set_transient( 'xrv_sync_lock', 1, 15 * MINUTE_IN_SECONDS );
 	try {
-		$res = xrv_sync_perform();
+		$res = xrv_sync_perform( $owner );
 	} finally {
-		delete_transient( 'xrv_sync_lock' );
+		xrv_lock_release( $owner );
 	}
 	return $res;
 }
@@ -3133,13 +4055,28 @@ function xrv_sync_run() {
 function xrv_apply_youtube_meta( $pid, $id, $f ) {
 	update_post_meta( $pid, '_xrv_provider', 'youtube' );
 	update_post_meta( $pid, '_xrv_video_id', $id );
-	update_post_meta( $pid, '_xrv_source_url', 'https://www.youtube.com/watch?v=' . $id );
+	// A Short keeps a /shorts/ source URL: the editor's save re-derives the Short flag from the URL, so a
+	// watch?v= URL here would silently turn the Short back into a 16:9 card on the next manual save.
+	$short = ! empty( $f['is_short'] ) || '1' === (string) get_post_meta( $pid, '_xrv_short', true );
+	update_post_meta( $pid, '_xrv_source_url', xrv_youtube_source_url( $id, $short ) );
 	if ( ! empty( $f['duration'] ) ) { update_post_meta( $pid, '_xrv_duration_iso', sanitize_text_field( $f['duration'] ) ); }
-	if ( ! empty( $f['upload'] ) )   { update_post_meta( $pid, '_xrv_upload_date', sanitize_text_field( $f['upload'] ) ); }
-	if ( ! empty( $f['desc'] ) )     { update_post_meta( $pid, '_xrv_description', sanitize_textarea_field( $f['desc'] ) ); }
+	$ymd = ! empty( $f['upload'] ) ? xrv_normalize_ymd( sanitize_text_field( $f['upload'] ) ) : '';
+	if ( '' !== $ymd )               { update_post_meta( $pid, '_xrv_upload_date', $ymd ); }
+	if ( ! empty( $f['desc'] ) )     { update_post_meta( $pid, '_xrv_description', xrv_sanitize_multiline( $f['desc'] ) ); }
 	// Watch page: written only when the import record specified it ('0'/'1'); absent = leave as-is.
 	$wp = isset( $f['watch_page'] ) ? (string) $f['watch_page'] : '';
 	if ( '0' === $wp || '1' === $wp ) { update_post_meta( $pid, '_xrv_watch_page', $wp ); }
+}
+
+/** 2.11.0: the stored source URL for a YouTube video: /shorts/{id} for a Short, else watch?v={id}. */
+function xrv_youtube_source_url( $id, $is_short = false ) {
+	return $is_short ? 'https://www.youtube.com/shorts/' . $id : 'https://www.youtube.com/watch?v=' . $id;
+}
+
+/** 2.11.0: flag a video as a Short AND give it the /shorts/ source URL the editor derives the flag from. */
+function xrv_mark_short( $pid, $id ) {
+	update_post_meta( $pid, '_xrv_short', '1' );
+	update_post_meta( $pid, '_xrv_source_url', xrv_youtube_source_url( $id, true ) );
 }
 
 /** Detect a Short. The Data API exposes no aspect ratio, so probe the canonical /shorts/ URL: YouTube
@@ -3150,66 +4087,123 @@ function xrv_yt_is_short( $id ) {
 	return ! is_wp_error( $r ) && 200 === (int) wp_remote_retrieve_response_code( $r );
 }
 
-function xrv_sync_perform() {
+/* 2.11.0 gates, per new video (the details call asks for snippet, contentDetails and status):
+ *   skipped  = private, unlisted, an upload that failed / was rejected / was deleted, or published before
+ *              the optional "since" day. Counted, never inserted.
+ *   deferred = not ready yet: still processing (uploadStatus uploaded), live now or upcoming, an unknown
+ *              privacy value, or no usable details (the details call failed, or the video is missing from
+ *              its response). Nothing is inserted, so the video stays "new" and the next run retries it.
+ * An inserted video is dated from publishedAt in the site timezone (post_date) and UTC (post_date_gmt),
+ * both clamped to now so a publish never turns into a scheduled post. $owner is the lock token from
+ * xrv_sync_run(); the lock is heartbeated per inserted video and the run stops if it was taken over. */
+function xrv_sync_perform( $owner = '' ) {
 	$s   = xrv_get_settings();
-	$key = (string) get_option( 'xrv_yt_api_key', '' );
+	$key = trim( (string) get_option( 'xrv_yt_api_key', '' ) );
 	$url = isset( $s['sync_url'] ) ? trim( (string) $s['sync_url'] ) : '';
-	$now = current_time( 'mysql' );
+	// Every stored result carries every key, success or not, so readers need no isset() guards.
+	$res = array( 'time' => current_time( 'mysql' ), 'ok' => false, 'checked' => 0, 'added' => 0, 'titles' => array(), 'msg' => '', 'skipped' => 0, 'deferred' => 0, 'api_msg' => '' );
 
 	if ( '' === $key || '' === $url ) {
-		$res = array( 'time' => $now, 'ok' => false, 'checked' => 0, 'added' => 0, 'msg' => 'Needs a YouTube Data API key and a channel/playlist URL.' );
+		$res['msg'] = __( 'Needs a YouTube Data API key and a channel/playlist URL.', 'xroad-videos' );
 		update_option( 'xrv_sync_last', $res ); return $res;
 	}
 
-	// Resolve the source to a playlist of uploads (a ?list= URL is already a playlist).
+	// Resolve the source to a playlist of uploads (a ?list= URL is already a playlist), then list it.
 	if ( preg_match( '#[?&]list=([A-Za-z0-9_-]+)#', $url, $m ) ) { $playlist = $m[1]; }
 	else { $playlist = xrv_yt_uploads_playlist( $url, $key ); }
-	if ( is_wp_error( $playlist ) ) {
-		$res = array( 'time' => $now, 'ok' => false, 'checked' => 0, 'added' => 0, 'msg' => $playlist->get_error_message() );
-		update_option( 'xrv_sync_last', $res ); return $res;
-	}
-
 	$max = min( 50, max( 1, (int) ( isset( $s['sync_max'] ) ? $s['sync_max'] : 25 ) ) );
-	$ids = xrv_yt_playlist_ids( $playlist, $key, $max );
+	$ids = is_wp_error( $playlist ) ? $playlist : xrv_yt_playlist_ids( $playlist, $key, $max );
 	if ( is_wp_error( $ids ) ) {
-		$res = array( 'time' => $now, 'ok' => false, 'checked' => 0, 'added' => 0, 'msg' => $ids->get_error_message() );
+		$res['msg']     = $ids->get_error_message();
+		$res['api_msg'] = $res['msg'];
 		update_option( 'xrv_sync_last', $res ); return $res;
 	}
-	$ids = array_slice( array_values( array_unique( $ids ) ), 0, $max );
+	$ids            = array_slice( array_values( array_unique( $ids ) ), 0, $max );
+	$res['checked'] = count( $ids );
 
 	// Which of these are not already in the library?
 	global $wpdb;
 	$existing = array_flip( (array) $wpdb->get_col( "SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_xrv_video_id'" ) );
-	$new = array();
+	$new      = array();
 	foreach ( $ids as $id ) { if ( ! isset( $existing[ $id ] ) ) { $new[] = $id; } }
 
-	$added = 0; $titles = array();
+	$inserted = array();
 	if ( $new ) {
-		$status    = ( isset( $s['sync_status'] ) && 'draft' === $s['sync_status'] ) ? 'draft' : 'publish';
-		$meta      = xrv_yt_videos_meta( $new, $key );
-		if ( is_wp_error( $meta ) ) { $meta = array(); }
+		$meta = xrv_yt_videos_meta( $new, $key );
+		if ( is_wp_error( $meta ) ) {
+			// Never guess: without details a video used to land titled with its raw ID. Insert nothing.
+			$res['deferred'] = count( $new );
+			$res['api_msg']  = $meta->get_error_message();
+			/* translators: %s: the error message returned by the YouTube Data API. */
+			$res['msg']      = sprintf( __( 'Could not read video details from YouTube (%s). Nothing was added; the new videos will be retried on the next run.', 'xroad-videos' ), $res['api_msg'] );
+			update_option( 'xrv_sync_last', $res ); return $res;
+		}
+		$status    = 'draft' === strtolower( trim( (string) $s['sync_status'] ) ) ? 'draft' : 'publish';
+		$since     = ( is_string( $s['sync_since'] ) && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $s['sync_since'] ) ) ? xrv_normalize_ymd( $s['sync_since'] ) : '';
+		$missing   = array();
 		$max_order = (int) $wpdb->get_var( "SELECT MAX(menu_order) FROM {$wpdb->posts} WHERE post_type = 'xroad_video'" );
 
-		foreach ( $new as $id ) {
-			$mv    = isset( $meta[ $id ] ) ? $meta[ $id ] : array();
-			$title = ! empty( $mv['title'] ) ? sanitize_text_field( $mv['title'] ) : $id;
-			$max_order++;
-			$pid = wp_insert_post( array( 'post_type' => 'xroad_video', 'post_status' => $status, 'post_title' => $title, 'menu_order' => $max_order ) );
-			if ( is_wp_error( $pid ) ) { continue; }
+		foreach ( $new as $i => $id ) {
+			$mv  = isset( $meta[ $id ] ) ? $meta[ $id ] : null;
+			$day = $mv ? xrv_normalize_ymd( (string) $mv['published_at'] ) : ''; // site-local upload day
+			if ( '' === $day ) { $missing[] = $id; $res['deferred']++; continue; }
+			$privacy = strtolower( (string) $mv['privacy'] );
+			$upload  = strtolower( (string) $mv['upload_status'] );
+			$live    = strtolower( (string) $mv['live'] );
+			if ( 'private' === $privacy || 'unlisted' === $privacy || in_array( $upload, array( 'failed', 'rejected', 'deleted' ), true ) ) {
+				$res['skipped']++; continue;
+			}
+			if ( 'public' !== $privacy || 'uploaded' === $upload || 'live' === $live || 'upcoming' === $live ) {
+				$res['deferred']++; continue;
+			}
+			// After the deferrals, so a stream is judged on the publishedAt it has once it is over.
+			if ( '' !== $since && $day < $since ) { $res['skipped']++; continue; }
 
-			xrv_apply_youtube_meta( $pid, $id, $mv );
+			$pts   = (int) strtotime( (string) $mv['published_at'] );
+			$when  = min( $pts, time() );
+			$title = sanitize_text_field( (string) $mv['title'] );
+			$title = '' !== $title ? $title : $id;
+			$max_order++;
+			$pid = wp_insert_post( array(
+				'post_type'     => 'xroad_video',
+				'post_status'   => $status,
+				'post_title'    => $title,
+				'menu_order'    => $max_order,
+				'post_date'     => xrv_local_date( 'Y-m-d H:i:s', $when ),
+				'post_date_gmt' => gmdate( 'Y-m-d H:i:s', $when ),
+			), true );
+			if ( is_wp_error( $pid ) || ! $pid ) { $res['deferred']++; continue; }
+
+			xrv_apply_youtube_meta( $pid, $id, array( 'desc' => $mv['desc'], 'duration' => $mv['duration'], 'upload' => $day ) );
+			update_post_meta( $pid, '_xrv_published_at', gmdate( 'Y-m-d\TH:i:s\Z', $pts ) );
 
 			$short = xrv_yt_is_short( $id );
-			if ( $short ) { update_post_meta( $pid, '_xrv_short', '1' ); }
+			if ( $short ) { xrv_mark_short( $pid, $id ); }
 			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube', $short ? xrv_thumb_candidates( $id, 'youtube', true ) : null );
 			if ( ! is_wp_error( $att ) ) { update_post_meta( $pid, '_xrv_local_thumb_id', (int) $att ); set_post_thumbnail( $pid, (int) $att ); }
 
-			$added++; $titles[] = $title;
+			$res['added']++;
+			$inserted[] = (int) $pid;
+			if ( count( $res['titles'] ) < 10 ) { $res['titles'][] = $title; }
+			// Still ours? A stale-lock takeover means another writer now owns the library: stop, retry the rest.
+			if ( '' !== (string) $owner && ! xrv_lock_heartbeat( $owner ) ) {
+				$res['deferred'] += count( $new ) - $i - 1;
+				$res['msg']       = __( 'Stopped early: another run took over the library lock. The remaining videos will be retried on the next run.', 'xroad-videos' );
+				break;
+			}
+		}
+		if ( $missing ) {
+			/* translators: %s: comma-separated YouTube video IDs. */
+			$res['api_msg'] = sprintf( __( 'YouTube returned no usable details for %s; retrying on the next run.', 'xroad-videos' ), implode( ', ', array_slice( $missing, 0, 10 ) ) );
 		}
 	}
 
-	$res = array( 'time' => $now, 'ok' => true, 'checked' => count( $ids ), 'added' => $added, 'titles' => array_slice( $titles, 0, 10 ) );
+	$res['ok'] = true;
 	update_option( 'xrv_sync_last', $res );
+	if ( $inserted ) {
+		/** 2.11.0: the library gained videos (post IDs). */
+		do_action( 'xrv_library_changed', $inserted );
+	}
 	return $res;
 }
 
@@ -3232,6 +4226,10 @@ add_action( 'xrv_sync_event', 'xrv_sync_run' );
 add_action( 'update_option_xrv_settings', 'xrv_sync_reschedule' );
 add_action( 'add_option_xrv_settings', 'xrv_sync_reschedule' );
 add_action( 'update_option_xrv_yt_api_key', 'xrv_sync_reschedule' );
+// 2.11.0: the first save of a key (add) can enable sync, and removing it (delete fires after the row and
+// its cache entry are gone) must stop it.
+add_action( 'add_option_xrv_yt_api_key', 'xrv_sync_reschedule' );
+add_action( 'delete_option_xrv_yt_api_key', 'xrv_sync_reschedule' );
 function xrv_sync_reschedule() {
 	$ts = wp_next_scheduled( 'xrv_sync_event' );
 	if ( $ts ) { wp_unschedule_event( $ts, 'xrv_sync_event' ); }
@@ -3251,8 +4249,9 @@ add_action( 'admin_post_xrv_sync_now', 'xrv_sync_now_handler' );
 function xrv_sync_now_handler() {
 	if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'forbidden' ); }
 	check_admin_referer( 'xrv_sync_now' );
-	xrv_sync_run();
-	wp_safe_redirect( add_query_arg( 'xrv_synced', '1', admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) );
+	// A busy lock is reported on this redirect only; it is never stored in xrv_sync_last.
+	$res = xrv_sync_run( true );
+	wp_safe_redirect( add_query_arg( 'xrv_synced', is_wp_error( $res ) ? 'busy' : '1', admin_url( 'edit.php?post_type=xroad_video&page=xrv-settings' ) ) );
 	exit;
 }
 
@@ -3587,20 +4586,28 @@ function xrv_render_settings_page() {
 							<option value="off"    <?php selected( $s['consent_notice'], 'off' ); ?>>Facade only (no prompt)</option>
 						</select>
 						<p class="description" style="max-width:760px">
-							<strong>All three modes are cookie-free until the click</strong> &mdash; the player makes no request, cookie, or connection to YouTube until a visitor presses play. This setting only adds an extra consent prompt on top of that, so &ldquo;Facade only&rdquo; is still privacy-safe; it just skips the prompt.
+							<?php echo wp_kses_post( __( '<strong>All three modes are cookie-free until the click.</strong> With the default settings the player makes no request, cookie, or connection to YouTube until a visitor presses play. (The opt-in <em>Warm-up on hover</em> below is the one exception: it opens a connection, with no cookies, when a visitor hovers or tabs to a video.) This setting only adds an extra consent prompt on top of that, so &ldquo;Facade only&rdquo; is still privacy-safe; it just skips the prompt.', 'xroad-videos' ) ); ?>
 						</p>
 						<details class="xrv-help">
 							<summary>How the modes differ (GDPR / CCPA)</summary>
 						<ul class="description" style="max-width:760px;list-style:disc;margin-left:1.4em">
-							<li><strong>Global</strong> (recommended): adapts to the visitor's region. Visitors in the EU, UK, EEA, or Switzerland get a dismissible opt-in "Load video" prompt before anything loads (GDPR / ePrivacy), and their browser makes <strong>zero</strong> contact with any Google domain (the background preconnect is suppressed too) until they accept. Everyone else, including US / California visitors, plays in one click; because the facade shares no data with YouTube until that click, this meets the US notice-and-opt-out model (CCPA / CPRA) without adding friction. Region is detected from an edge country header (see <strong>Geo source</strong> above).</li>
+							<li><?php echo wp_kses_post( __( '<strong>Global</strong> (recommended): adapts to the visitor\'s region. Visitors in the EU, UK, EEA, or Switzerland get a dismissible opt-in "Load video" prompt before anything loads (GDPR / ePrivacy), and their browser makes <strong>zero</strong> contact with any Google domain until they accept (<em>Warm-up on hover</em> is suppressed for them even when it is on). Everyone else, including US / California visitors, plays in one click; because the facade shares no data with YouTube until that click, this meets the US notice-and-opt-out model (CCPA / CPRA) without adding friction. Region is detected from an edge country header (see <strong>Geo source</strong> above).', 'xroad-videos' ) ); ?></li>
 							<li><strong>Strict GDPR</strong>: the dismissible opt-in prompt and zero-contact guarantee for <strong>every</strong> visitor worldwide, regardless of region. The most defensible posture; slightly slower first play.</li>
-							<li><strong>No Consent Integration</strong>: no prompt or notice. The click-to-load facade still applies (no YouTube contact until a click), but the plugin adds no consent layer. Use only where you handle consent elsewhere or do not serve regulated regions.</li>
+							<li><?php echo wp_kses_post( __( '<strong>Facade only</strong>: no prompt or notice. The click-to-load facade still applies (no YouTube contact until a click, or until a hover if <em>Warm-up on hover</em> is on), but the plugin adds no consent layer. Use only where you handle consent elsewhere or do not serve regulated regions.', 'xroad-videos' ) ); ?></li>
 						</ul>
 						<p class="description" style="max-width:760px">
 							The opt-in prompt is declinable (× or "No thanks"), so refusing is as easy as accepting, and the click is the consent that loads the embed. Global mode reads a visitor-country header from your edge/CDN; if none is present it fails safe by prompting everyone, and the <code>xrv_consent_required</code> filter can override the region logic.<br>
 							<em>Informational only, not legal advice. Cookies and tags from your analytics, ads, and consent manager are governed by those tools, not this plugin.</em>
 						</p>
 						</details>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><?php esc_html_e( 'Warm-up on hover', 'xroad-videos' ); ?></th>
+					<td>
+						<input type="hidden" name="xrv_settings[preconnect]" value="0">
+						<label><input type="checkbox" name="xrv_settings[preconnect]" value="1" <?php checked( ! empty( $s['preconnect'] ) ); ?>> <?php esc_html_e( 'Open a connection to the video host when a visitor hovers or tabs to a video', 'xroad-videos' ); ?></label>
+						<p class="description" style="max-width:760px"><?php esc_html_e( 'Off by default (2.11.0). When on, hovering a card, or moving keyboard focus onto it, makes the browser open a DNS and TLS connection to the video host (for example youtube-nocookie.com) a moment before the click, so the player starts slightly faster. No cookies are sent, but the host does see the visitor\'s IP address before any click. It is never made while a consent prompt is required (Strict, or Global for EU / UK / EEA / Swiss visitors). Leave it off for a strict zero-contact-before-click posture.', 'xroad-videos' ); ?></p>
 					</td>
 				</tr>
 				<tr>
@@ -3641,8 +4648,42 @@ function xrv_render_settings_page() {
 				<tr>
 					<th scope="row">Lightbox details</th>
 					<td>
+						<input type="hidden" name="xrv_settings[lightbox_details]" value="0">
 						<label><input type="checkbox" name="xrv_settings[lightbox_details]" value="1" <?php checked( ! empty( $s['lightbox_details'] ) ); ?>> Show the title, date &amp; a collapsible description below the player in the lightbox</label>
-						<p class="description" style="max-width:760px">Mirrors the watch-page caption (title, &ldquo;2 months ago&rdquo;, and a description that opens with a <em>Description</em> toggle). Applies to lightbox playback only; inline playback already shows this beneath the card.</p>
+						<p class="description" style="max-width:760px"><?php echo wp_kses_post( __( 'Mirrors the watch-page caption (title, &ldquo;2 months ago&rdquo;, and the description). Applies to lightbox playback only; inline playback already shows this beneath the card.', 'xroad-videos' ) ); ?></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-lbdesc"><?php esc_html_e( 'Lightbox description', 'xroad-videos' ); ?></label></th>
+					<td>
+						<select id="xrv-lbdesc" name="xrv_settings[lightbox_desc]">
+							<option value="collapsed" <?php selected( $s['lightbox_desc'], 'collapsed' ); ?>><?php esc_html_e( 'Four lines, with Show more / Show less', 'xroad-videos' ); ?></option>
+							<option value="full"      <?php selected( $s['lightbox_desc'], 'full' ); ?>><?php esc_html_e( 'The whole description', 'xroad-videos' ); ?></option>
+						</select>
+						<p style="margin:10px 0 0"><input type="hidden" name="xrv_settings[lightbox_page_link]" value="0"><label><input type="checkbox" name="xrv_settings[lightbox_page_link]" value="1" <?php checked( ! empty( $s['lightbox_page_link'] ) ); ?>> <?php esc_html_e( 'Add an "Open video page" link to the lightbox caption', 'xroad-videos' ); ?></label></p>
+						<p class="description" style="max-width:760px"><?php esc_html_e( 'The link goes where the card title goes: the video\'s watch page, or its dedicated URL. Videos with neither show no link.', 'xroad-videos' ); ?></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-orderby"><?php esc_html_e( 'Default order', 'xroad-videos' ); ?></label></th>
+					<td>
+						<select id="xrv-orderby" name="xrv_settings[orderby]">
+							<option value="curated" <?php selected( $s['orderby'], 'curated' ); ?>><?php esc_html_e( 'Curated (each video\'s Order number, or the collection\'s order)', 'xroad-videos' ); ?></option>
+							<option value="newest"  <?php selected( $s['orderby'], 'newest' ); ?>><?php esc_html_e( 'Newest first', 'xroad-videos' ); ?></option>
+							<option value="oldest"  <?php selected( $s['orderby'], 'oldest' ); ?>><?php esc_html_e( 'Oldest first', 'xroad-videos' ); ?></option>
+							<option value="title"   <?php selected( $s['orderby'], 'title' ); ?>><?php esc_html_e( 'Title (A to Z)', 'xroad-videos' ); ?></option>
+						</select>
+						<p class="description" style="max-width:760px"><?php esc_html_e( 'The order a gallery is printed in, before a visitor touches the Sort menu. Newest and oldest use each video\'s upload date (or its post date when none is set), then its exact publish time. The Sort menu starts on this choice and Reset returns to it. Override per gallery with orderby="newest" or a collection\'s own order.', 'xroad-videos' ); ?></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-thumblink"><?php esc_html_e( 'Poster click', 'xroad-videos' ); ?></label></th>
+					<td>
+						<select id="xrv-thumblink" name="xrv_settings[thumb_link]">
+							<option value="none"  <?php selected( $s['thumb_link'], 'none' ); ?>><?php esc_html_e( 'Plays the video', 'xroad-videos' ); ?></option>
+							<option value="watch" <?php selected( $s['thumb_link'], 'watch' ); ?>><?php esc_html_e( 'Plays the video, and is also a link to the video\'s page', 'xroad-videos' ); ?></option>
+						</select>
+						<p class="description" style="max-width:760px"><?php esc_html_e( 'With the link option the poster points to the same page as the title. A plain click still plays the video; Ctrl / Cmd-click, a middle click, or "Open in new tab" opens the page. Videos with no page to link to keep a plain play button.', 'xroad-videos' ); ?></p>
 					</td>
 				</tr>
 				<tr>
@@ -3662,6 +4703,21 @@ function xrv_render_settings_page() {
 						</select>
 						<p class="description">What shows beneath each video thumbnail. “Title only” gives the cleanest, feed-style grid.</p>
 					</td>
+				</tr>
+				<tr>
+					<th scope="row"><?php esc_html_e( 'Card extras', 'xroad-videos' ); ?></th>
+					<td>
+						<input type="hidden" name="xrv_settings[card_date]" value="0">
+						<label style="display:block;margin-bottom:6px"><input type="checkbox" name="xrv_settings[card_date]" value="1" <?php checked( ! empty( $s['card_date'] ) ); ?>> <?php esc_html_e( 'Show the upload date under each title', 'xroad-videos' ); ?></label>
+						<input type="hidden" name="xrv_settings[show_duration]" value="0">
+						<label style="display:block"><input type="checkbox" name="xrv_settings[show_duration]" value="1" <?php checked( ! empty( $s['show_duration'] ) ); ?>> <?php esc_html_e( 'Show the running time on each poster', 'xroad-videos' ); ?></label>
+						<p class="description" style="max-width:760px"><?php esc_html_e( 'The date uses the video\'s upload date, or its post date when none is set, and shows with any Card text choice. Hiding the running time keeps the Shortest / Longest sort working.', 'xroad-videos' ); ?></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-descchars"><?php esc_html_e( 'Trim card descriptions', 'xroad-videos' ); ?></label></th>
+					<td><input type="number" min="0" max="2000" id="xrv-descchars" name="xrv_settings[desc_chars]" value="<?php echo (int) $s['desc_chars']; ?>" class="small-text"> <?php esc_html_e( 'characters (0 = no trim)', 'xroad-videos' ); ?>
+					<p class="description" style="max-width:760px"><?php esc_html_e( 'Cuts the description shown on each card at a word boundary and adds "…". The lightbox and the watch page still show the full text. Screen-reader users also hear only the trimmed text on the card, so keep it generous, or leave it at 0 if the description carries something visitors need.', 'xroad-videos' ); ?></p></td>
 				</tr>
 				<tr>
 					<th scope="row"><label for="xrv-pp">Show before “Load more”</label></th>
@@ -3719,10 +4775,42 @@ function xrv_render_settings_page() {
 						$ic = '' !== $s['icon_color'] ? $s['icon_color'] : '#013C60';
 						$ih = '' !== $s['icon_hover'] ? $s['icon_hover'] : '#007A53';
 						?>
+						<input type="hidden" name="xrv_settings[icon_override]" value="0">
 						<label style="display:block;margin-bottom:10px"><input type="checkbox" name="xrv_settings[icon_override]" value="1" <?php checked( $icon_on ); ?>> Override the play-button color</label>
 						<label style="display:inline-flex;align-items:center;gap:8px;margin-right:24px">Idle <input type="color" name="xrv_settings[icon_color]" value="<?php echo esc_attr( $ic ); ?>"></label>
 						<label style="display:inline-flex;align-items:center;gap:8px">Hover <input type="color" name="xrv_settings[icon_hover]" value="<?php echo esc_attr( $ih ); ?>"></label>
-						<p class="description">Colors the click-to-load play button (the YouTube icon) for its idle and hover states. Leave the box unticked to inherit your theme's brand colors (defaults: navy <code>#013C60</code> / green <code>#007A53</code>). The white play triangle is unchanged. Applies to every gallery and single embed on the site.</p>
+						<p class="description"><?php echo wp_kses_post( __( 'Colors the click-to-load play button (the YouTube icon) for its idle and hover states. Leave the box unticked to inherit your theme\'s brand colors (defaults: navy <code>#013C60</code> / green <code>#007A53</code>). The white play triangle is unchanged. Applies to every gallery and single embed on the site. The hover color is used by the <strong>Zoom</strong> hover effect only; <strong>Dim</strong> and <strong>None</strong> keep the idle color.', 'xroad-videos' ) ); ?></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-hover"><?php esc_html_e( 'Hover effect', 'xroad-videos' ); ?></label></th>
+					<td>
+						<select id="xrv-hover" name="xrv_settings[hover_style]">
+							<option value="zoom" <?php selected( $s['hover_style'], 'zoom' ); ?>><?php esc_html_e( 'Zoom the poster and the play button', 'xroad-videos' ); ?></option>
+							<option value="dim"  <?php selected( $s['hover_style'], 'dim' ); ?>><?php esc_html_e( 'Dim the poster', 'xroad-videos' ); ?></option>
+							<option value="none" <?php selected( $s['hover_style'], 'none' ); ?>><?php esc_html_e( 'None', 'xroad-videos' ); ?></option>
+						</select>
+						<p class="description" style="max-width:760px"><?php esc_html_e( 'Used on mouse hover and on keyboard focus. Visitors whose system asks for reduced motion get no zoom and no fade.', 'xroad-videos' ); ?></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-align"><?php esc_html_e( 'Card text alignment', 'xroad-videos' ); ?></label></th>
+					<td>
+						<select id="xrv-align" name="xrv_settings[card_align]">
+							<option value="auto"   <?php selected( $s['card_align'], 'auto' ); ?>><?php esc_html_e( 'Automatic: left in grids, centred in carousels', 'xroad-videos' ); ?></option>
+							<option value="left"   <?php selected( $s['card_align'], 'left' ); ?>><?php esc_html_e( 'Left everywhere', 'xroad-videos' ); ?></option>
+							<option value="center" <?php selected( $s['card_align'], 'center' ); ?>><?php esc_html_e( 'Centred everywhere', 'xroad-videos' ); ?></option>
+						</select>
+						<p class="description" style="max-width:760px"><?php esc_html_e( 'Aligns the title, date, description and tags under each poster.', 'xroad-videos' ); ?></p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-subicon"><?php esc_html_e( 'Subscribe button icon', 'xroad-videos' ); ?></label></th>
+					<td>
+						<select id="xrv-subicon" name="xrv_settings[subscribe_icon]">
+							<option value="brand" <?php selected( $s['subscribe_icon'], 'brand' ); ?>><?php esc_html_e( 'YouTube red', 'xroad-videos' ); ?></option>
+							<option value="mono"  <?php selected( $s['subscribe_icon'], 'mono' ); ?>><?php esc_html_e( 'Match the button text color (play triangle cut out)', 'xroad-videos' ); ?></option>
+						</select>
 					</td>
 				</tr>
 				<tr>
@@ -3737,6 +4825,40 @@ function xrv_render_settings_page() {
 							</td>
 						</tr>
 					</table>
+				</div>
+				<div class="xrv-card"><?php echo xrv_card_head( 'xrv-sec-watchdisplay', 'play', __( 'Watch page display', 'xroad-videos' ), esc_html__( 'How each video\'s own page looks, and how a video with a dedicated URL redirects. Galleries use the Browse defaults above.', 'xroad-videos' ) ); ?>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="xrv-watchmeta"><?php esc_html_e( 'Text under the player', 'xroad-videos' ); ?></label></th>
+						<td>
+							<select id="xrv-watchmeta" name="xrv_settings[watch_meta]">
+								<option value="full"    <?php selected( $s['watch_meta'], 'full' ); ?>><?php esc_html_e( 'Full: title, description and tags', 'xroad-videos' ); ?></option>
+								<option value="compact" <?php selected( $s['watch_meta'], 'compact' ); ?>><?php esc_html_e( 'Compact: title and description', 'xroad-videos' ); ?></option>
+								<option value="title"   <?php selected( $s['watch_meta'], 'title' ); ?>><?php esc_html_e( 'Title only', 'xroad-videos' ); ?></option>
+							</select>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="xrv-watchdesc"><?php esc_html_e( 'Description', 'xroad-videos' ); ?></label></th>
+						<td>
+							<select id="xrv-watchdesc" name="xrv_settings[watch_desc]">
+								<option value="plain" <?php selected( $s['watch_desc'], 'plain' ); ?>><?php esc_html_e( 'Plain text', 'xroad-videos' ); ?></option>
+								<option value="rich"  <?php selected( $s['watch_desc'], 'rich' ); ?>><?php esc_html_e( 'Rich: keep line breaks and make web addresses clickable', 'xroad-videos' ); ?></option>
+							</select>
+							<p class="description" style="max-width:760px"><?php esc_html_e( 'Rich links to other sites get rel="nofollow noopener". Shortcodes typed into a description never run, in either mode.', 'xroad-videos' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="xrv-dedstatus"><?php esc_html_e( 'Dedicated URL redirect', 'xroad-videos' ); ?></label></th>
+						<td>
+							<select id="xrv-dedstatus" name="xrv_settings[dedicated_status]">
+								<option value="301" <?php selected( (int) $s['dedicated_status'], 301 ); ?>><?php esc_html_e( '301 Permanent', 'xroad-videos' ); ?></option>
+								<option value="302" <?php selected( (int) $s['dedicated_status'], 302 ); ?>><?php esc_html_e( '302 Temporary', 'xroad-videos' ); ?></option>
+							</select>
+							<p class="description" style="max-width:760px"><?php esc_html_e( 'When a video has a dedicated URL, the video\'s own address redirects there. Use 302 while a migration is in progress (browsers and search engines do not cache it), and 301 once the URLs are final. The xrv_dedicated_redirect_status filter can still override it per video.', 'xroad-videos' ); ?></p>
+						</td>
+					</tr>
+				</table>
 				</div>
 				<div class="xrv-card"><h2 class="title" id="xrv-sec-sync"><span class="xrv-ico"><?php echo xrv_admin_icon( 'sync' ); ?></span>Automatic channel sync</h2>
 			<p class="description" style="max-width:780px">Poll a YouTube channel or playlist and add any <strong>new</strong> uploads to the library automatically. Videos already in the library (matched by video ID) are skipped, so it is always safe to run. Needs the YouTube Data API key above.<?php if ( '' === $key ) { echo ' <strong style="color:#b32d2e">Add an API key to enable it.</strong>'; } ?></p>
@@ -3775,6 +4897,11 @@ function xrv_render_settings_page() {
 					<td><input type="number" id="xrv-sync-max" name="xrv_settings[sync_max]" value="<?php echo esc_attr( (int) $s['sync_max'] ); ?>" min="1" max="50" class="small-text">
 					<p class="description">How many of the channel's most recent uploads to scan each run (1&ndash;50).</p></td>
 				</tr>
+				<tr>
+					<th scope="row"><label for="xrv-sync-since"><?php esc_html_e( 'Only videos published since', 'xroad-videos' ); ?></label></th>
+					<td><input type="date" id="xrv-sync-since" name="xrv_settings[sync_since]" value="<?php echo esc_attr( $s['sync_since'] ); ?>">
+					<p class="description"><?php esc_html_e( 'Optional. Sync skips any video YouTube says was published before this day (site time). Leave blank to consider every upload the scan finds.', 'xroad-videos' ); ?></p></td>
+				</tr>
 			</table>
 			</div>
 
@@ -3784,20 +4911,47 @@ function xrv_render_settings_page() {
 		<?php
 		// Video URLs — write-once permalink structure (its own form; not a Settings-API save).
 		$pl = xrv_permalinks();
-		if ( isset( $_GET['xrv_urls'] ) ) {
-			echo ( '1' === $_GET['xrv_urls'] )
-				? '<div class="notice notice-success is-dismissible"><p>Video URLs saved. Rewrite rules flushed.</p></div>'
-				: '<div class="notice notice-warning is-dismissible"><p>Nothing changed. Tick the confirmation box to apply a new URL structure.</p></div>';
+		// 2.11.0: every example is the FULL address with the permalink front (video URLs are built with_front,
+		// so /blog/%category%/%postname%/ puts them at /blog/{base}/{slug}/). The result notice is
+		// picked from fixed text by a whitelisted code; nothing from the query string is ever printed.
+		$urls_front = xrv_permalink_front();
+		$urls_root  = xrv_video_base_url( '' ); // home plus the front, e.g. https://example.org/blog/
+		$urls_tail  = ( '/' === substr( user_trailingslashit( 'x' ), -1 ) ) ? '/' : '';
+		$urls_state = isset( $_GET['xrv_urls'] ) ? sanitize_key( wp_unslash( $_GET['xrv_urls'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display only
+		$urls_code  = isset( $_GET['xrv_code'] ) ? sanitize_key( wp_unslash( $_GET['xrv_code'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display only
+		$urls_errors = array(
+			/* translators: 1: the permalink front, e.g. "blog". 2: an example full video URL. */
+			'base_has_front' => sprintf( __( 'Not saved. Enter the base without the permalink front: "%1$s" comes from Settings > Permalinks and is added automatically, so "videos" gives %2$s', 'xroad-videos' ), $urls_front, xrv_video_base_url( 'videos', 'example-video' ) ),
+			'invalid'        => __( 'Not saved. That URL base could not be used, so nothing was changed.', 'xroad-videos' ),
+		);
+		$urls_notice = '';
+		if ( '1' === $urls_state ) {
+			$urls_notice = '<div class="notice notice-success inline" style="margin:0"><p>' . esc_html__( 'Video URLs saved. Rewrite rules flushed.', 'xroad-videos' ) . '</p></div>';
+		} elseif ( 'err' === $urls_state ) {
+			$urls_notice = '<div class="notice notice-error inline" style="margin:0"><p>' . esc_html( isset( $urls_errors[ $urls_code ] ) ? $urls_errors[ $urls_code ] : $urls_errors['invalid'] ) . '</p></div>';
+		} elseif ( '' !== $urls_state ) {
+			$urls_notice = '<div class="notice notice-warning inline" style="margin:0"><p>' . esc_html__( 'Nothing changed. Tick the confirmation box to apply a new URL structure.', 'xroad-videos' ) . '</p></div>';
 		}
 		?>
 		<div class="xrv-card">
 			<h2 class="title" id="xrv-sec-urls"><span class="xrv-ico"><?php echo xrv_admin_icon( 'link' ); ?></span>Video URLs</h2>
+			<?php if ( '' !== $urls_notice ) { echo '<div style="padding-top:14px">' . $urls_notice . '</div>'; } // phpcs:ignore WordPress.Security.EscapeOutput -- built from escaped fixed text above ?>
 			<?php $pub_count = (int) wp_count_posts( 'xroad_video' )->publish; ?>
-			<p style="margin:.2em 0 0">Active now: <code><?php echo esc_html( '/' . $pl['single'] . '/{slug}' ); ?></code><?php if ( '' !== $pl['archive'] ) { echo ' &nbsp;&middot;&nbsp; Collection <code>' . esc_html( '/' . $pl['archive'] . '/' ) . '</code>'; } ?> &nbsp;&middot;&nbsp; <strong><?php echo (int) $pub_count; ?></strong> published video<?php echo 1 === $pub_count ? '' : 's'; ?> using it.</p>
+			<p style="margin:.2em 0 0"><?php esc_html_e( 'Active now:', 'xroad-videos' ); ?> <code><?php echo esc_html( xrv_video_base_url( $pl['single'], '{slug}' ) ); ?></code><?php if ( '' !== $pl['archive'] ) { echo ' &nbsp;&middot;&nbsp; ' . esc_html__( 'Collection', 'xroad-videos' ) . ' <code>' . esc_html( xrv_video_base_url( $pl['archive'] ) ) . '</code>'; } ?> &nbsp;&middot;&nbsp; <strong><?php echo (int) $pub_count; ?></strong> published video<?php echo 1 === $pub_count ? '' : 's'; ?> using it.</p>
+			<?php if ( '' !== $urls_front ) : ?>
+			<p class="description" style="margin:0;padding-bottom:4px"><?php
+				printf(
+					/* translators: 1: the permalink front, e.g. "blog". 2: link to Settings > Permalinks. */
+					esc_html__( 'The /%1$s/ part of every video URL comes from %2$s (your post permalink structure) and is added automatically. Type only the base below, never "%1$s/videos".', 'xroad-videos' ),
+					esc_html( $urls_front ),
+					'<a href="' . esc_url( admin_url( 'options-permalink.php' ) ) . '">' . esc_html__( 'Settings > Permalinks', 'xroad-videos' ) . '</a>'
+				); // phpcs:ignore WordPress.Security.EscapeOutput -- format and arguments escaped individually
+			?></p>
+			<?php endif; ?>
 
 			<div class="xrv-warn">
-				<?php if ( $pub_count > 0 ) : ?><p style="margin:0 0 .5em"><strong>&#9888; <?php echo (int) $pub_count; ?> published video URL<?php echo 1 === $pub_count ? ' is' : 's are'; ?> already live under <code><?php echo esc_html( '/' . $pl['single'] . '/' ); ?></code>.</strong> Run the two-part test below before you change the base.</p><?php endif; ?>
-				<p style="margin:0 0 .5em"><strong>Changing a URL that is already live is a one-way SEO risk.</strong> The default <code>/video/</code> is safe for a fresh setup. Once a video URL has been published, changing its base breaks every existing link to it and can drop its search rankings. (Also pick a base that is not already a page slug on this site, or they will collide.)</p>
+				<?php if ( $pub_count > 0 ) : ?><p style="margin:0 0 .5em"><strong>&#9888; <?php echo (int) $pub_count; ?> published video URL<?php echo 1 === $pub_count ? ' is' : 's are'; ?> already live under <code><?php echo esc_html( xrv_video_base_url( $pl['single'] ) ); ?></code>.</strong> Run the two-part test below before you change the base.</p><?php endif; ?>
+				<p style="margin:0 0 .5em"><strong>Changing a URL that is already live is a one-way SEO risk.</strong> The default <code><?php echo esc_html( xrv_video_base_url( 'video' ) ); ?></code> is safe for a fresh setup. Once a video URL has been published, changing its base breaks every existing link to it and can drop its search rankings. (Also pick a base that is not already a page slug on this site, or they will collide.)</p>
 				<p style="margin:0 0 .35em"><strong>Run this two-part test before changing a base that is in use. If EITHER is true, do not change it. It is a showstopper:</strong></p>
 				<ol style="margin:0 0 .5em 1.4em">
 					<li><strong>Organic traffic.</strong> Is any URL under this base getting search or organic visits? Check Search Console or analytics, filtered to the path.</li>
@@ -3812,13 +4966,13 @@ function xrv_render_settings_page() {
 				<table class="form-table" role="presentation">
 					<tr>
 						<th scope="row"><label for="xrv-single">Single video base</label></th>
-						<td><code>/</code> <input type="text" id="xrv-single" name="xrv_single" value="<?php echo esc_attr( $pl['single'] ); ?>" style="width:200px"> <code>/{slug}</code>
-						<p class="description">A single video's own page. e.g. <code>video</code> &rarr; <code>/video/my-clip/</code>.</p></td>
+						<td><code><?php echo esc_html( $urls_root ); ?></code> <input type="text" id="xrv-single" name="xrv_single" value="<?php echo esc_attr( $pl['single'] ); ?>" style="width:200px"> <code><?php echo esc_html( '/{slug}' . $urls_tail ); ?></code>
+						<p class="description"><?php esc_html_e( 'A single video\'s own page, e.g.', 'xroad-videos' ); ?> <code>video</code> &rarr; <code><?php echo esc_html( xrv_video_base_url( 'video', 'my-clip' ) ); ?></code></p></td>
 					</tr>
 					<tr>
 						<th scope="row"><label for="xrv-archive">Collection base</label></th>
-						<td><code>/</code> <input type="text" id="xrv-archive" name="xrv_archive" value="<?php echo esc_attr( $pl['archive'] ); ?>" style="width:200px" placeholder="(none)"> <code>/</code>
-						<p class="description">Optional archive listing every video. e.g. <code>videos</code> &rarr; <code>/videos/</code>. Blank = videos via shortcode/block only.</p></td>
+						<td><code><?php echo esc_html( $urls_root ); ?></code> <input type="text" id="xrv-archive" name="xrv_archive" value="<?php echo esc_attr( $pl['archive'] ); ?>" style="width:200px" placeholder="(none)"> <code>/</code>
+						<p class="description"><?php esc_html_e( 'Optional archive listing every video, e.g.', 'xroad-videos' ); ?> <code>videos</code> &rarr; <code><?php echo esc_html( xrv_video_base_url( 'videos' ) ); ?></code>. <?php esc_html_e( 'Blank = videos via shortcode/block only.', 'xroad-videos' ); ?></p></td>
 					</tr>
 					<tr>
 						<th scope="row">Confirm</th>
@@ -3847,11 +5001,16 @@ function xrv_render_settings_page() {
 
 		<?php
 		// On-demand sync (separate form: it performs an action, not a settings save).
-		if ( isset( $_GET['xrv_synced'] ) ) {
+		if ( isset( $_GET['xrv_synced'] ) && 'busy' === sanitize_key( wp_unslash( $_GET['xrv_synced'] ) ) ) {
+			echo '<div class="notice notice-warning is-dismissible"><p>' . esc_html__( 'Another sync or WP-CLI run is changing the library right now, so nothing was synced. Try again in a few minutes.', 'xroad-videos' ) . '</p></div>';
+		} elseif ( isset( $_GET['xrv_synced'] ) ) {
 			$last = get_option( 'xrv_sync_last', array() );
 			if ( ! empty( $last['ok'] ) ) {
 				$msg = sprintf( 'Sync complete: checked %d, added %d new video%s.', (int) $last['checked'], (int) $last['added'], 1 === (int) $last['added'] ? '' : 's' );
 				if ( ! empty( $last['titles'] ) ) { $msg .= ' (' . esc_html( implode( ', ', array_map( 'sanitize_text_field', $last['titles'] ) ) ) . ')'; }
+				/* translators: 1: videos skipped (private, unlisted, failed uploads, before the since day), 2: videos deferred to the next run. */
+				$msg .= ' ' . esc_html( sprintf( __( 'Skipped %1$d, deferred %2$d.', 'xroad-videos' ), (int) ( $last['skipped'] ?? 0 ), (int) ( $last['deferred'] ?? 0 ) ) );
+				foreach ( array( 'msg', 'api_msg' ) as $k ) { if ( ! empty( $last[ $k ] ) ) { $msg .= ' ' . esc_html( $last[ $k ] ); } }
 				echo '<div class="notice notice-success is-dismissible"><p>' . wp_kses_post( $msg ) . '</p></div>';
 			} elseif ( ! empty( $last['msg'] ) ) {
 				echo '<div class="notice notice-error is-dismissible"><p>Sync could not run: ' . esc_html( $last['msg'] ) . '</p></div>';
@@ -3869,7 +5028,7 @@ function xrv_render_settings_page() {
 			<?php
 			$last = get_option( 'xrv_sync_last', array() );
 			if ( ! empty( $last['time'] ) ) {
-				echo '<p class="description" style="margin:0;padding-bottom:16px">Last run: <strong>' . esc_html( get_date_from_gmt( get_gmt_from_date( $last['time'] ), 'M j, Y g:i a' ) ) . '</strong> &mdash; ' . ( ! empty( $last['ok'] ) ? esc_html( sprintf( 'checked %d, added %d.', (int) $last['checked'], (int) $last['added'] ) ) : esc_html( $last['msg'] ) ) . '</p>';
+				echo '<p class="description" style="margin:0;padding-bottom:16px">Last run: <strong>' . esc_html( get_date_from_gmt( get_gmt_from_date( $last['time'] ), 'M j, Y g:i a' ) ) . '</strong> &mdash; ' . ( ! empty( $last['ok'] ) ? esc_html( sprintf( /* translators: 1: videos checked, 2: added, 3: skipped, 4: deferred to the next run. */ __( 'checked %1$d, added %2$d, skipped %3$d, deferred %4$d.', 'xroad-videos' ), (int) $last['checked'], (int) $last['added'], (int) ( $last['skipped'] ?? 0 ), (int) ( $last['deferred'] ?? 0 ) ) ) : esc_html( $last['msg'] ) ) . ( ! empty( $last['api_msg'] ) && ! empty( $last['ok'] ) ? ' ' . esc_html( $last['api_msg'] ) : '' ) . '</p>';
 			}
 			?>
 		</div>
@@ -3878,7 +5037,7 @@ function xrv_render_settings_page() {
 		// Help / FAQ — the same bold-carat accordion used throughout, gathered as a quick-reference card.
 		xrv_faq_card( 'xrv-sec-faq', 'Questions & answers', array(
 			'Which consent mode should I choose?' =>
-				'<p><strong>Global</strong> fits almost everyone: EU / UK / EEA / Swiss visitors get a one-time opt-in prompt, everyone else plays in one click, and nobody contacts YouTube until they act. Pick <strong>Strict GDPR</strong> to prompt every visitor worldwide (the most defensible posture), or <strong>Facade only</strong> to drop the prompt entirely &mdash; still cookie-free until the click, just with no extra notice.</p>',
+				wp_kses_post( __( '<p><strong>Global</strong> fits almost everyone: EU / UK / EEA / Swiss visitors get a one-time opt-in prompt, everyone else plays in one click, and no visitor\'s browser contacts YouTube before they click play. (If you turn on <em>Warm-up on hover</em>, visitors who need no prompt open a cookie-free connection when they hover a video.) Pick <strong>Strict GDPR</strong> to prompt every visitor worldwide (the most defensible posture), or <strong>Facade only</strong> to drop the prompt entirely: still cookie-free until the click, just with no extra notice.</p>', 'xroad-videos' ) ),
 			'Do I need the YouTube Data API key?' =>
 				'<p>No, for everyday use. Pasting video links or uploading a list works with no key (you get the title and thumbnail). You only need a free key to pull a <strong>whole channel or playlist</strong> with durations and descriptions, and to run <strong>automatic sync</strong>.</p>',
 			'Will changing a video URL hurt my SEO?' =>
@@ -3962,17 +5121,27 @@ function xrv_yt_playlist_ids( $playlist_id, $key, $max = 500 ) {
 	} while ( $page && count( $ids ) < $max );
 	return $ids;
 }
+/* Video details keyed by video ID. 'upload' stays the UTC day of publishedAt (what the importer has always
+ * stored); 2.11.0 adds the fields channel sync gates on: privacy (status.privacyStatus), upload_status
+ * (status.uploadStatus), live (snippet.liveBroadcastContent) and published_at (the full publishedAt).
+ * An ID the API does not return (deleted, private, or a partial response) is simply absent. */
 function xrv_yt_videos_meta( $ids, $key ) {
 	$out = array();
 	foreach ( array_chunk( $ids, 50 ) as $chunk ) {
-		$r = xrv_yt_get( 'videos', array( 'part' => 'snippet,contentDetails', 'id' => implode( ',', $chunk ), 'maxResults' => 50 ), $key );
+		$r = xrv_yt_get( 'videos', array( 'part' => 'snippet,contentDetails,status', 'id' => implode( ',', $chunk ), 'maxResults' => 50 ), $key );
 		if ( is_wp_error( $r ) ) { return $r; }
 		foreach ( (array) ( $r['items'] ?? array() ) as $it ) {
+			if ( ! is_array( $it ) || empty( $it['id'] ) || ! is_string( $it['id'] ) ) { continue; }
+			$pub = isset( $it['snippet']['publishedAt'] ) ? (string) $it['snippet']['publishedAt'] : '';
 			$out[ $it['id'] ] = array(
-				'title'    => $it['snippet']['title'] ?? '',
-				'desc'     => $it['snippet']['description'] ?? '',
-				'upload'   => isset( $it['snippet']['publishedAt'] ) ? substr( $it['snippet']['publishedAt'], 0, 10 ) : '',
-				'duration' => $it['contentDetails']['duration'] ?? '',
+				'title'         => $it['snippet']['title'] ?? '',
+				'desc'          => $it['snippet']['description'] ?? '',
+				'upload'        => '' !== $pub ? substr( $pub, 0, 10 ) : '',
+				'duration'      => $it['contentDetails']['duration'] ?? '',
+				'privacy'       => (string) ( $it['status']['privacyStatus'] ?? '' ),
+				'upload_status' => (string) ( $it['status']['uploadStatus'] ?? '' ),
+				'live'          => (string) ( $it['snippet']['liveBroadcastContent'] ?? '' ),
+				'published_at'  => $pub,
 			);
 		}
 	}
@@ -4189,7 +5358,7 @@ function xrv_ajax_import_run() {
 		}
 
 		$short = xrv_yt_is_short( $id );
-		if ( $short ) { update_post_meta( $pid, '_xrv_short', '1' ); }
+		if ( $short ) { xrv_mark_short( $pid, $id ); }
 		if ( ! (int) get_post_meta( $pid, '_xrv_local_thumb_id', true ) ) {
 			$att = xrv_sideload_thumbnail( $pid, $id, 'youtube', $short ? xrv_thumb_candidates( $id, 'youtube', true ) : null );
 			if ( ! is_wp_error( $att ) ) { update_post_meta( $pid, '_xrv_local_thumb_id', (int) $att ); set_post_thumbnail( $pid, (int) $att ); }
@@ -4413,10 +5582,10 @@ function xrv_rebuild_poster( $id ) {
 	$old = (int) get_post_meta( $id, '_xrv_local_thumb_id', true );
 	update_post_meta( $id, '_xrv_local_thumb_id', (int) $att );
 	set_post_thumbnail( $id, (int) $att );
-	// Replace the old plugin-generated poster only after the new one is in place. Never delete the shared
-	// site-wide default poster (an admin-chosen library image), only this video's own sideloaded thumb.
-	$default = (int) ( xrv_get_settings()['default_thumb_id'] ?? 0 );
-	if ( $old && $old !== (int) $att && $old !== $default ) { wp_delete_attachment( $old, true ); }
+	// Replace the old plugin-generated poster only after the new one is in place, and only when it is this
+	// video's OWN image: never the site default, an imported/reused library image parented elsewhere, or
+	// an attachment another post still uses (2.11.0: xrv_attachment_is_exclusive).
+	if ( $old && $old !== (int) $att && xrv_attachment_is_exclusive( $old, $id ) ) { wp_delete_attachment( $old, true ); }
 	return true;
 }
 
@@ -4496,8 +5665,10 @@ function xrv_uninstall_cleanup() {
 		$posts = get_posts( array( 'post_type' => 'xroad_video', 'post_status' => 'any', 'numberposts' => -1, 'fields' => 'ids' ) );
 		foreach ( $posts as $pid ) {
 			if ( $delete_thumbs ) {
+				// Only the video's own poster: a shared image, or one parented elsewhere (a reused featured
+				// image from a migration), stays in the Media Library.
 				$tid = (int) get_post_meta( $pid, '_xrv_local_thumb_id', true );
-				if ( $tid ) {
+				if ( $tid && xrv_attachment_is_exclusive( $tid, $pid ) ) {
 					wp_delete_attachment( $tid, true );
 				}
 			}
@@ -4520,6 +5691,2526 @@ function xrv_uninstall_cleanup() {
 	delete_option( 'xrv_settings' );
 	delete_option( 'xrv_permalinks' );
 	delete_option( 'xrv_sync_last' );
+	delete_option( 'xrv_lock' );          // 2.11.0 shared write lock
+	delete_transient( 'xrv_sync_lock' );   // pre-2.11.0 sync lock
 	delete_option( 'xrv_delete_data_on_uninstall' );
 	delete_option( 'xrv_delete_thumbs_on_uninstall' );
+}
+
+/* =================================================================================================
+ * 12. WP-CLI  (2.11.0)
+ *     wp xrv import | rollback | collection set | apply | export. Every write command takes the shared
+ *     library lock (owner = run id, heartbeat per record), supports --dry-run (per-field diffs, no
+ *     writes) and keeps a JSON run log in wp-content/xrv-runs/ (rewritten atomically after each record)
+ *     holding the before-image of every changed field, so `wp xrv rollback <log>` can undo the run.
+ *     Chunked and resumable for hosts that drop idle SSH sessions (--max-seconds, --limit, --resume).
+ *     Import never fetches a URL: no oEmbed, no API, no remote thumbnail. Run every command with the
+ *     global --user=<admin> flag (capability checks and kses filtering need a real administrator).
+ * ================================================================================================= */
+
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+
+	/* ---- 12a. Small shared helpers ---- */
+
+	/** UTC timestamp for run logs. */
+	function xrv_cli_now() {
+		return gmdate( 'Y-m-d\TH:i:s\Z' );
+	}
+
+	/** Strip anything that could carry the YouTube API key before a log or manifest is written. */
+	function xrv_cli_scrub( $v, $key = null ) {
+		if ( null === $key ) {
+			$key = (string) get_option( 'xrv_yt_api_key', '' );
+		}
+		if ( is_array( $v ) ) {
+			$out = array();
+			foreach ( $v as $k => $item ) {
+				if ( is_string( $k ) && false !== stripos( $k, 'api_key' ) ) {
+					continue;
+				}
+				$out[ $k ] = xrv_cli_scrub( $item, $key );
+			}
+			return $out;
+		}
+		return ( is_string( $v ) && '' !== $key && false !== strpos( $v, $key ) ) ? '[redacted]' : $v;
+	}
+
+	/** One value for a diff line: quoted, single-line, truncated. */
+	function xrv_cli_fmt( $v ) {
+		if ( null === $v ) {
+			return '(none)';
+		}
+		if ( is_bool( $v ) ) {
+			return $v ? 'true' : 'false';
+		}
+		if ( is_array( $v ) ) {
+			return (string) wp_json_encode( $v );
+		}
+		$s = str_replace( array( "\r\n", "\n", "\r" ), '\n', (string) $v );
+		if ( function_exists( 'mb_strlen' ) && mb_strlen( $s ) > 70 ) {
+			$s = mb_substr( $s, 0, 67 ) . '...';
+		} elseif ( strlen( $s ) > 70 ) {
+			$s = substr( $s, 0, 67 ) . '...';
+		}
+		return '"' . $s . '"';
+	}
+
+	/** Print per-field diffs ({field, before, after}) under a record line; term IDs print as names. */
+	function xrv_cli_print_diffs( $diffs, $indent = '      ' ) {
+		foreach ( (array) $diffs as $d ) {
+			$b = $d['before'];
+			$a = $d['after'];
+			if ( 0 === strpos( (string) $d['field'], 'terms.' ) ) {
+				$tax = substr( (string) $d['field'], 6 );
+				$b   = xrv_cli_term_label( $tax, $b );
+				$a   = xrv_cli_term_label( $tax, $a );
+			}
+			WP_CLI::log( $indent . $d['field'] . ': ' . xrv_cli_fmt( $b ) . ' -> ' . xrv_cli_fmt( $a ) );
+		}
+	}
+
+	/** Term IDs as names for output; a dry-run placeholder "new:Name" prints as "Name (new)". */
+	function xrv_cli_term_label( $tax, $ids ) {
+		if ( null === $ids ) {
+			return null;
+		}
+		$out = array();
+		foreach ( (array) $ids as $id ) {
+			if ( is_string( $id ) && 0 === strpos( $id, 'new:' ) ) {
+				$out[] = substr( $id, 4 ) . ' (new)';
+				continue;
+			}
+			$t     = get_term( (int) $id, $tax );
+			$out[] = ( $t && ! is_wp_error( $t ) ) ? html_entity_decode( $t->name, ENT_QUOTES, 'UTF-8' ) : '#' . (int) $id;
+		}
+		return $out;
+	}
+
+	/** Writes need a real administrator: capability-gated helpers and kses both key off the current user. */
+	function xrv_cli_require_admin() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			WP_CLI::error( 'Run this command as an administrator: add the global flag --user=<admin-login>.' );
+		}
+	}
+
+	/** Take the shared library lock for this run, or print the holder and exit non-zero. */
+	function xrv_cli_lock( $run_id, $cmd ) {
+		$got = xrv_lock_acquire( $run_id, $cmd );
+		if ( true !== $got ) {
+			$h = (array) $got;
+			WP_CLI::error( sprintf(
+				'The XRV library is locked by another writer: owner %s, command "%s", started %s, last heartbeat %d seconds ago. Wait for it to finish; a lock idle for 15 minutes can be taken over.',
+				isset( $h['owner'] ) ? $h['owner'] : '?',
+				isset( $h['cmd'] ) ? $h['cmd'] : '?',
+				! empty( $h['started'] ) ? gmdate( 'Y-m-d H:i:s', (int) $h['started'] ) . ' UTC' : '?',
+				max( 0, time() - ( isset( $h['heartbeat'] ) ? (int) $h['heartbeat'] : 0 ) )
+			) );
+		}
+		// Released on every exit path, including WP_CLI::error() and fatals.
+		register_shutdown_function( 'xrv_lock_release', (string) $run_id );
+	}
+
+	/** True when $id looks like a YouTube video ID. */
+	function xrv_cli_valid_yt_id( $id ) {
+		return is_string( $id ) && 1 === preg_match( '/^[A-Za-z0-9_-]{11}$/', $id );
+	}
+
+	/** Parse "provider:id" (or a bare ID, meaning youtube). Returns array( provider, id ) or WP_Error. */
+	function xrv_cli_parse_ref( $ref ) {
+		$ref = trim( (string) $ref );
+		$pos = strpos( $ref, ':' );
+		$provider = ( false === $pos ) ? 'youtube' : strtolower( trim( substr( $ref, 0, $pos ) ) );
+		$id       = ( false === $pos ) ? $ref : trim( substr( $ref, $pos + 1 ) );
+		if ( 'youtube' !== $provider ) {
+			return new WP_Error( 'xrv_provider', sprintf( '"%s": provider "%s" is not supported (youtube only in 2.11)', $ref, $provider ) );
+		}
+		if ( ! xrv_cli_valid_yt_id( $id ) ) {
+			return new WP_Error( 'xrv_id', sprintf( '"%s" is not a valid YouTube video ID', $ref ) );
+		}
+		return array( $provider, $id );
+	}
+
+	/**
+	 * Every xroad_video with this provider + ID, in ANY status (trash included), lowest ID first. A missing
+	 * _xrv_provider counts as youtube. IDs compare case-sensitively in PHP (MySQL collations do not).
+	 */
+	function xrv_cli_find_videos( $provider, $id ) {
+		global $wpdb;
+		$rows = $wpdb->get_results( $wpdb->prepare(
+			"SELECT p.ID, m.meta_value AS vid, pr.meta_value AS prov FROM {$wpdb->posts} p INNER JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_xrv_video_id' LEFT JOIN {$wpdb->postmeta} pr ON pr.post_id = p.ID AND pr.meta_key = '_xrv_provider' WHERE p.post_type = 'xroad_video' AND m.meta_value = %s ORDER BY p.ID ASC",
+			(string) $id
+		) );
+		$out = array();
+		foreach ( (array) $rows as $r ) {
+			$prov = ( null === $r->prov || '' === (string) $r->prov ) ? 'youtube' : (string) $r->prov;
+			if ( (string) $r->vid === (string) $id && $prov === $provider && ! in_array( (int) $r->ID, $out, true ) ) {
+				$out[] = (int) $r->ID;
+			}
+		}
+		return $out;
+	}
+
+	/** "provider:id" for a video post ('' when it has no video ID). */
+	function xrv_cli_video_ref( $post_id ) {
+		$id = (string) get_post_meta( $post_id, '_xrv_video_id', true );
+		if ( '' === $id ) {
+			return '';
+		}
+		$prov = (string) get_post_meta( $post_id, '_xrv_provider', true );
+		return ( '' === $prov ? 'youtube' : $prov ) . ':' . $id;
+	}
+
+	/** The URL a video with this slug has (or would have) under the given single base: home + front + base + slug. */
+	function xrv_cli_video_url( $slug, $base = null ) {
+		if ( null === $base ) {
+			$pl   = xrv_permalinks();
+			$base = $pl['single'];
+		}
+		if ( '' === (string) get_option( 'permalink_structure' ) ) {
+			return add_query_arg( 'xroad_video', $slug, home_url( '/' ) );
+		}
+		$front = xrv_permalink_front();
+		$path  = trim( ( '' !== $front ? $front . '/' : '' ) . $base . '/' . $slug, '/' );
+		return home_url( user_trailingslashit( '/' . $path ) );
+	}
+
+	/** A dedicated URL from a file: '/path' resolves against home_url(), absolute http(s) is kept, else WP_Error. */
+	function xrv_cli_resolve_url( $raw ) {
+		$raw = trim( (string) $raw );
+		if ( '' === $raw ) {
+			return '';
+		}
+		if ( '/' === $raw[0] && ( 1 === strlen( $raw ) || '/' !== $raw[1] ) ) {
+			$url = home_url( $raw );
+		} elseif ( preg_match( '#^https?://[^/\s]+#i', $raw ) ) {
+			$url = $raw;
+		} else {
+			return new WP_Error( 'xrv_url', sprintf( 'dedicated_url "%s" must be site-relative ("/path/") or an absolute http(s) URL', $raw ) );
+		}
+		$clean = esc_url_raw( $url, array( 'http', 'https' ) );
+		return '' === $clean ? new WP_Error( 'xrv_url', sprintf( 'dedicated_url "%s" is not a valid URL', $raw ) ) : $clean;
+	}
+
+	/** An on-site absolute URL back to its site-relative form (export); off-site URLs are returned unchanged. */
+	function xrv_cli_relative_url( $url ) {
+		$url  = (string) $url;
+		$home = untrailingslashit( home_url() );
+		if ( '' !== $url && 0 === strpos( $url, $home . '/' ) ) {
+			return substr( $url, strlen( $home ) );
+		}
+		return $url;
+	}
+
+	/* ---- 12b. Run log: one JSON file per run, rewritten atomically (temp file + rename) ---- */
+	class XRV_CLI_Log {
+		public $path = '';
+		public $data = array();
+		private $pos = array(); // record ref => position in data['records']
+
+		/** The default log directory, created with an index.php and a deny-all .htaccess. */
+		public static function default_dir() {
+			$dir = trailingslashit( WP_CONTENT_DIR ) . 'xrv-runs';
+			if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
+				WP_CLI::error( 'Cannot create the run-log directory ' . $dir );
+			}
+			if ( ! file_exists( $dir . '/index.php' ) ) {
+				file_put_contents( $dir . '/index.php', "<?php // Silence is golden.\n" );
+			}
+			if ( ! file_exists( $dir . '/.htaccess' ) ) {
+				file_put_contents( $dir . '/.htaccess', "Deny from all\n" );
+			}
+			return $dir;
+		}
+
+		/** A fresh run id: 16 random hex characters (also the lock owner and the _xrv_run_id stamp). */
+		public static function new_id() {
+			return bin2hex( random_bytes( 8 ) );
+		}
+
+		/** Start a new run log, write it, and print its path. Take the lock with $run_id BEFORE calling this. */
+		public static function start( $kind, $command, $args, $assoc, $dry_run, $override = '', $run_id = '' ) {
+			$log      = new self();
+			$run_id   = '' !== (string) $run_id ? (string) $run_id : self::new_id();
+			$name     = 'xrv-' . sanitize_file_name( str_replace( ' ', '-', $command ) ) . '-' . gmdate( 'Ymd-His' ) . '-' . $run_id . '.json';
+			$override = (string) $override;
+			if ( '' === $override ) {
+				$log->path = self::default_dir() . '/' . $name;
+			} else {
+				$dir_like  = is_dir( $override ) || in_array( substr( $override, -1 ), array( '/', '\\' ), true );
+				$log->path = $dir_like ? trailingslashit( $override ) . $name : $override;
+				if ( ! is_dir( dirname( $log->path ) ) && ! wp_mkdir_p( dirname( $log->path ) ) ) {
+					WP_CLI::error( 'Cannot create the directory for --log=' . $override );
+				}
+			}
+			$log->data = array(
+				'kind'           => $kind,
+				'run_id'         => $run_id,
+				'command'        => $command,
+				'args'           => array( 'positional' => array_values( (array) $args ), 'assoc' => (array) $assoc ),
+				'home_url'       => home_url(),
+				'plugin_version' => defined( 'XRV_VERSION' ) ? XRV_VERSION : '',
+				'user'           => wp_get_current_user()->user_login,
+				'dry_run'        => (bool) $dry_run,
+				'started'        => xrv_cli_now(),
+				'finished'       => null,
+				'state'          => 'running',
+				'records'        => array(),
+			);
+			$log->save();
+			WP_CLI::log( ( $dry_run ? 'Dry run (nothing will be written). ' : '' ) . 'Run log: ' . $log->path );
+			return $log;
+		}
+
+		/** Open an existing run log (resume / rollback). */
+		public static function open( $path ) {
+			if ( ! is_file( $path ) || ! is_readable( $path ) ) {
+				WP_CLI::error( 'Run log not found: ' . $path );
+			}
+			$data = json_decode( (string) file_get_contents( $path ), true );
+			if ( ! is_array( $data ) || empty( $data['kind'] ) || empty( $data['run_id'] ) ) {
+				WP_CLI::error( 'Not an XRV run log: ' . $path );
+			}
+			$log       = new self();
+			$log->path = $path;
+			$log->data = $data;
+			$log->data['records'] = ( isset( $data['records'] ) && is_array( $data['records'] ) ) ? array_values( $data['records'] ) : array();
+			foreach ( $log->data['records'] as $i => $r ) {
+				if ( isset( $r['ref'] ) ) {
+					$log->pos[ (string) $r['ref'] ] = $i;
+				}
+			}
+			return $log;
+		}
+
+		/** A record by ref, or null. */
+		public function get( $ref ) {
+			$ref = (string) $ref;
+			return isset( $this->pos[ $ref ] ) ? $this->data['records'][ $this->pos[ $ref ] ] : null;
+		}
+
+		/** Insert or replace a record, then rewrite the log. */
+		public function put( $ref, $entry ) {
+			$ref   = (string) $ref;
+			$entry = array_merge( array( 'ref' => $ref ), (array) $entry );
+			if ( isset( $this->pos[ $ref ] ) ) {
+				$this->data['records'][ $this->pos[ $ref ] ] = $entry;
+			} else {
+				$this->pos[ $ref ]       = count( $this->data['records'] );
+				$this->data['records'][] = $entry;
+			}
+			$this->save();
+		}
+
+		/** Close the run: state = complete | stopped | failed | refused. */
+		public function finish( $state, $extra = array() ) {
+			$this->data          = array_merge( $this->data, (array) $extra );
+			$this->data['state'] = $state;
+			$this->data['finished'] = xrv_cli_now();
+			$this->save();
+		}
+
+		/** Atomic rewrite: encode (API key scrubbed), write a temp file beside the log, rename over it. */
+		public function save() {
+			$json = wp_json_encode( xrv_cli_scrub( $this->data ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE );
+			if ( false === $json ) {
+				WP_CLI::error( 'Could not encode the run log ' . $this->path );
+			}
+			$tmp = $this->path . '.tmp' . getmypid();
+			if ( false === file_put_contents( $tmp, $json . "\n" ) ) {
+				WP_CLI::error( 'Could not write the run log ' . $this->path );
+			}
+			if ( ! @rename( $tmp, $this->path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				@unlink( $this->path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				if ( ! @rename( $tmp, $this->path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					WP_CLI::error( 'Could not replace the run log ' . $this->path );
+				}
+			}
+		}
+	}
+
+	/* ---- 12c. Field images. A field is "post.<column>", "meta.<key>" (null = absent) or "terms.<taxonomy>"
+	 *      (sorted term IDs). Diffs, before-images, post-apply images and restores all use these keys. ---- */
+
+	function xrv_cli_field_get( $post_id, $field ) {
+		$parts = explode( '.', (string) $field, 2 );
+		$name  = isset( $parts[1] ) ? $parts[1] : '';
+		if ( 'post' === $parts[0] ) {
+			$p = get_post( $post_id );
+			if ( ! $p ) {
+				return null;
+			}
+			return in_array( $name, array( 'menu_order', 'post_parent' ), true ) ? (int) $p->$name : (string) $p->$name;
+		}
+		if ( 'meta' === $parts[0] ) {
+			if ( ! metadata_exists( 'post', $post_id, $name ) ) {
+				return null;
+			}
+			$v = get_post_meta( $post_id, $name, true );
+			return is_scalar( $v ) ? (string) $v : maybe_serialize( $v );
+		}
+		if ( 'terms' === $parts[0] ) {
+			$ids = wp_get_object_terms( $post_id, $name, array( 'fields' => 'ids' ) );
+			$ids = is_wp_error( $ids ) ? array() : array_map( 'intval', $ids );
+			sort( $ids );
+			return $ids;
+		}
+		return null;
+	}
+
+	/** Field values equal? Arrays compare as sorted lists; null (absent) only equals null. */
+	function xrv_cli_same( $a, $b ) {
+		if ( is_array( $a ) || is_array( $b ) ) {
+			$a = array_map( 'strval', (array) $a );
+			$b = array_map( 'strval', (array) $b );
+			sort( $a );
+			sort( $b );
+			return $a === $b;
+		}
+		if ( null === $a || null === $b ) {
+			return null === $a && null === $b;
+		}
+		return (string) $a === (string) $b;
+	}
+
+	/** Field-aware equality: _xrv_published_at compares as a UTC instant (a zone-less value counts as UTC). */
+	function xrv_cli_same_field( $field, $a, $b ) {
+		if ( 'meta._xrv_published_at' === $field && is_string( $a ) && is_string( $b ) && '' !== $a && '' !== $b ) {
+			$zone = '/(Z|[+-]\d{2}:?\d{2})$/i';
+			$ta   = strtotime( preg_match( $zone, $a ) ? $a : $a . ' UTC' );
+			$tb   = strtotime( preg_match( $zone, $b ) ? $b : $b . ' UTC' );
+			if ( false !== $ta && false !== $tb ) {
+				return $ta === $tb;
+			}
+		}
+		return xrv_cli_same( $a, $b );
+	}
+
+	/**
+	 * Compare desired field values with a post (0 = not created yet). Returns the diffs {field, before,
+	 * after}, the before-image of every changed field, and the set to write. post_date and post_date_gmt
+	 * always travel together so a restore is exact.
+	 */
+	function xrv_cli_diff( $post_id, $desired ) {
+		$res = array( 'diffs' => array(), 'before' => array(), 'set' => array() );
+		foreach ( (array) $desired as $f => $v ) {
+			$cur = $post_id ? xrv_cli_field_get( $post_id, $f ) : null;
+			if ( ! xrv_cli_same_field( $f, $cur, $v ) ) {
+				$res['diffs'][]      = array( 'field' => $f, 'before' => $cur, 'after' => $v );
+				$res['before'][ $f ] = $cur;
+				$res['set'][ $f ]    = $v;
+			}
+		}
+		$pairs = array( 'post.post_date' => 'post.post_date_gmt', 'post.post_date_gmt' => 'post.post_date' );
+		foreach ( $pairs as $one => $other ) {
+			if ( array_key_exists( $one, $res['set'] ) && ! array_key_exists( $other, $res['set'] ) && array_key_exists( $other, $desired ) ) {
+				$res['set'][ $other ]    = $desired[ $other ];
+				$res['before'][ $other ] = $post_id ? xrv_cli_field_get( $post_id, $other ) : null;
+			}
+		}
+		return $res;
+	}
+
+	/** Write fields to a post: post columns in one wp_update_post, then meta, then terms. Returns error strings. */
+	function xrv_cli_fields_set( $post_id, $fields ) {
+		$errors = array();
+		$post   = array();
+		$meta   = array();
+		$terms  = array();
+		foreach ( (array) $fields as $f => $v ) {
+			$parts = explode( '.', (string) $f, 2 );
+			if ( 'post' === $parts[0] ) {
+				$post[ $parts[1] ] = $v;
+			} elseif ( 'meta' === $parts[0] ) {
+				$meta[ $parts[1] ] = $v;
+			} elseif ( 'terms' === $parts[0] ) {
+				$terms[ $parts[1] ] = $v;
+			}
+		}
+		if ( $post ) {
+			$post['ID'] = (int) $post_id;
+			if ( array_key_exists( 'post_date', $post ) || array_key_exists( 'post_date_gmt', $post ) ) {
+				$post['edit_date'] = true;
+			}
+			$r = wp_update_post( wp_slash( $post ), true );
+			if ( is_wp_error( $r ) ) {
+				$errors[] = 'post fields: ' . $r->get_error_message();
+			}
+		}
+		foreach ( $meta as $k => $v ) {
+			if ( null === $v ) {
+				delete_post_meta( $post_id, $k );
+				continue;
+			}
+			$v = is_serialized( $v ) ? maybe_unserialize( $v ) : (string) $v;
+			update_post_meta( $post_id, $k, wp_slash( $v ) );
+		}
+		foreach ( $terms as $tax => $ids ) {
+			$keep = array();
+			foreach ( (array) $ids as $tid ) {
+				$t = get_term( (int) $tid, $tax );
+				if ( $t && ! is_wp_error( $t ) ) {
+					$keep[] = (int) $t->term_id;
+				} else {
+					$errors[] = sprintf( '%s term %s no longer exists', $tax, $tid );
+				}
+			}
+			$r = wp_set_object_terms( $post_id, $keep, $tax, false );
+			if ( is_wp_error( $r ) ) {
+				$errors[] = $tax . ': ' . $r->get_error_message();
+			}
+		}
+		clean_post_cache( $post_id );
+		return $errors;
+	}
+
+	/** Read a JSON file into an array, or exit with a clear error. */
+	function xrv_cli_read_json( $path, $what ) {
+		if ( ! is_file( $path ) || ! is_readable( $path ) ) {
+			WP_CLI::error( sprintf( '%s not found or not readable: %s', $what, $path ) );
+		}
+		$raw  = (string) file_get_contents( $path );
+		$raw  = ( 0 === strpos( $raw, "\xEF\xBB\xBF" ) ) ? substr( $raw, 3 ) : $raw; // tolerate a UTF-8 BOM
+		$data = json_decode( $raw, true );
+		if ( ! is_array( $data ) ) {
+			WP_CLI::error( sprintf( '%s is not valid JSON (%s): %s', $what, json_last_error_msg(), $path ) );
+		}
+		return $data;
+	}
+
+	/* ---- 12d. Import: validate and normalise ONE record (no database writes, no network) ---- */
+
+	/**
+	 * Returns array( 'errors' => [], 'warnings' => [], 'v' => [] ). v holds only the fields the record
+	 * specifies (absent = leave as-is on update): provider, id, title, slug, post_date, menu_order,
+	 * watch_page ('0'|'1'), dedicated_url ('' = remove), description, upload, published_at (UTC), duration,
+	 * is_short, poster_id, poster_path, terms (taxonomy => names, [] = clear).
+	 */
+	function xrv_cli_validate_record( $rec, $base_dir = '' ) {
+		$e = array();
+		$w = array();
+		$v = array();
+		if ( ! is_array( $rec ) ) {
+			return array( 'errors' => array( 'record is not a JSON object' ), 'warnings' => array(), 'v' => array( 'provider' => '', 'id' => '' ) );
+		}
+		$known = array( 'provider', 'id', 'url', 'title', 'slug', 'post_date', 'menu_order', 'watch_page', 'dedicated_url', 'description', 'desc', 'upload', 'published_at', 'duration', 'is_short', 'poster_id', 'poster_path', 'terms', 'series', 'audience', 'topic' );
+		foreach ( array_keys( $rec ) as $k ) {
+			if ( ! in_array( (string) $k, $known, true ) ) {
+				$w[] = sprintf( 'unknown field "%s" ignored', $k );
+			}
+		}
+		$str = function ( $k ) use ( $rec ) {
+			return ( isset( $rec[ $k ] ) && is_scalar( $rec[ $k ] ) && ! is_bool( $rec[ $k ] ) ) ? trim( (string) $rec[ $k ] ) : '';
+		};
+
+		$v['provider'] = '' !== $str( 'provider' ) ? strtolower( $str( 'provider' ) ) : 'youtube';
+		if ( 'youtube' !== $v['provider'] ) {
+			$e[] = sprintf( 'provider "%s" is not supported (youtube only in 2.11)', $v['provider'] );
+		}
+		$v['id'] = $str( 'id' );
+		if ( '' === $v['id'] && '' !== $str( 'url' ) ) {
+			$v['id'] = (string) xrv_extract_video_id( $str( 'url' ), 'youtube' );
+		}
+		if ( 'youtube' === $v['provider'] && ! xrv_cli_valid_yt_id( $v['id'] ) ) {
+			$e[] = '' === $v['id'] ? 'id is missing' : sprintf( 'id "%s" is not a valid YouTube video ID', $v['id'] );
+		}
+		if ( '' !== $str( 'title' ) ) {
+			$v['title'] = sanitize_text_field( $str( 'title' ) );
+		}
+		if ( array_key_exists( 'slug', $rec ) && '' !== $str( 'slug' ) ) {
+			$v['slug'] = sanitize_title( $str( 'slug' ) );
+			if ( '' === $v['slug'] ) {
+				$e[] = sprintf( 'slug "%s" is empty once sanitized', $str( 'slug' ) );
+			} elseif ( $v['slug'] !== $str( 'slug' ) ) {
+				$w[] = sprintf( 'slug "%s" normalised to "%s"', $str( 'slug' ), $v['slug'] );
+			}
+		}
+		if ( '' !== $str( 'post_date' ) ) {
+			$d = $str( 'post_date' );
+			if ( preg_match( '/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/', $d, $m ) && checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) && (int) $m[4] < 24 && (int) $m[5] < 60 && (int) $m[6] < 60 ) {
+				$v['post_date'] = $d;
+			} else {
+				$e[] = sprintf( 'post_date "%s" must be a real "YYYY-MM-DD HH:MM:SS" (site-local time)', $d );
+			}
+		}
+		if ( array_key_exists( 'menu_order', $rec ) && null !== $rec['menu_order'] && '' !== $rec['menu_order'] ) {
+			if ( is_int( $rec['menu_order'] ) || ( is_string( $rec['menu_order'] ) && preg_match( '/^-?\d+$/', trim( $rec['menu_order'] ) ) ) ) {
+				$v['menu_order'] = (int) $rec['menu_order'];
+			} else {
+				$e[] = sprintf( 'menu_order "%s" must be an integer', is_scalar( $rec['menu_order'] ) ? $rec['menu_order'] : gettype( $rec['menu_order'] ) );
+			}
+		}
+		if ( array_key_exists( 'watch_page', $rec ) ) {
+			$wp = xrv_norm_watch_page( is_array( $rec['watch_page'] ) ? null : $rec['watch_page'] );
+			if ( '' !== $wp ) {
+				$v['watch_page'] = $wp;
+			}
+		}
+		if ( array_key_exists( 'dedicated_url', $rec ) ) {
+			$u = is_scalar( $rec['dedicated_url'] ) || null === $rec['dedicated_url'] ? xrv_cli_resolve_url( (string) $rec['dedicated_url'] ) : new WP_Error( 'xrv_url', 'dedicated_url must be a string' );
+			if ( is_wp_error( $u ) ) {
+				$e[] = $u->get_error_message();
+			} else {
+				$v['dedicated_url'] = $u;
+			}
+		}
+		$desc_key = array_key_exists( 'description', $rec ) ? 'description' : ( array_key_exists( 'desc', $rec ) ? 'desc' : '' );
+		if ( array_key_exists( 'description', $rec ) && array_key_exists( 'desc', $rec ) ) {
+			$w[] = 'both description and legacy desc given: using description';
+		}
+		if ( '' !== $desc_key ) {
+			if ( is_scalar( $rec[ $desc_key ] ) || null === $rec[ $desc_key ] ) {
+				$v['description'] = xrv_sanitize_multiline( (string) $rec[ $desc_key ] );
+			} else {
+				$e[] = $desc_key . ' must be a string';
+			}
+		}
+		if ( '' !== $str( 'upload' ) ) {
+			$u = $str( 'upload' );
+			if ( preg_match( '/^(\d{4})-(\d{2})-(\d{2})$/', $u, $m ) && checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) ) {
+				$v['upload'] = $u;
+			} else {
+				$e[] = sprintf( 'upload "%s" is not a real YYYY-MM-DD date', $u );
+			}
+		}
+		if ( '' !== $str( 'published_at' ) ) {
+			$p  = $str( 'published_at' );
+			$ok = preg_match( '/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/i', $p, $m ) && checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) && (int) $m[4] < 24 && (int) $m[5] < 60;
+			$ts = $ok ? strtotime( $p ) : false;
+			if ( false === $ts ) {
+				$e[] = sprintf( 'published_at "%s" must be an ISO-8601 date-time with a zone, e.g. 2026-08-30T03:36:24Z', $p );
+			} else {
+				$v['published_at'] = gmdate( 'Y-m-d\TH:i:s\Z', $ts );
+			}
+		}
+		if ( '' !== $str( 'duration' ) ) {
+			$d = strtoupper( $str( 'duration' ) );
+			if ( preg_match( '/^P(?=\d|T\d)(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$/', $d ) ) {
+				$v['duration'] = $d;
+			} else {
+				$e[] = sprintf( 'duration "%s" must be ISO-8601, e.g. PT58M46S', $str( 'duration' ) );
+			}
+		}
+		if ( array_key_exists( 'is_short', $rec ) && null !== $rec['is_short'] ) {
+			$v['is_short'] = ! xrv_is_off( $rec['is_short'] );
+		}
+		$v = xrv_cli_validate_poster( $rec, $base_dir, $v, $e );
+		$v = xrv_cli_validate_terms( $rec, $v, $e, $w );
+		return array( 'errors' => $e, 'warnings' => $w, 'v' => $v );
+	}
+
+	/** Poster: poster_id = an existing image attachment whose file exists; poster_path = a LOCAL image file. */
+	function xrv_cli_validate_poster( $rec, $base_dir, $v, &$e ) {
+		$has_id   = isset( $rec['poster_id'] ) && '' !== $rec['poster_id'] && 0 !== $rec['poster_id'] && '0' !== $rec['poster_id'];
+		$has_path = isset( $rec['poster_path'] ) && '' !== $rec['poster_path'];
+		if ( $has_id && $has_path ) {
+			$e[] = 'give poster_id or poster_path, not both';
+			return $v;
+		}
+		if ( $has_id ) {
+			$raw = $rec['poster_id'];
+			$aid = ( is_int( $raw ) || ( is_string( $raw ) && ctype_digit( $raw ) ) ) ? (int) $raw : 0;
+			$att = $aid ? get_post( $aid ) : null;
+			if ( ! $att || 'attachment' !== $att->post_type ) {
+				$e[] = sprintf( 'poster_id %s is not an existing attachment', is_scalar( $raw ) ? $raw : gettype( $raw ) );
+			} elseif ( ! wp_attachment_is_image( $aid ) ) {
+				$e[] = sprintf( 'poster_id %d is not an image attachment (%s)', $aid, $att->post_mime_type );
+			} else {
+				$file = get_attached_file( $aid );
+				if ( ! $file || ! file_exists( $file ) ) {
+					$e[] = sprintf( 'poster_id %d: its file is missing on disk (%s)', $aid, (string) $file );
+				} else {
+					$v['poster_id'] = $aid;
+				}
+			}
+		}
+		if ( $has_path ) {
+			$p = is_string( $rec['poster_path'] ) ? trim( $rec['poster_path'] ) : '';
+			if ( '' === $p || false !== strpos( $p, '://' ) ) {
+				$e[] = 'poster_path must be a local file path (URLs are never fetched by the CLI import)';
+				return $v;
+			}
+			if ( ! preg_match( '#^([A-Za-z]:[\\\\/]|/|\\\\)#', $p ) && '' !== $base_dir ) {
+				$p = rtrim( $base_dir, '/\\' ) . '/' . $p;
+			}
+			$type = wp_check_filetype( basename( $p ) );
+			if ( ! is_file( $p ) || ! is_readable( $p ) ) {
+				$e[] = sprintf( 'poster_path "%s" is not a readable file', $p );
+			} elseif ( empty( $type['type'] ) || 0 !== strpos( $type['type'], 'image/' ) || false === @getimagesize( $p ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$e[] = sprintf( 'poster_path "%s" is not an image file', $p );
+			} else {
+				$v['poster_path'] = $p;
+			}
+		}
+		return $v;
+	}
+
+	/** Terms by NAME per taxonomy: {"terms":{"xrv_series":[..]}} (or series/audience/topic keys inside terms, or legacy top-level keys). */
+	function xrv_cli_validate_terms( $rec, $v, &$e, &$w ) {
+		$map   = array( 'xrv_series' => 'series', 'xrv_audience' => 'audience', 'xrv_topic' => 'topic' );
+		$terms = array();
+		$in    = array();
+		if ( array_key_exists( 'terms', $rec ) && null !== $rec['terms'] ) {
+			if ( ! is_array( $rec['terms'] ) ) {
+				$e[] = 'terms must be an object like {"xrv_series":["Name"]}';
+				return $v;
+			}
+			$in = $rec['terms'];
+			foreach ( array_keys( $in ) as $k ) {
+				if ( ! isset( $map[ $k ] ) && ! in_array( $k, $map, true ) ) {
+					$w[] = sprintf( 'unknown taxonomy "%s" in terms ignored', $k );
+				}
+			}
+		}
+		foreach ( $map as $tax => $short ) {
+			$src = null;
+			if ( array_key_exists( $tax, $in ) ) {
+				$src = $in[ $tax ];
+				if ( array_key_exists( $short, $in ) || array_key_exists( $short, $rec ) ) {
+					$w[] = sprintf( 'terms.%s wins over the duplicate "%s" key', $tax, $short );
+				}
+			} elseif ( array_key_exists( $short, $in ) ) {
+				$src = $in[ $short ];
+			} elseif ( array_key_exists( $short, $rec ) ) {
+				$src = $rec[ $short ];
+			} else {
+				continue;
+			}
+			if ( null !== $src && ! is_array( $src ) && ! is_string( $src ) ) {
+				$e[] = sprintf( '%s must be a list of term names', $tax );
+				continue;
+			}
+			$terms[ $tax ] = xrv_import_term_list( null === $src ? array() : $src );
+		}
+		if ( $terms ) {
+			$v['terms'] = $terms;
+		}
+		return $v;
+	}
+
+	/** The xroad_video (other than $exclude) that already owns $slug, in any status (a trashed post keeps "slug__trashed"). */
+	function xrv_cli_slug_owner( $slug, $exclude = 0 ) {
+		global $wpdb;
+		return (int) $wpdb->get_var( $wpdb->prepare(
+			"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'xroad_video' AND post_name IN (%s, %s) AND ID <> %d ORDER BY ID ASC LIMIT 1",
+			$slug,
+			$slug . '__trashed',
+			(int) $exclude
+		) );
+	}
+
+	/** Warnings for other content at the URL this video will have: url_to_postid(), same-slug published posts and terms. */
+	function xrv_cli_path_warnings( $slug, $video_id ) {
+		global $wpdb;
+		$w   = array();
+		$url = xrv_cli_video_url( $slug );
+		$hit = (int) url_to_postid( $url );
+		if ( $hit && $hit !== (int) $video_id ) {
+			$w[] = sprintf( '%s already resolves to %s %d', $url, get_post_type( $hit ), $hit );
+		}
+		$types = array_diff( get_post_types( array( 'public' => true ) ), array( 'xroad_video', 'attachment' ) );
+		if ( $types ) {
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT ID, post_type FROM {$wpdb->posts} WHERE post_name = %s AND post_status = 'publish' ORDER BY ID ASC LIMIT 5", $slug ) );
+			foreach ( (array) $rows as $r ) {
+				if ( in_array( $r->post_type, $types, true ) && (int) $r->ID !== $hit ) {
+					$w[] = sprintf( 'published %s %d also uses slug "%s" (%s)', $r->post_type, $r->ID, $slug, get_permalink( (int) $r->ID ) );
+				}
+			}
+		}
+		$terms = get_terms( array( 'slug' => $slug, 'hide_empty' => false, 'taxonomy' => get_taxonomies( array( 'public' => true ) ) ) );
+		foreach ( is_wp_error( $terms ) ? array() : (array) $terms as $t ) {
+			$w[] = sprintf( 'term %s "%s" also uses slug "%s"', $t->taxonomy, html_entity_decode( $t->name, ENT_QUOTES, 'UTF-8' ), $slug );
+		}
+		return $w;
+	}
+
+	/** Import a LOCAL image into the Media Library, parented to the video (copy to a temp file first). */
+	function xrv_cli_sideload( $post_id, $path, $title ) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+		require_once ABSPATH . 'wp-admin/includes/media.php';
+		require_once ABSPATH . 'wp-admin/includes/image.php';
+		$tmp = wp_tempnam( basename( $path ) );
+		if ( ! $tmp || ! @copy( $path, $tmp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return new WP_Error( 'xrv_copy', 'could not copy poster_path to a temp file' );
+		}
+		$att = media_handle_sideload( array( 'name' => basename( $path ), 'tmp_name' => $tmp ), (int) $post_id, $title );
+		if ( is_wp_error( $att ) ) {
+			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return $att;
+		}
+		if ( ! wp_attachment_is_image( $att ) ) {
+			wp_delete_attachment( $att, true );
+			return new WP_Error( 'xrv_not_image', 'poster_path did not import as an image' );
+		}
+		return (int) $att;
+	}
+
+	/** Term names to IDs for one taxonomy. Missing names become "new:Name" placeholders (created at write time). */
+	function xrv_cli_term_ids( $tax, $names ) {
+		$ids = array();
+		foreach ( (array) $names as $name ) {
+			$t     = get_term_by( 'name', $name, $tax );
+			$ids[] = $t ? (int) $t->term_id : 'new:' . $name;
+		}
+		return $ids;
+	}
+
+	/* ---- 12e. Import: the shared core that validates and writes ONE record ---- */
+
+	/**
+	 * Validate and write one import record. $ctx: dry_run, status (created posts only), on_existing
+	 * (skip|update), run_id, base_dir (for a relative poster_path), dupes ("provider:id" => count, ids seen
+	 * more than once in the file), file_slugs (slug => count in the file), intent (callable, called with
+	 * the entry BEFORE an insert so a crash leaves a findable trace). Never fetches a URL.
+	 *
+	 * Returns the log entry: key, status (created|updated|skipped|failed, or would-create|would-update on a
+	 * dry run), message, post_id, created_status, before / after (every changed field), diffs (dry run),
+	 * attachments {sideloaded, reused}, terms_created, warnings.
+	 */
+	function xrv_import_record( $rec, $ctx = array() ) {
+		$ctx = wp_parse_args( $ctx, array( 'dry_run' => false, 'status' => 'draft', 'on_existing' => 'skip', 'run_id' => '', 'base_dir' => '', 'dupes' => array(), 'file_slugs' => array(), 'intent' => null ) );
+		$val = xrv_cli_validate_record( $rec, $ctx['base_dir'] );
+		$v   = $val['v'];
+		$key = $v['provider'] . ':' . $v['id'];
+		$err = $val['errors'];
+		$out = array( 'key' => $key, 'status' => 'failed', 'message' => '', 'post_id' => 0, 'warnings' => $val['warnings'], 'attachments' => array( 'sideloaded' => array(), 'reused' => array() ) );
+		if ( ! empty( $ctx['dupes'][ $key ] ) ) {
+			$err[] = sprintf( 'id %s appears %d times in this file (every duplicate is rejected)', $v['id'], (int) $ctx['dupes'][ $key ] );
+		}
+		if ( $err ) {
+			$out['message'] = implode( '; ', $err );
+			return $out;
+		}
+
+		$found = xrv_cli_find_videos( $v['provider'], $v['id'] );
+		$pid   = $found ? (int) $found[0] : 0;
+		if ( count( $found ) > 1 ) {
+			$out['warnings'][] = sprintf( '%d videos share this ID (%s); using post %d', count( $found ), implode( ', ', $found ), $pid );
+		}
+		if ( $pid && 'update' !== $ctx['on_existing'] ) {
+			$out['status']  = 'skipped';
+			$out['post_id'] = $pid;
+			$out['message'] = sprintf( 'exists as post %d (%s); --on-existing=skip', $pid, get_post_status( $pid ) );
+			return $out;
+		}
+
+		// Slug: explicit, or (create only) from the title. Unique among xroad_video in every status and in the file.
+		$slug = isset( $v['slug'] ) ? $v['slug'] : ( $pid ? '' : sanitize_title( isset( $v['title'] ) ? $v['title'] : $v['id'] ) );
+		if ( '' !== $slug ) {
+			$owner = xrv_cli_slug_owner( $slug, $pid );
+			if ( $owner ) {
+				$err[] = sprintf( 'slug "%s" is already used by video %d (%s, %s)', $slug, $owner, get_post_status( $owner ), xrv_cli_video_ref( $owner ) );
+			} elseif ( ! empty( $ctx['file_slugs'][ $slug ] ) && $ctx['file_slugs'][ $slug ] > 1 ) {
+				$err[] = sprintf( 'slug "%s" is used by %d records in this file', $slug, (int) $ctx['file_slugs'][ $slug ] );
+			} else {
+				$out['warnings'] = array_merge( $out['warnings'], xrv_cli_path_warnings( $slug, $pid ) );
+			}
+		}
+		if ( isset( $v['post_date'] ) && $pid && 'publish' === get_post_status( $pid ) && strtotime( get_gmt_from_date( $v['post_date'] ) . ' UTC' ) > time() ) {
+			$err[] = 'post_date is in the future: updating it would turn this published video into a scheduled one (updates never change status)';
+		}
+		if ( $err ) {
+			$out['post_id'] = $pid;
+			$out['message'] = implode( '; ', $err );
+			return $out;
+		}
+
+		// Desired state, as field => value (null = remove the meta).
+		$d = array();
+		if ( isset( $v['title'] ) || ! $pid ) {
+			$d['post.post_title'] = isset( $v['title'] ) ? $v['title'] : $v['id'];
+		}
+		if ( '' !== $slug ) {
+			$d['post.post_name'] = $slug;
+		}
+		if ( isset( $v['post_date'] ) ) {
+			$d['post.post_date']     = $v['post_date'];
+			$d['post.post_date_gmt'] = get_gmt_from_date( $v['post_date'] );
+		}
+		if ( isset( $v['menu_order'] ) ) {
+			$d['post.menu_order'] = $v['menu_order'];
+		} elseif ( ! $pid ) {
+			global $wpdb;
+			static $dry_extra = 0;
+			$d['post.menu_order'] = (int) $wpdb->get_var( "SELECT MAX(menu_order) FROM {$wpdb->posts} WHERE post_type = 'xroad_video'" ) + 1 + ( $ctx['dry_run'] ? $dry_extra++ : 0 );
+		}
+		if ( ! $pid || isset( $v['is_short'] ) ) {
+			$short = ! empty( $v['is_short'] );
+			$d['meta._xrv_source_url'] = xrv_youtube_source_url( $v['id'], $short );
+			$d['meta._xrv_short']      = $short ? '1' : null;
+		}
+		$meta_map = array( 'duration' => '_xrv_duration_iso', 'upload' => '_xrv_upload_date', 'description' => '_xrv_description', 'published_at' => '_xrv_published_at' );
+		foreach ( $meta_map as $f => $mk ) {
+			if ( isset( $v[ $f ] ) ) {
+				$d[ 'meta.' . $mk ] = $v[ $f ];
+			}
+		}
+		if ( isset( $v['watch_page'] ) && ! ( '1' === $v['watch_page'] && $pid && null === xrv_cli_field_get( $pid, 'meta._xrv_watch_page' ) ) ) {
+			$d['meta._xrv_watch_page'] = $v['watch_page']; // absent already means "on": no write for an explicit '1'
+		}
+		if ( array_key_exists( 'dedicated_url', $v ) ) {
+			$d['meta._xrv_dedicated_url'] = '' === $v['dedicated_url'] ? null : $v['dedicated_url'];
+			if ( '' !== $v['dedicated_url'] && '' !== $slug && untrailingslashit( $v['dedicated_url'] ) === untrailingslashit( xrv_cli_video_url( $slug ) ) ) {
+				$out['warnings'][] = 'dedicated_url equals the video\'s own URL';
+			}
+		}
+		if ( isset( $v['poster_id'] ) ) {
+			$d['meta._xrv_local_thumb_id'] = (string) $v['poster_id'];
+			$d['meta._thumbnail_id']       = (string) $v['poster_id'];
+		}
+		foreach ( isset( $v['terms'] ) ? $v['terms'] : array() as $tax => $names ) {
+			$d[ 'terms.' . $tax ] = xrv_cli_term_ids( $tax, $names );
+		}
+		return xrv_cli_import_write( $pid, $v, $d, $slug, $out, $ctx );
+	}
+
+	/** Second half of xrv_import_record(): diff, then the dry-run report or the actual insert / update. */
+	function xrv_cli_import_write( $pid, $v, $d, $slug, $out, $ctx ) {
+		$created  = ! $pid;
+		$diff     = xrv_cli_diff( $pid, $d );
+		$sideload = '';
+		if ( isset( $v['poster_path'] ) ) {
+			$cur = $pid ? (int) get_post_meta( $pid, '_xrv_local_thumb_id', true ) : 0;
+			if ( $cur && get_post( $cur ) ) {
+				$out['warnings'][] = sprintf( 'poster_path ignored: the video already has poster %d', $cur );
+			} else {
+				$sideload        = $v['poster_path'];
+				$diff['diffs'][] = array( 'field' => 'poster_path (sideload)', 'before' => null, 'after' => $sideload );
+			}
+		}
+		$out['post_id'] = $pid;
+		if ( $pid && ! $diff['diffs'] ) {
+			$out['status']  = 'skipped';
+			$out['message'] = 'unchanged';
+			return $out;
+		}
+		if ( isset( $v['poster_id'] ) ) {
+			$out['attachments']['reused'][] = (int) $v['poster_id'];
+		}
+		if ( $ctx['dry_run'] ) {
+			$out['status']  = $pid ? 'would-update' : 'would-create';
+			$out['message'] = $pid ? sprintf( 'post %d: %d field(s) would change', $pid, count( $diff['diffs'] ) ) : 'would create a ' . $ctx['status'] . ' video';
+			$out['diffs']   = $diff['diffs'];
+			return $out;
+		}
+		$set = $diff['set'];
+		if ( $sideload && $pid ) { // the poster meta changes too: keep its before-image
+			foreach ( array( 'meta._xrv_local_thumb_id', 'meta._thumbnail_id' ) as $f ) {
+				if ( ! array_key_exists( $f, $diff['before'] ) ) {
+					$diff['before'][ $f ] = xrv_cli_field_get( $pid, $f );
+				}
+			}
+		}
+		if ( $created ) {
+			if ( is_callable( $ctx['intent'] ) ) {
+				call_user_func( $ctx['intent'], array_merge( $out, array( 'status' => 'intent', 'message' => 'insert started' ) ) );
+			}
+			$arr = array(
+				'post_type'   => 'xroad_video',
+				'post_status' => $ctx['status'],
+				'post_title'  => $d['post.post_title'],
+				'post_name'   => $slug,
+				'menu_order'  => $d['post.menu_order'],
+				'meta_input'  => array( '_xrv_run_id' => $ctx['run_id'], '_xrv_provider' => $v['provider'], '_xrv_video_id' => $v['id'] ),
+			);
+			if ( isset( $d['post.post_date'] ) ) {
+				$arr['post_date']     = $d['post.post_date'];
+				$arr['post_date_gmt'] = $d['post.post_date_gmt'];
+			}
+			$new = wp_insert_post( wp_slash( $arr ), true );
+			if ( is_wp_error( $new ) || ! $new ) {
+				$out['message'] = 'insert failed: ' . ( is_wp_error( $new ) ? $new->get_error_message() : 'unknown error' );
+				return $out;
+			}
+			$pid            = (int) $new;
+			$out['post_id'] = $pid;
+			foreach ( array_keys( $set ) as $f ) {
+				if ( 0 === strpos( $f, 'post.' ) ) {
+					unset( $set[ $f ] );
+				}
+			}
+			if ( get_post_field( 'post_name', $pid ) !== $slug ) {
+				$out['warnings'][] = sprintf( 'WordPress changed the slug to "%s"', get_post_field( 'post_name', $pid ) );
+			}
+		}
+		// Create missing terms by NAME (like the admin importer), then write everything else.
+		$out['terms_created'] = array();
+		foreach ( $set as $f => $val ) {
+			if ( 0 !== strpos( $f, 'terms.' ) ) {
+				continue;
+			}
+			$tax = substr( $f, 6 );
+			$ids = array();
+			foreach ( (array) $val as $tid ) {
+				if ( ! is_string( $tid ) || 0 !== strpos( $tid, 'new:' ) ) {
+					$ids[] = (int) $tid;
+					continue;
+				}
+				$ins = wp_insert_term( substr( $tid, 4 ), $tax );
+				if ( is_wp_error( $ins ) ) {
+					$dup = (int) $ins->get_error_data( 'term_exists' );
+					if ( $dup ) {
+						$ids[] = $dup;
+					} else {
+						$out['warnings'][] = sprintf( '%s term "%s": %s', $tax, substr( $tid, 4 ), $ins->get_error_message() );
+					}
+					continue;
+				}
+				$ids[]                  = (int) $ins['term_id'];
+				$out['terms_created'][] = array( 'taxonomy' => $tax, 'term_id' => (int) $ins['term_id'] );
+			}
+			$set[ $f ] = $ids;
+		}
+		$short = array_key_exists( 'meta._xrv_short', $set ) && '1' === $set['meta._xrv_short'];
+		if ( $short ) {
+			unset( $set['meta._xrv_short'], $set['meta._xrv_source_url'] );
+		}
+		$errs = xrv_cli_fields_set( $pid, $set );
+		if ( $short ) {
+			xrv_mark_short( $pid, $v['id'] );
+		}
+		if ( $sideload ) {
+			$att = xrv_cli_sideload( $pid, $sideload, isset( $v['title'] ) ? $v['title'] : get_the_title( $pid ) );
+			if ( is_wp_error( $att ) ) {
+				$errs[] = 'poster_path: ' . $att->get_error_message();
+			} else {
+				$out['attachments']['sideloaded'][] = $att;
+				update_post_meta( $pid, '_xrv_local_thumb_id', $att );
+				set_post_thumbnail( $pid, $att );
+			}
+		}
+		$out['warnings'] = array_merge( $out['warnings'], $errs );
+		if ( $created ) {
+			$out['status']         = 'created';
+			$out['created_status'] = get_post_status( $pid );
+			$out['message']        = sprintf( 'post %d (%s)', $pid, $out['created_status'] );
+		} else {
+			$after = array();
+			foreach ( array_keys( $diff['before'] ) as $f ) {
+				$after[ $f ] = xrv_cli_field_get( $pid, $f );
+			}
+			$out['status']  = 'updated';
+			$out['before']  = $diff['before'];
+			$out['after']   = $after;
+			$out['message'] = sprintf( 'post %d: %d field(s) changed', $pid, count( $diff['diffs'] ) );
+		}
+		return $out;
+	}
+
+	/* ---- 12f. Import run: pre-pass, chunked loop, resume, summary ---- */
+
+	/** Count ids ("provider:id") and explicit slugs across the whole file, so every duplicate errors before any write. */
+	function xrv_cli_import_prepass( $records ) {
+		$ids   = array();
+		$slugs = array();
+		foreach ( $records as $r ) {
+			if ( ! is_array( $r ) ) {
+				continue;
+			}
+			$p = ( isset( $r['provider'] ) && is_scalar( $r['provider'] ) && '' !== trim( (string) $r['provider'] ) ) ? strtolower( trim( (string) $r['provider'] ) ) : 'youtube';
+			$i = ( isset( $r['id'] ) && is_scalar( $r['id'] ) ) ? trim( (string) $r['id'] ) : '';
+			if ( '' === $i && ! empty( $r['url'] ) && is_string( $r['url'] ) ) {
+				$i = (string) xrv_extract_video_id( $r['url'], 'youtube' );
+			}
+			if ( '' !== $i ) {
+				$ids[ $p . ':' . $i ] = isset( $ids[ $p . ':' . $i ] ) ? $ids[ $p . ':' . $i ] + 1 : 1;
+			}
+			if ( isset( $r['slug'] ) && is_scalar( $r['slug'] ) && '' !== sanitize_title( (string) $r['slug'] ) ) {
+				$s           = sanitize_title( (string) $r['slug'] );
+				$slugs[ $s ] = isset( $slugs[ $s ] ) ? $slugs[ $s ] + 1 : 1;
+			}
+		}
+		$multi = function ( $c ) {
+			return $c > 1;
+		};
+		return array( array_filter( $ids, $multi ), array_filter( $slugs, $multi ) );
+	}
+
+	/** The post an interrupted insert ('intent') produced, if it got far enough to carry its ID and run id. */
+	function xrv_cli_intent_post( $key, $run_id ) {
+		$ref = xrv_cli_parse_ref( $key );
+		if ( is_wp_error( $ref ) ) {
+			return 0;
+		}
+		foreach ( xrv_cli_find_videos( $ref[0], $ref[1] ) as $pid ) {
+			if ( (string) get_post_meta( $pid, '_xrv_run_id', true ) === (string) $run_id ) {
+				return (int) $pid;
+			}
+		}
+		return 0;
+	}
+
+	/** One output line per record (+ warnings, + diffs on a dry run). */
+	function xrv_cli_print_entry( $n, $total, $entry ) {
+		$extra = '';
+		if ( ! empty( $entry['attachments']['reused'] ) ) {
+			$extra .= '  reused poster ' . implode( ',', $entry['attachments']['reused'] );
+		}
+		if ( ! empty( $entry['attachments']['sideloaded'] ) ) {
+			$extra .= '  sideloaded poster ' . implode( ',', $entry['attachments']['sideloaded'] );
+		}
+		$w    = strlen( (string) $total );
+		$line = sprintf( '[%' . $w . 'd/%d] %-22s %-12s %s%s', $n, $total, $entry['key'], $entry['status'], $entry['message'], $extra );
+		if ( 'failed' === $entry['status'] ) {
+			WP_CLI::warning( $line );
+		} else {
+			WP_CLI::log( $line );
+		}
+		foreach ( isset( $entry['warnings'] ) ? (array) $entry['warnings'] : array() as $msg ) {
+			WP_CLI::log( '      warning: ' . $msg );
+		}
+		if ( ! empty( $entry['diffs'] ) ) {
+			xrv_cli_print_diffs( $entry['diffs'] );
+		}
+	}
+
+	/** Status counts over every record in a log. */
+	function xrv_cli_log_counts( $log ) {
+		$c = array();
+		foreach ( $log->data['records'] as $r ) {
+			$s       = isset( $r['status'] ) ? $r['status'] : '?';
+			$c[ $s ] = isset( $c[ $s ] ) ? $c[ $s ] + 1 : 1;
+		}
+		ksort( $c );
+		return $c;
+	}
+
+	/**
+	 * The import loop. $o: records, total, limit, max_seconds, t0, dry_run, resume_cmd (callable: log => string).
+	 * Returns array( processed, failed, stopped reason ('' | limit | time | lock), changed post IDs ).
+	 */
+	function xrv_cli_import_loop( $log, $ctx, $o ) {
+		$run_id    = $log->data['run_id'];
+		$processed = 0;
+		$failed    = 0;
+		$done      = 0;
+		$stopped   = '';
+		$changed   = array();
+		foreach ( $o['records'] as $n => $rec ) {
+			$ref  = '#' . ( $n + 1 );
+			$prev = $log->get( $ref );
+			if ( $prev && in_array( $prev['status'], array( 'created', 'updated', 'skipped' ), true ) ) {
+				$done++;
+				continue;
+			}
+			if ( $o['limit'] && $processed >= $o['limit'] ) {
+				$stopped = 'limit';
+				break;
+			}
+			if ( $o['max_seconds'] && ( microtime( true ) - $o['t0'] ) >= $o['max_seconds'] ) {
+				$stopped = 'time';
+				break;
+			}
+			if ( ! $o['dry_run'] && ! xrv_lock_heartbeat( $run_id ) ) {
+				$stopped = 'lock';
+				break;
+			}
+			$c           = $ctx;
+			$c['intent'] = function ( $entry ) use ( $log, $ref, $n ) {
+				$log->put( $ref, array_merge( array( 'index' => $n + 1 ), $entry ) );
+			};
+			$resumed = ( $prev && 'intent' === $prev['status'] ) ? xrv_cli_intent_post( $prev['key'], $run_id ) : 0;
+			if ( $resumed ) { // the insert happened before the interruption: finish that post's fields, keep it "created"
+				$c['on_existing'] = 'update';
+			}
+			$entry = xrv_import_record( $rec, $c );
+			if ( $resumed && 'failed' !== $entry['status'] ) {
+				$entry['status']         = 'created';
+				$entry['post_id']        = $resumed;
+				$entry['created_status'] = get_post_status( $resumed );
+				$entry['message']        = sprintf( 'post %d (%s), insert completed before an interruption', $resumed, $entry['created_status'] );
+				unset( $entry['before'], $entry['after'] );
+			}
+			$entry = array_merge( array( 'index' => $n + 1 ), $entry );
+			$log->put( $ref, $entry );
+			$processed++;
+			if ( 'failed' === $entry['status'] ) {
+				$failed++;
+			} elseif ( in_array( $entry['status'], array( 'created', 'updated' ), true ) ) {
+				$changed[] = (int) $entry['post_id'];
+			}
+			xrv_cli_print_entry( $n + 1, $o['total'], $entry );
+		}
+		if ( $done ) {
+			WP_CLI::log( sprintf( '%d record(s) were already done in this run and were skipped.', $done ) );
+		}
+		return array( $processed, $failed, $stopped, $changed );
+	}
+
+	/** The exact command that continues an import run. */
+	function xrv_cli_resume_cmd( $file, $log, $assoc ) {
+		$cmd = 'wp xrv import ' . escapeshellarg( $file ) . ' --resume=' . escapeshellarg( $log->path );
+		foreach ( array( 'limit', 'max-seconds' ) as $k ) {
+			if ( isset( $assoc[ $k ] ) ) {
+				$cmd .= ' --' . $k . '=' . (int) $assoc[ $k ];
+			}
+		}
+		return $cmd . ' --user=' . escapeshellarg( wp_get_current_user()->user_login );
+	}
+
+	/* ---- 12g. Rollback of an import or collection run ---- */
+
+	/** Undo one CREATED record: force-delete (never trash) the post and the attachments the run sideloaded for it. */
+	function xrv_cli_rollback_created( $r, $pid, $run_id, $force, $dry, $res ) {
+		$post = $pid ? get_post( $pid ) : null;
+		if ( ! $post ) {
+			$res['message'] = 'already gone';
+			return $res;
+		}
+		if ( (string) get_post_meta( $pid, '_xrv_run_id', true ) !== (string) $run_id ) {
+			$res['status']  = 'refused';
+			$res['message'] = sprintf( 'post %d does not carry this run id; left alone', $pid );
+			return $res;
+		}
+		$was = isset( $r['created_status'] ) ? (string) $r['created_status'] : '';
+		if ( '' !== $was && $post->post_status !== $was && ! $force ) {
+			$res['status']  = 'kept';
+			$res['message'] = sprintf( 'post %d changed status since the run (%s -> %s); --force deletes it anyway', $pid, $was, $post->post_status );
+			return $res;
+		}
+		$atts = isset( $r['attachments']['sideloaded'] ) ? array_map( 'intval', (array) $r['attachments']['sideloaded'] ) : array();
+		if ( $dry ) {
+			$res['status']  = 'would-delete';
+			$res['message'] = sprintf( 'would force-delete %s %d%s', $post->post_type, $pid, $atts ? ' and sideloaded attachment(s) ' . implode( ',', $atts ) : '' );
+			return $res;
+		}
+		$gone = array();
+		foreach ( $atts as $aid ) {
+			if ( xrv_attachment_is_exclusive( $aid, $pid ) ) { // checked BEFORE the post goes: it must still be this post's alone
+				wp_delete_attachment( $aid, true );
+				$gone[] = $aid;
+			} else {
+				$res['warnings'][] = sprintf( 'attachment %d kept: it is no longer used by this post alone', $aid );
+			}
+		}
+		wp_delete_post( $pid, true );
+		$res['status']  = 'deleted';
+		$res['message'] = sprintf( 'force-deleted %s %d%s', $post->post_type, $pid, $gone ? ' and sideloaded attachment(s) ' . implode( ',', $gone ) : '' );
+		return $res;
+	}
+
+	/** Undo one UPDATED record from its before-image. A field changed again since the run is kept unless --force. */
+	function xrv_cli_rollback_updated( $r, $pid, $force, $dry, $res ) {
+		if ( ! $pid || ! get_post( $pid ) ) {
+			$res['status']  = 'failed';
+			$res['message'] = sprintf( 'post %d no longer exists', $pid );
+			return $res;
+		}
+		$before = isset( $r['before'] ) ? (array) $r['before'] : array();
+		$after  = isset( $r['after'] ) ? (array) $r['after'] : array();
+		$set    = array();
+		$diffs  = array();
+		$kept   = array();
+		foreach ( $before as $f => $old ) {
+			$cur = xrv_cli_field_get( $pid, $f );
+			if ( array_key_exists( $f, $after ) && ! xrv_cli_same_field( $f, $cur, $after[ $f ] ) && ! $force ) {
+				$kept[] = $f;
+				continue;
+			}
+			if ( ! xrv_cli_same_field( $f, $cur, $old ) ) {
+				$set[ $f ] = $old;
+				$diffs[]   = array( 'field' => $f, 'before' => $cur, 'after' => $old );
+			}
+		}
+		foreach ( array( 'post.post_date' => 'post.post_date_gmt', 'post.post_date_gmt' => 'post.post_date' ) as $one => $other ) {
+			if ( array_key_exists( $one, $set ) && ! array_key_exists( $other, $set ) && array_key_exists( $other, $before ) ) {
+				$set[ $other ] = $before[ $other ];
+			}
+		}
+		if ( $kept ) {
+			$res['warnings'][] = 'changed again since the run, kept (use --force): ' . implode( ', ', $kept );
+		}
+		$res['diffs'] = $diffs;
+		if ( $dry ) {
+			$res['status']  = 'would-restore';
+			$res['message'] = sprintf( 'post %d: %d field(s) would be restored', $pid, count( $diffs ) );
+			return $res;
+		}
+		$errs = $set ? xrv_cli_fields_set( $pid, $set ) : array();
+		foreach ( isset( $r['attachments']['sideloaded'] ) ? array_map( 'intval', (array) $r['attachments']['sideloaded'] ) : array() as $aid ) {
+			if ( xrv_attachment_is_exclusive( $aid, $pid ) && (int) get_post_meta( $pid, '_xrv_local_thumb_id', true ) !== $aid && (int) get_post_meta( $pid, '_thumbnail_id', true ) !== $aid ) {
+				wp_delete_attachment( $aid, true );
+				$res['message'] = sprintf( 'deleted sideloaded attachment %d; ', $aid );
+			}
+		}
+		$res['status']   = 'restored';
+		$res['message'] .= sprintf( 'post %d: %d field(s) restored', $pid, count( $diffs ) );
+		$res['warnings'] = array_merge( isset( $res['warnings'] ) ? $res['warnings'] : array(), $errs );
+		return $res;
+	}
+
+	/** Recount every term of the three video taxonomies, then delete terms the run created that nothing uses now. */
+	function xrv_cli_recount_terms( $created, $dry ) {
+		global $wpdb;
+		foreach ( array( 'xrv_series', 'xrv_audience', 'xrv_topic' ) as $tax ) {
+			$tt = get_terms( array( 'taxonomy' => $tax, 'hide_empty' => false, 'fields' => 'tt_ids' ) );
+			if ( ! is_wp_error( $tt ) && $tt && ! $dry ) {
+				wp_update_term_count_now( array_map( 'intval', $tt ), $tax );
+			}
+		}
+		$deleted = array();
+		foreach ( (array) $created as $c ) {
+			$t = get_term( (int) $c['term_id'], $c['taxonomy'] );
+			if ( ! $t || is_wp_error( $t ) ) {
+				continue;
+			}
+			$used = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->term_relationships} WHERE term_taxonomy_id = %d", $t->term_taxonomy_id ) );
+			if ( 0 === $used ) {
+				if ( ! $dry ) {
+					wp_delete_term( $t->term_id, $t->taxonomy );
+				}
+				$deleted[] = $t->taxonomy . ':' . html_entity_decode( $t->name, ENT_QUOTES, 'UTF-8' );
+			}
+		}
+		return $deleted;
+	}
+
+	/** Roll back an import or collection run (newest record first). Returns array( changed post IDs, problem count ). */
+	function xrv_cli_rollback_run( $src, $rb, $force, $dry ) {
+		$run_id   = (string) $src->data['run_id'];
+		$records  = array_reverse( $src->data['records'] );
+		$total    = count( $records );
+		$changed  = array();
+		$created  = array();
+		$problems = 0;
+		foreach ( $records as $i => $r ) {
+			$ref    = isset( $r['ref'] ) ? (string) $r['ref'] : '#' . ( $total - $i );
+			$status = isset( $r['status'] ) ? (string) $r['status'] : '';
+			$pid    = isset( $r['post_id'] ) ? (int) $r['post_id'] : 0;
+			$res    = array( 'key' => isset( $r['key'] ) ? $r['key'] : $ref, 'status' => 'skipped', 'message' => '', 'post_id' => $pid, 'was' => $status, 'warnings' => array() );
+			if ( 'intent' === $status ) { // interrupted insert: did the post get written?
+				$pid    = 'collection' === $src->data['kind'] ? xrv_cli_collection_by_run( $r, $run_id ) : xrv_cli_intent_post( $r['key'], $run_id );
+				$status = $pid ? 'created' : $status;
+			}
+			if ( 'created' === $status ) {
+				$res = xrv_cli_rollback_created( $r, $pid, $run_id, $force, $dry, $res );
+			} elseif ( 'updated' === $status ) {
+				$res = xrv_cli_rollback_updated( $r, $pid, $force, $dry, $res );
+			} else {
+				$res['message'] = 'nothing to undo (' . ( '' === $status ? 'unknown' : $status ) . ')';
+			}
+			$res['post_id'] = $pid;
+			if ( ! empty( $r['terms_created'] ) ) {
+				$created = array_merge( $created, (array) $r['terms_created'] );
+			}
+			if ( in_array( $res['status'], array( 'deleted', 'restored' ), true ) ) {
+				$changed[] = $pid;
+			} elseif ( in_array( $res['status'], array( 'kept', 'refused', 'failed' ), true ) ) {
+				$problems++;
+			}
+			$rb->put( $ref, $res );
+			xrv_cli_print_entry( $i + 1, $total, $res );
+		}
+		$gone = xrv_cli_recount_terms( $created, $dry );
+		WP_CLI::log( sprintf( 'Terms recounted. %s created by the run and now unused: %s', $dry ? 'Would delete terms' : 'Deleted terms', $gone ? implode( ', ', $gone ) : 'none' ) );
+		$rb->data['terms_deleted'] = $gone;
+		return array( $changed, $problems );
+	}
+
+	/* ---- 12h. Collections: validation and the idempotent upsert shared by `collection set` and `apply` ---- */
+
+	/** The xrv_collection with exactly this post_name (any status but trash), lowest ID first, or 0. */
+	function xrv_cli_collection_id( $slug ) {
+		global $wpdb;
+		return (int) $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = 'xrv_collection' AND post_name = %s AND post_status <> 'trash' ORDER BY ID ASC LIMIT 1", (string) $slug ) );
+	}
+
+	/** The collection an interrupted insert ('intent') produced, if it carries this run id. */
+	function xrv_cli_collection_by_run( $r, $run_id ) {
+		$slug = isset( $r['slug'] ) ? (string) $r['slug'] : preg_replace( '/^collection:/', '', (string) $r['key'] );
+		$id   = xrv_cli_collection_id( $slug );
+		return ( $id && (string) get_post_meta( $id, '_xrv_run_id', true ) === (string) $run_id ) ? $id : 0;
+	}
+
+	/**
+	 * Validate one collection spec {slug, title?, layout?, orderby?, videos?: ["provider:id", ...]} without
+	 * writing. Returns array( errors, warnings, c ) where c = slug, title|null, layout|null, orderby|null,
+	 * ids (ordered video post IDs) | null; null = not given (leave as-is on update).
+	 */
+	function xrv_cli_collection_validate( $spec ) {
+		$e    = array();
+		$w    = array();
+		$raw  = ( isset( $spec['slug'] ) && is_scalar( $spec['slug'] ) ) ? trim( (string) $spec['slug'] ) : '';
+		$slug = sanitize_title( $raw );
+		if ( '' === $slug ) {
+			$e[] = 'slug is missing';
+		} elseif ( ctype_digit( $slug ) ) {
+			$e[] = sprintf( 'slug "%s" is numeric: [xroad-videos collection="%s"] would read it as a post ID', $slug, $slug );
+		} elseif ( $slug !== $raw ) {
+			$w[] = sprintf( 'slug "%s" normalised to "%s"', $raw, $slug );
+		}
+		$c       = array( 'slug' => $slug, 'title' => null, 'layout' => null, 'orderby' => null, 'ids' => null );
+		$allowed = array(
+			'layout'  => array( '', 'grid', 'carousel', 'library' ),
+			'orderby' => array( '', 'curated', 'newest', 'oldest', 'title' ),
+		);
+		foreach ( $allowed as $k => $ok ) {
+			if ( array_key_exists( $k, $spec ) ) {
+				$val = null === $spec[ $k ] ? '' : ( is_scalar( $spec[ $k ] ) ? strtolower( trim( (string) $spec[ $k ] ) ) : '?' );
+				if ( in_array( $val, $ok, true ) ) {
+					$c[ $k ] = $val;
+				} else {
+					$e[] = sprintf( '%s must be one of: %s', $k, implode( ', ', array_map( function ( $x ) { return '' === $x ? '"" (site default)' : $x; }, $ok ) ) );
+				}
+			}
+		}
+		if ( isset( $spec['title'] ) && is_scalar( $spec['title'] ) && '' !== trim( (string) $spec['title'] ) ) {
+			$c['title'] = sanitize_text_field( (string) $spec['title'] );
+		}
+		if ( array_key_exists( 'videos', $spec ) ) {
+			$refs     = is_array( $spec['videos'] ) ? $spec['videos'] : preg_split( '/[\s,]+/', (string) $spec['videos'], -1, PREG_SPLIT_NO_EMPTY );
+			$c['ids'] = array();
+			foreach ( $refs as $ref ) {
+				$p = xrv_cli_parse_ref( is_scalar( $ref ) ? (string) $ref : '' );
+				if ( is_wp_error( $p ) ) {
+					$e[] = $p->get_error_message();
+					continue;
+				}
+				$found = xrv_cli_find_videos( $p[0], $p[1] );
+				if ( ! $found ) {
+					$e[] = sprintf( 'unknown video %s:%s (no xroad_video with that provider + ID)', $p[0], $p[1] );
+					continue;
+				}
+				if ( in_array( $found[0], $c['ids'], true ) ) {
+					$w[] = sprintf( '%s:%s listed twice; kept the first position', $p[0], $p[1] );
+					continue;
+				}
+				if ( 'trash' === get_post_status( $found[0] ) ) {
+					$w[] = sprintf( '%s:%s is in the trash (post %d)', $p[0], $p[1], $found[0] );
+				}
+				$c['ids'][] = (int) $found[0];
+			}
+		}
+		return array( $e, $w, $c );
+	}
+
+	/**
+	 * Idempotent upsert of one validated collection. Created as 'publish' (the type is non-public) with an
+	 * explicit post_name; afterwards get_page_by_path( slug, OBJECT, 'xrv_collection' ) must resolve to it.
+	 * $ctx: dry_run, run_id, intent (callable). Returns a log entry like xrv_import_record().
+	 */
+	function xrv_cli_collection_upsert( $c, $ctx ) {
+		$cid = xrv_cli_collection_id( $c['slug'] );
+		$out = array( 'key' => 'collection:' . $c['slug'], 'slug' => $c['slug'], 'status' => 'failed', 'message' => '', 'post_id' => $cid, 'warnings' => array() );
+		$d   = array( 'post.post_status' => 'publish' );
+		if ( ! $cid || null !== $c['title'] ) {
+			$d['post.post_title'] = null !== $c['title'] ? $c['title'] : ucwords( str_replace( '-', ' ', $c['slug'] ) );
+		}
+		if ( null !== $c['ids'] || ! $cid ) {
+			$d['meta._xrvc_video_ids'] = implode( ',', (array) $c['ids'] );
+		}
+		foreach ( array( 'layout' => 'meta._xrvc_layout', 'orderby' => 'meta._xrvc_orderby' ) as $k => $f ) {
+			if ( null !== $c[ $k ] || ! $cid ) {
+				$d[ $f ] = (string) $c[ $k ];
+			}
+		}
+		$diff = xrv_cli_diff( $cid, $d );
+		if ( $cid && ! $diff['diffs'] ) {
+			$out['status']  = 'skipped';
+			$out['message'] = sprintf( 'collection %d unchanged; nothing written', $cid );
+			return $out;
+		}
+		if ( ! empty( $ctx['dry_run'] ) ) {
+			$out['status']  = $cid ? 'would-update' : 'would-create';
+			$out['message'] = $cid ? sprintf( 'collection %d: %d field(s) would change', $cid, count( $diff['diffs'] ) ) : 'would create a published collection';
+			$out['diffs']   = $diff['diffs'];
+			return $out;
+		}
+		if ( ! $cid ) {
+			if ( ! empty( $ctx['intent'] ) && is_callable( $ctx['intent'] ) ) {
+				call_user_func( $ctx['intent'], array_merge( $out, array( 'status' => 'intent', 'message' => 'insert started' ) ) );
+			}
+			$meta = array( '_xrv_run_id' => (string) $ctx['run_id'] );
+			foreach ( $d as $f => $v ) {
+				if ( 0 === strpos( $f, 'meta.' ) ) {
+					$meta[ substr( $f, 5 ) ] = $v;
+				}
+			}
+			$new = wp_insert_post( wp_slash( array( 'post_type' => 'xrv_collection', 'post_status' => 'publish', 'post_title' => $d['post.post_title'], 'post_name' => $c['slug'], 'meta_input' => $meta ) ), true );
+			if ( is_wp_error( $new ) || ! $new ) {
+				$out['message'] = 'insert failed: ' . ( is_wp_error( $new ) ? $new->get_error_message() : 'unknown error' );
+				return $out;
+			}
+			$cid                   = (int) $new;
+			$out['status']         = 'created';
+			$out['created_status'] = get_post_status( $cid );
+			$out['message']        = sprintf( 'collection %d created (%d video(s))', $cid, count( (array) $c['ids'] ) );
+		} else {
+			$out['warnings'] = xrv_cli_fields_set( $cid, $diff['set'] );
+			$after           = array();
+			foreach ( array_keys( $diff['before'] ) as $f ) {
+				$after[ $f ] = xrv_cli_field_get( $cid, $f );
+			}
+			$out['status']  = 'updated';
+			$out['before']  = $diff['before'];
+			$out['after']   = $after;
+			$out['message'] = sprintf( 'collection %d: %d field(s) changed', $cid, count( $diff['diffs'] ) );
+			$out['diffs']   = $diff['diffs'];
+		}
+		$out['post_id'] = $cid;
+		$hit            = get_page_by_path( $c['slug'], OBJECT, 'xrv_collection' );
+		$out['resolves'] = ( $hit && (int) $hit->ID === $cid );
+		if ( ! $out['resolves'] ) {
+			$out['warnings'][] = sprintf( 'get_page_by_path("%s") resolves to %s, not collection %d', $c['slug'], $hit ? 'post ' . $hit->ID : 'nothing', $cid );
+		}
+		return $out;
+	}
+
+	/* ---- 12i. Apply: raw images (pre-apply / post-apply), restore helpers ---- */
+
+	/** An option exactly as stored (read from the database, not through filters): exists, value, autoload. */
+	function xrv_cli_option_raw( $name ) {
+		global $wpdb;
+		$row = $wpdb->get_row( $wpdb->prepare( "SELECT option_value, autoload FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", $name ) );
+		if ( ! $row ) {
+			return array( 'exists' => false, 'value' => null, 'autoload' => '' );
+		}
+		return array( 'exists' => true, 'value' => maybe_unserialize( $row->option_value ), 'autoload' => (string) $row->autoload );
+	}
+
+	/** Write an option back RAW: the sanitize filter is removed around the write; absent = delete_option(). */
+	function xrv_cli_option_restore( $name, $img ) {
+		global $wp_filter;
+		$hook  = 'sanitize_option_' . $name;
+		$saved = isset( $wp_filter[ $hook ] ) ? $wp_filter[ $hook ] : null;
+		remove_all_filters( $hook );
+		if ( empty( $img['exists'] ) ) {
+			delete_option( $name );
+		} elseif ( ! xrv_cli_option_raw( $name )['exists'] ) {
+			add_option( $name, $img['value'], '', ! in_array( (string) $img['autoload'], array( 'no', 'off', 'auto-off' ), true ) );
+		} else {
+			update_option( $name, $img['value'] );
+		}
+		if ( null !== $saved ) {
+			$wp_filter[ $hook ] = $saved; // phpcs:ignore WordPress.WP.GlobalVariablesOverride
+		}
+	}
+
+	/** The channel-sync schedule: next timestamp and recurrence (false when none). */
+	function xrv_cli_cron_image() {
+		return array( 'timestamp' => wp_next_scheduled( 'xrv_sync_event' ), 'recurrence' => wp_get_schedule( 'xrv_sync_event' ) );
+	}
+
+	/** Put the sync schedule back exactly: clear, then schedule at the recorded timestamp / recurrence, or none. */
+	function xrv_cli_cron_restore( $img ) {
+		wp_clear_scheduled_hook( 'xrv_sync_event' );
+		if ( ! empty( $img['timestamp'] ) ) {
+			if ( ! empty( $img['recurrence'] ) ) {
+				wp_schedule_event( (int) $img['timestamp'], (string) $img['recurrence'], 'xrv_sync_event' );
+			} else {
+				wp_schedule_single_event( (int) $img['timestamp'], 'xrv_sync_event' );
+			}
+		}
+	}
+
+	/** Field lists captured per touched object. */
+	function xrv_cli_image_fields( $type ) {
+		if ( 'collection' === $type ) {
+			return array( 'post.post_title', 'post.post_status', 'post.post_name', 'meta._xrvc_video_ids', 'meta._xrvc_layout', 'meta._xrvc_orderby' );
+		}
+		return array( 'post.post_status', 'post.menu_order', 'post.post_date', 'post.post_date_gmt', 'meta._xrv_dedicated_url', 'meta._xrv_watch_page' );
+	}
+
+	/**
+	 * Capture everything an apply may touch: raw xrv_settings and xrv_permalinks, the sync schedule, each
+	 * touched collection (by slug) and video (by "provider:id"), plus a hash of the rewrite rules.
+	 */
+	function xrv_cli_apply_capture( $slugs, $refs ) {
+		$img = array(
+			'options'     => array( 'xrv_settings' => xrv_cli_option_raw( 'xrv_settings' ), 'xrv_permalinks' => xrv_cli_option_raw( 'xrv_permalinks' ) ),
+			'cron'        => xrv_cli_cron_image(),
+			'collections' => array(),
+			'videos'      => array(),
+			'rewrite'     => md5( maybe_serialize( get_option( 'rewrite_rules' ) ) ),
+		);
+		foreach ( (array) $slugs as $slug ) {
+			$cid = xrv_cli_collection_id( $slug );
+			$c   = array( 'exists' => (bool) $cid, 'post_id' => $cid, 'fields' => array() );
+			foreach ( $cid ? xrv_cli_image_fields( 'collection' ) : array() as $f ) {
+				$c['fields'][ $f ] = xrv_cli_field_get( $cid, $f );
+			}
+			$img['collections'][ $slug ] = $c;
+		}
+		foreach ( (array) $refs as $ref => $pid ) {
+			$v = array( 'post_id' => (int) $pid, 'fields' => array() );
+			foreach ( xrv_cli_image_fields( 'video' ) as $f ) {
+				$v['fields'][ $f ] = xrv_cli_field_get( $pid, $f );
+			}
+			$img['videos'][ $ref ] = $v;
+		}
+		return $img;
+	}
+
+	/** Paths that differ between two images (JSON-equal comparison per object). */
+	function xrv_cli_image_diff( $a, $b, $skip_rewrite = false ) {
+		$out = array();
+		foreach ( array( 'options', 'collections', 'videos' ) as $sec ) {
+			$keys = array_unique( array_merge( array_keys( (array) $a[ $sec ] ), array_keys( (array) $b[ $sec ] ) ) );
+			foreach ( $keys as $k ) {
+				$x = isset( $a[ $sec ][ $k ] ) ? $a[ $sec ][ $k ] : null;
+				$y = isset( $b[ $sec ][ $k ] ) ? $b[ $sec ][ $k ] : null;
+				if ( wp_json_encode( $x ) !== wp_json_encode( $y ) ) {
+					$out[] = $sec . '.' . $k;
+				}
+			}
+		}
+		if ( wp_json_encode( $a['cron'] ) !== wp_json_encode( $b['cron'] ) ) {
+			$out[] = 'cron.xrv_sync_event';
+		}
+		if ( ! $skip_rewrite && (string) $a['rewrite'] !== (string) $b['rewrite'] ) {
+			$out[] = 'rewrite_rules';
+		}
+		return $out;
+	}
+
+	/** Flush the object cache and, on WP Engine, its page / CDN caches (each method guarded). */
+	function xrv_cli_purge_caches() {
+		wp_cache_flush();
+		if ( class_exists( 'WpeCommon' ) ) {
+			foreach ( array( 'purge_memcached', 'clear_maxcdn_cache', 'purge_varnish_cache' ) as $m ) {
+				if ( method_exists( 'WpeCommon', $m ) ) {
+					call_user_func( array( 'WpeCommon', $m ) );
+				}
+			}
+		}
+	}
+
+	/* ---- 12j. Apply: validate a manifest into a plan (no writes) ---- */
+
+	/** One manifest video: patches only status, dedicated_url (null / "" deletes), watch_page, menu_order, post_date. */
+	function xrv_cli_apply_video_spec( $vrec, &$e ) {
+		$prov = ( isset( $vrec['provider'] ) && is_scalar( $vrec['provider'] ) && '' !== (string) $vrec['provider'] ) ? (string) $vrec['provider'] : 'youtube';
+		$ref  = xrv_cli_parse_ref( $prov . ':' . ( isset( $vrec['id'] ) && is_scalar( $vrec['id'] ) ? (string) $vrec['id'] : '' ) );
+		if ( is_wp_error( $ref ) ) {
+			$e[] = 'videos: ' . $ref->get_error_message();
+			return null;
+		}
+		$key   = $ref[0] . ':' . $ref[1];
+		$found = xrv_cli_find_videos( $ref[0], $ref[1] );
+		if ( ! $found ) {
+			$e[] = sprintf( 'videos: unknown video %s (no xroad_video with that provider + ID)', $key );
+			return null;
+		}
+		$pid  = (int) $found[0];
+		$meta = ( isset( $vrec['meta'] ) && is_array( $vrec['meta'] ) ) ? $vrec['meta'] : array();
+		$src  = array_merge( $meta, $vrec );
+		$d    = array();
+		if ( isset( $src['status'] ) && '' !== $src['status'] ) {
+			if ( in_array( $src['status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ) {
+				$d['post.post_status'] = $src['status'];
+			} else {
+				$e[] = sprintf( 'videos %s: status "%s" must be publish, draft, pending or private', $key, is_scalar( $src['status'] ) ? $src['status'] : '?' );
+			}
+		}
+		if ( isset( $src['post_date'] ) && '' !== $src['post_date'] ) {
+			$pd = is_scalar( $src['post_date'] ) ? (string) $src['post_date'] : '';
+			if ( preg_match( '/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/', $pd, $m ) && checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) && (int) $m[4] < 24 && (int) $m[5] < 60 && (int) $m[6] < 60 ) {
+				$d['post.post_date']     = $pd;
+				$d['post.post_date_gmt'] = get_gmt_from_date( $pd );
+			} else {
+				$e[] = sprintf( 'videos %s: post_date "%s" must be "YYYY-MM-DD HH:MM:SS" (site-local)', $key, $pd );
+			}
+		}
+		if ( isset( $src['menu_order'] ) && '' !== $src['menu_order'] ) {
+			if ( is_int( $src['menu_order'] ) || ( is_string( $src['menu_order'] ) && preg_match( '/^-?\d+$/', $src['menu_order'] ) ) ) {
+				$d['post.menu_order'] = (int) $src['menu_order'];
+			} else {
+				$e[] = sprintf( 'videos %s: menu_order must be an integer', $key );
+			}
+		}
+		if ( array_key_exists( 'watch_page', $src ) ) {
+			$wp = xrv_norm_watch_page( is_array( $src['watch_page'] ) ? null : $src['watch_page'] );
+			if ( '' !== $wp && ! ( '1' === $wp && null === xrv_cli_field_get( $pid, 'meta._xrv_watch_page' ) ) ) {
+				$d['meta._xrv_watch_page'] = $wp;
+			}
+		}
+		if ( array_key_exists( 'dedicated_url', $src ) ) {
+			$u = ( null === $src['dedicated_url'] || is_scalar( $src['dedicated_url'] ) ) ? xrv_cli_resolve_url( (string) $src['dedicated_url'] ) : new WP_Error( 'xrv_url', 'dedicated_url must be a string' );
+			if ( is_wp_error( $u ) ) {
+				$e[] = sprintf( 'videos %s: %s', $key, $u->get_error_message() );
+			} else {
+				$d['meta._xrv_dedicated_url'] = '' === $u ? null : $u;
+			}
+		}
+		return array( 'ref' => $key, 'post_id' => $pid, 'desired' => $d );
+	}
+
+	/** Validate the requested manifest sections. Returns array( errors, warnings, plan ). */
+	function xrv_cli_apply_plan( $m, $sections, $include_sync ) {
+		$e    = array();
+		$w    = array();
+		$plan = array( 'settings' => null, 'permalinks' => null, 'videos' => array(), 'collections' => array() );
+		if ( in_array( 'settings', $sections, true ) && isset( $m['settings'] ) ) {
+			$known   = array_merge( array_keys( xrv_settings_defaults() ), array( 'icon_override' ) );
+			$partial = array();
+			$sync    = array();
+			foreach ( is_array( $m['settings'] ) ? $m['settings'] : array() as $k => $val ) {
+				if ( false !== stripos( (string) $k, 'api_key' ) ) {
+					$w[] = sprintf( 'settings.%s ignored: the API key is never applied or logged', $k );
+				} elseif ( 0 === strpos( (string) $k, 'sync_' ) && ! $include_sync ) {
+					$sync[] = $k;
+				} elseif ( ! in_array( (string) $k, $known, true ) ) {
+					$w[] = sprintf( 'settings.%s is not an XRV setting; ignored', $k );
+				} else {
+					$partial[ $k ] = $val;
+				}
+			}
+			if ( $sync ) {
+				$w[] = 'sync settings left untouched (add --include-sync to apply them): ' . implode( ', ', $sync );
+			}
+			$plan['settings'] = $partial;
+		}
+		if ( in_array( 'permalinks', $sections, true ) ) {
+			if ( ! isset( $m['permalinks'] ) || ! is_array( $m['permalinks'] ) ) {
+				$e[] = 'the permalinks section was requested but the manifest has no "permalinks" object';
+			} else {
+				$cur = xrv_permalinks();
+				$s   = xrv_sanitize_permalink_base( array_key_exists( 'single', $m['permalinks'] ) ? $m['permalinks']['single'] : $cur['single'], 'video' );
+				$a   = xrv_sanitize_permalink_base( array_key_exists( 'archive', $m['permalinks'] ) ? (string) $m['permalinks']['archive'] : $cur['archive'], '' );
+				foreach ( array( $s, $a ) as $r ) {
+					if ( is_wp_error( $r ) ) {
+						$e[] = 'permalinks: ' . $r->get_error_message();
+					}
+				}
+				if ( ! is_wp_error( $s ) && ! is_wp_error( $a ) ) {
+					$plan['permalinks'] = array( 'single' => $s, 'archive' => $a );
+				}
+			}
+		}
+		if ( in_array( 'videos', $sections, true ) ) {
+			foreach ( ( isset( $m['videos'] ) && is_array( $m['videos'] ) ) ? $m['videos'] : array() as $vrec ) {
+				$spec = is_array( $vrec ) ? xrv_cli_apply_video_spec( $vrec, $e ) : null;
+				if ( $spec ) {
+					$plan['videos'][ $spec['ref'] ] = $spec;
+				}
+			}
+		}
+		if ( in_array( 'collections', $sections, true ) ) {
+			foreach ( ( isset( $m['collections'] ) && is_array( $m['collections'] ) ) ? $m['collections'] : array() as $spec ) {
+				list( $ce, $cw, $c ) = xrv_cli_collection_validate( is_array( $spec ) ? $spec : array() );
+				foreach ( $ce as $x ) {
+					$e[] = sprintf( 'collections[%s]: %s', $c['slug'], $x );
+				}
+				foreach ( $cw as $x ) {
+					$w[] = sprintf( 'collections[%s]: %s', $c['slug'], $x );
+				}
+				if ( isset( $plan['collections'][ $c['slug'] ] ) ) {
+					$e[] = sprintf( 'collections[%s]: listed twice', $c['slug'] );
+				} elseif ( ! $ce ) {
+					$plan['collections'][ $c['slug'] ] = $c;
+				}
+			}
+		}
+		return array( $e, $w, $plan );
+	}
+
+	/* ---- 12k. Apply: what a new video base would shadow, and dedicated URLs vs the new permalink ---- */
+
+	/** Report for a base change. Returns array( lines, shadow (count), differ (count), equal (count) ). */
+	function xrv_cli_permalink_report( $single, $archive ) {
+		global $wpdb, $wp_rewrite;
+		$lines  = array();
+		$shadow = 0;
+		$front  = xrv_permalink_front();
+		$bases  = array( 'single' => $single );
+		if ( '' !== (string) $archive ) {
+			$bases['archive'] = $archive;
+		}
+		foreach ( $bases as $which => $base ) {
+			$path    = trim( ( '' !== $front ? $front . '/' : '' ) . $base, '/' );
+			$lines[] = sprintf( '%s base "%s": videos live under %s', $which, $base, home_url( '/' . $path . '/' ) );
+			$hier    = get_post_types( array( 'public' => true, 'hierarchical' => true ) );
+			$page    = $hier ? get_page_by_path( $path, OBJECT, array_values( $hier ) ) : null;
+			if ( $page && 'publish' === $page->post_status ) {
+				$shadow++;
+				$lines[] = sprintf( '  SHADOW: %s %d "%s" lives at /%s/', $page->post_type, $page->ID, $page->post_title, $path );
+			}
+			$hit = (int) url_to_postid( home_url( '/' . $path . '/' ) );
+			if ( $hit && 'xroad_video' !== get_post_type( $hit ) && ( ! $page || $hit !== (int) $page->ID ) ) {
+				$shadow++;
+				$lines[] = sprintf( '  SHADOW: /%s/ resolves to %s %d today', $path, get_post_type( $hit ), $hit );
+			}
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT ID, post_type FROM {$wpdb->posts} WHERE post_name = %s AND post_status = 'publish' AND post_type NOT IN ('attachment','revision','nav_menu_item','xroad_video','xrv_collection') ORDER BY ID ASC LIMIT 10", $base ) );
+			foreach ( (array) $rows as $r ) {
+				$lines[] = sprintf( '  note: published %s %d uses the slug "%s" (%s)', $r->post_type, $r->ID, $base, get_permalink( (int) $r->ID ) );
+			}
+			$terms = get_terms( array( 'slug' => $base, 'hide_empty' => false, 'taxonomy' => array_values( get_taxonomies( array( 'public' => true ) ) ) ) );
+			foreach ( is_wp_error( $terms ) ? array() : (array) $terms as $t ) {
+				if ( 'category' === $t->taxonomy && false !== strpos( (string) get_option( 'permalink_structure' ), '%category%' ) ) {
+					$shadow++;
+					$posts   = get_posts( array( 'category' => $t->term_id, 'numberposts' => 5, 'post_status' => 'publish', 'fields' => 'ids' ) );
+					$lines[] = sprintf( '  SHADOW: category "%s" (%d post(s)): its posts live at /%s/<postname>/ and the video rules would take those URLs first', html_entity_decode( $t->name, ENT_QUOTES, 'UTF-8' ), $t->count, $path );
+					foreach ( $posts as $p ) {
+						$lines[] = '          e.g. ' . get_permalink( $p );
+					}
+				} else {
+					$lines[] = sprintf( '  note: term %s "%s" uses the slug "%s" (%s)', $t->taxonomy, html_entity_decode( $t->name, ENT_QUOTES, 'UTF-8' ), $base, get_term_link( $t ) );
+				}
+			}
+			$probe = $path . '/xrv-probe-slug/';
+			foreach ( (array) $wp_rewrite->wp_rewrite_rules() as $regex => $query ) {
+				// Skip the video's own rules and the page catch-all (pages were checked above by path).
+				if ( false !== strpos( (string) $query, 'xroad_video' ) || false !== strpos( (string) $query, 'pagename=' ) ) {
+					continue;
+				}
+				if ( @preg_match( '#^' . $regex . '#', $probe ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					$shadow++;
+					$lines[] = sprintf( '  SHADOW: rewrite rule %s => %s matches /%s/<slug>/ today', $regex, $query, $path );
+					break;
+				}
+			}
+		}
+		$rows   = $wpdb->get_results( "SELECT p.ID, p.post_name, m.meta_value AS url FROM {$wpdb->posts} p INNER JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_xrv_dedicated_url' WHERE p.post_type = 'xroad_video' AND p.post_status NOT IN ('trash','auto-draft') AND m.meta_value <> '' ORDER BY p.menu_order ASC, p.ID ASC" );
+		$differ = array();
+		$equal  = array();
+		foreach ( (array) $rows as $r ) {
+			$new = xrv_cli_video_url( $r->post_name, $single );
+			$row = sprintf( '    post %d: %s  (new permalink %s)', $r->ID, $r->url, $new );
+			if ( untrailingslashit( (string) $r->url ) === untrailingslashit( $new ) ) {
+				$equal[] = $row;
+			} else {
+				$differ[] = $row;
+			}
+		}
+		$lines[] = sprintf( 'Dedicated URLs that will NOT match the new permalink (those videos keep redirecting to them): %d', count( $differ ) );
+		$lines   = array_merge( $lines, $differ );
+		$lines[] = sprintf( 'Dedicated URLs that will EQUAL the new permalink (no redirect any more; the watch page serves there): %d', count( $equal ) );
+		$lines   = array_merge( $lines, $equal );
+		return array( 'lines' => $lines, 'shadow' => $shadow, 'differ' => count( $differ ), 'equal' => count( $equal ) );
+	}
+
+	/* ---- 12l. Apply: write the plan in the fixed order settings, permalinks, videos, collections ---- */
+
+	/** Execute (or on a dry run only diff) an apply plan; one log record per step. Returns array( changed IDs, failures ). */
+	function xrv_cli_apply_run( $plan, $log, $dry, $include_sync ) {
+		$changed = array();
+		$fail    = 0;
+		$n       = 0;
+		$total   = ( null !== $plan['settings'] ? 1 : 0 ) + ( null !== $plan['permalinks'] ? 1 : 0 ) + count( $plan['videos'] ) + count( $plan['collections'] );
+		$emit    = function ( $ref, $entry ) use ( $log, &$n, $total, &$fail ) {
+			$n++;
+			$fail += ( 'failed' === $entry['status'] ) ? 1 : 0;
+			$log->put( $ref, $entry );
+			xrv_cli_print_entry( $n, $total, $entry );
+		};
+		if ( null !== $plan['settings'] ) {
+			$raw   = xrv_cli_option_raw( 'xrv_settings' );
+			$eff   = xrv_get_settings();
+			$new   = xrv_settings_prepare( $plan['settings'] );
+			$diffs = array();
+			foreach ( $new as $k => $v ) {
+				$b = array_key_exists( $k, $eff ) ? $eff[ $k ] : null;
+				if ( null === $b || (string) $b !== (string) $v ) {
+					$diffs[] = array( 'field' => 'settings.' . $k, 'before' => $b, 'after' => $v );
+				}
+			}
+			$needs = wp_json_encode( $raw['value'] ) !== wp_json_encode( $new );
+			$entry = array( 'key' => 'settings', 'status' => 'skipped', 'message' => 'unchanged', 'diffs' => $diffs );
+			if ( $needs && $dry ) {
+				$entry['status']  = 'would-update';
+				$entry['message'] = sprintf( '%d setting(s) would change', count( $diffs ) );
+			} elseif ( $needs ) {
+				$cron = xrv_cli_cron_image();
+				update_option( 'xrv_settings', $new );
+				$entry['status']  = 'updated';
+				$entry['message'] = $diffs ? sprintf( '%d setting(s) changed', count( $diffs ) ) : 'stored settings normalised (no effective change)';
+				if ( ! $include_sync && wp_json_encode( xrv_cli_cron_image() ) !== wp_json_encode( $cron ) ) {
+					xrv_cli_cron_restore( $cron ); // the settings hook re-armed sync; sync is not ours to touch
+					$entry['message'] .= '; sync schedule kept as it was';
+				}
+			}
+			$emit( 'settings', $entry );
+		}
+		if ( null !== $plan['permalinks'] ) {
+			$cur   = xrv_permalinks();
+			$diffs = array();
+			foreach ( array( 'single', 'archive' ) as $k ) {
+				if ( (string) $cur[ $k ] !== (string) $plan['permalinks'][ $k ] ) {
+					$diffs[] = array( 'field' => 'permalinks.' . $k, 'before' => $cur[ $k ], 'after' => $plan['permalinks'][ $k ] );
+				}
+			}
+			$entry = array( 'key' => 'permalinks', 'status' => $diffs ? ( $dry ? 'would-update' : 'updated' ) : 'skipped', 'message' => $diffs ? ( $dry ? 'video URL base would change' : 'video URL base changed; rewrite rules rebuilt' ) : 'unchanged', 'diffs' => $diffs );
+			if ( $diffs && ! $dry ) {
+				$r = xrv_set_permalinks( $plan['permalinks']['single'], $plan['permalinks']['archive'] );
+				if ( is_wp_error( $r ) ) {
+					$entry['status']  = 'failed';
+					$entry['message'] = $r->get_error_message();
+				}
+			}
+			$emit( 'permalinks', $entry );
+		}
+		foreach ( $plan['videos'] as $ref => $spec ) {
+			$pid   = (int) $spec['post_id'];
+			$diff  = xrv_cli_diff( $pid, $spec['desired'] );
+			$entry = array( 'key' => $ref, 'status' => 'skipped', 'message' => 'unchanged', 'post_id' => $pid, 'diffs' => $diff['diffs'] );
+			if ( $diff['diffs'] && $dry ) {
+				$entry['status']  = 'would-update';
+				$entry['message'] = sprintf( 'post %d: %d field(s) would change', $pid, count( $diff['diffs'] ) );
+			} elseif ( $diff['diffs'] ) {
+				$entry['warnings'] = xrv_cli_fields_set( $pid, $diff['set'] );
+				$entry['before']   = $diff['before'];
+				$entry['status']   = 'updated';
+				$entry['message']  = sprintf( 'post %d: %d field(s) changed', $pid, count( $diff['diffs'] ) );
+				$changed[]         = $pid;
+			}
+			$emit( 'video:' . $ref, $entry );
+		}
+		foreach ( $plan['collections'] as $slug => $c ) {
+			$ref   = 'collection:' . $slug;
+			$entry = xrv_cli_collection_upsert( $c, array(
+				'dry_run' => $dry,
+				'run_id'  => $log->data['run_id'],
+				'intent'  => function ( $e ) use ( $log, $ref ) {
+					$log->put( $ref, $e );
+				},
+			) );
+			if ( in_array( $entry['status'], array( 'created', 'updated' ), true ) ) {
+				$changed[] = (int) $entry['post_id'];
+			}
+			$emit( $ref, $entry );
+		}
+		if ( ! $dry ) {
+			xrv_cli_purge_caches();
+		}
+		return array( $changed, $fail );
+	}
+
+	/* ---- 12m. Rollback of an apply: exact restore of the pre-image ---- */
+
+	/** Restore an apply's pre-image. Returns array( changed post IDs, problem count ). */
+	function xrv_cli_rollback_apply( $src, $rb, $force, $dry ) {
+		$pre  = isset( $src->data['preimage'] ) && is_array( $src->data['preimage'] ) ? $src->data['preimage'] : null;
+		$post = isset( $src->data['postimage'] ) && is_array( $src->data['postimage'] ) ? $src->data['postimage'] : null;
+		if ( ! $pre ) {
+			WP_CLI::error( 'That apply log has no pre-image.' );
+		}
+		$slugs = array_keys( (array) $pre['collections'] );
+		$refs  = array();
+		foreach ( (array) $pre['videos'] as $ref => $v ) {
+			$refs[ $ref ] = (int) $v['post_id'];
+		}
+		$now = xrv_cli_apply_capture( $slugs, $refs );
+		$since = $post ? xrv_cli_image_diff( $now, $post, true ) : array( 'post-apply image missing (the apply did not finish)' );
+		if ( $since ) {
+			WP_CLI::log( 'Changed since the apply: ' . implode( ', ', $since ) );
+			if ( ! $force ) {
+				$rb->put( 'check', array( 'key' => 'check', 'status' => 'refused', 'message' => 'changed since the apply: ' . implode( ', ', $since ) ) );
+				$rb->finish( 'refused' );
+				WP_CLI::error( 'Refusing to roll back: the values above changed after the apply. Re-run with --force to overwrite them with the pre-image.' );
+			}
+			WP_CLI::warning( 'Overwriting those changes because of --force.' );
+		}
+		$todo  = xrv_cli_image_diff( $now, $pre, true );
+		$total = count( $todo );
+		if ( $dry ) {
+			foreach ( $todo as $i => $p ) {
+				$e = array( 'key' => $p, 'status' => 'would-restore', 'message' => 'differs from the pre-image' );
+				$rb->put( $p, $e );
+				xrv_cli_print_entry( $i + 1, $total, $e );
+			}
+			return array( array(), 0 );
+		}
+		$changed = array();
+		$n       = 0;
+		$emit    = function ( $p, $e ) use ( $rb, &$n, $total ) {
+			$n++;
+			$rb->put( $p, $e );
+			xrv_cli_print_entry( $n, max( $n, $total ), $e );
+		};
+		foreach ( array( 'xrv_settings', 'xrv_permalinks' ) as $name ) {
+			if ( in_array( 'options.' . $name, $todo, true ) ) {
+				xrv_cli_option_restore( $name, $pre['options'][ $name ] );
+				$emit( 'options.' . $name, array( 'key' => 'options.' . $name, 'status' => 'restored', 'message' => empty( $pre['options'][ $name ]['exists'] ) ? 'deleted (absent before the apply)' : 'raw value restored' ) );
+			}
+		}
+		foreach ( (array) $pre['videos'] as $ref => $v ) {
+			if ( ! in_array( 'videos.' . $ref, $todo, true ) ) {
+				continue;
+			}
+			$pid  = (int) $v['post_id'];
+			$errs = get_post( $pid ) ? xrv_cli_fields_set( $pid, (array) $v['fields'] ) : array( 'post no longer exists' );
+			$emit( 'videos.' . $ref, array( 'key' => $ref, 'status' => $errs ? 'failed' : 'restored', 'message' => $errs ? implode( '; ', $errs ) : sprintf( 'post %d fields restored', $pid ), 'post_id' => $pid ) );
+			$changed[] = $pid;
+		}
+		foreach ( (array) $pre['collections'] as $slug => $c ) {
+			if ( ! in_array( 'collections.' . $slug, $todo, true ) ) {
+				continue;
+			}
+			$cid = xrv_cli_collection_id( $slug );
+			if ( empty( $c['exists'] ) ) { // created by the apply: force-delete it, but only if it is the one the apply made
+				$made = isset( $post['collections'][ $slug ]['post_id'] ) ? (int) $post['collections'][ $slug ]['post_id'] : 0;
+				$ours = $cid && ( $cid === $made || (string) get_post_meta( $cid, '_xrv_run_id', true ) === (string) $src->data['run_id'] );
+				if ( $ours ) {
+					wp_delete_post( $cid, true );
+				}
+				$emit( 'collections.' . $slug, array( 'key' => 'collection:' . $slug, 'status' => $ours ? 'deleted' : 'kept', 'message' => $ours ? sprintf( 'force-deleted collection %d (created by the apply)', $cid ) : 'not created by this apply; left alone', 'post_id' => $cid ) );
+			} else {
+				$cid  = (int) $c['post_id'];
+				$errs = get_post( $cid ) ? xrv_cli_fields_set( $cid, (array) $c['fields'] ) : array( 'collection no longer exists' );
+				$emit( 'collections.' . $slug, array( 'key' => 'collection:' . $slug, 'status' => $errs ? 'failed' : 'restored', 'message' => $errs ? implode( '; ', $errs ) : sprintf( 'collection %d restored', $cid ), 'post_id' => $cid ) );
+			}
+			$changed[] = $cid;
+		}
+		if ( wp_json_encode( xrv_cli_cron_image() ) !== wp_json_encode( $pre['cron'] ) ) { // after the options: the settings hook may have re-armed it
+			xrv_cli_cron_restore( $pre['cron'] );
+			$emit( 'cron', array( 'key' => 'cron.xrv_sync_event', 'status' => 'restored', 'message' => $pre['cron']['timestamp'] ? sprintf( 'scheduled at %s UTC (%s)', gmdate( 'Y-m-d H:i:s', (int) $pre['cron']['timestamp'] ), $pre['cron']['recurrence'] ? $pre['cron']['recurrence'] : 'single' ) : 'no sync event (as before)' ) );
+		}
+		xrv_rebuild_video_rewrites();
+		xrv_cli_purge_caches();
+		$left = xrv_cli_image_diff( xrv_cli_apply_capture( $slugs, $refs ), $pre );
+		$rb->data['verify'] = array( 'matches_preimage' => ! $left, 'differences' => $left );
+		WP_CLI::log( $left ? 'Still different from the pre-image: ' . implode( ', ', $left ) : 'Verified: options, collections, videos, sync schedule and rewrite rules match the pre-image.' );
+		return array( $changed, count( $left ) );
+	}
+
+	/* ---- 12n. Export: a manifest that `wp xrv apply` accepts ---- */
+
+	/** Build the manifest array (never includes the API key; on-site dedicated URLs become site-relative). */
+	function xrv_cli_export_manifest() {
+		global $wpdb;
+		$m = array(
+			'xrv_manifest' => 1,
+			'generator'    => 'XRV ' . ( defined( 'XRV_VERSION' ) ? XRV_VERSION : '' ),
+			'exported'     => xrv_cli_now(),
+			'home_url'     => home_url(),
+			'settings'     => xrv_cli_scrub( xrv_get_settings() ),
+			'permalinks'   => xrv_permalinks(),
+			'collections'  => array(),
+			'videos'       => array(),
+		);
+		// Published collections only: a manifest carries no status and apply creates collections as published,
+		// so exporting a draft would publish it on the target site. (Only published collections render anyway.)
+		$cols = get_posts( array( 'post_type' => 'xrv_collection', 'post_status' => 'publish', 'numberposts' => -1, 'orderby' => array( 'menu_order' => 'ASC', 'ID' => 'ASC' ) ) );
+		foreach ( $cols as $c ) {
+			$refs = array();
+			foreach ( array_filter( array_map( 'intval', explode( ',', (string) get_post_meta( $c->ID, '_xrvc_video_ids', true ) ) ) ) as $vid ) {
+				$r = xrv_cli_video_ref( $vid );
+				if ( '' === $r ) {
+					WP_CLI::warning( sprintf( 'collection "%s": post %d has no video ID; left out', $c->post_name, $vid ) );
+					continue;
+				}
+				$refs[] = $r;
+			}
+			$m['collections'][] = array(
+				'slug'    => $c->post_name,
+				'title'   => html_entity_decode( $c->post_title, ENT_QUOTES, 'UTF-8' ),
+				'layout'  => (string) get_post_meta( $c->ID, '_xrvc_layout', true ),
+				'orderby' => (string) get_post_meta( $c->ID, '_xrvc_orderby', true ),
+				'videos'  => $refs,
+			);
+		}
+		$ids = $wpdb->get_col( "SELECT ID FROM {$wpdb->posts} WHERE post_type = 'xroad_video' AND post_status NOT IN ('trash','auto-draft','inherit') ORDER BY menu_order ASC, ID ASC" );
+		foreach ( (array) $ids as $pid ) {
+			$pid = (int) $pid;
+			$ref = xrv_cli_video_ref( $pid );
+			if ( '' === $ref ) {
+				continue;
+			}
+			$p     = get_post( $pid );
+			$parts = explode( ':', $ref, 2 );
+			$ded   = (string) get_post_meta( $pid, '_xrv_dedicated_url', true );
+			$pub   = (string) get_post_meta( $pid, '_xrv_published_at', true );
+			if ( preg_match( '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $pub ) ) { // zone-less: stored as UTC
+				$pub = str_replace( ' ', 'T', $pub ) . 'Z';
+			}
+			$m['videos'][] = array(
+				'provider'   => $parts[0],
+				'id'         => $parts[1],
+				'slug'       => $p->post_name,
+				'status'     => 'future' === $p->post_status ? 'publish' : $p->post_status,
+				'post_date'  => $p->post_date,
+				'menu_order' => (int) $p->menu_order,
+				'meta'       => array(
+					'watch_page'    => '0' === (string) get_post_meta( $pid, '_xrv_watch_page', true ) ? '0' : '1',
+					'dedicated_url' => '' === $ded ? null : xrv_cli_relative_url( $ded ),
+					'duration'      => (string) get_post_meta( $pid, '_xrv_duration_iso', true ),
+					'upload'        => (string) get_post_meta( $pid, '_xrv_upload_date', true ),
+					'published_at'  => $pub,
+					'is_short'      => '1' === (string) get_post_meta( $pid, '_xrv_short', true ),
+					'description'   => (string) get_post_meta( $pid, '_xrv_description', true ),
+				),
+			);
+		}
+		return $m;
+	}
+
+	// XRV-CLI-FUNCS-END
+
+	/* ---- 12z. Command classes and registration ---- */
+
+	/**
+	 * Manage the XRV video library: import, apply a manifest, export, roll back a run.
+	 */
+	class XRV_CLI_Command extends WP_CLI_Command {
+
+		/**
+		 * Import videos from a JSON file. Never fetches a URL (no oEmbed, no API, no remote thumbnail).
+		 *
+		 * Run with the global --user=<admin> flag: capability-gated writes and kses filtering need a real
+		 * administrator. Takes the shared library lock. Chunked and resumable: --max-seconds (default 420)
+		 * stops cleanly between records, writes the run log and prints the exact resume command.
+		 *
+		 * ## OPTIONS
+		 *
+		 * <file>
+		 * : A JSON array of records, or {"videos":[...]}. Fields: provider (youtube), id, title, slug, post_date ("YYYY-MM-DD HH:MM:SS" site-local), menu_order, watch_page, dedicated_url ("/path/" or absolute http(s); null or "" removes), description (or desc), upload (YYYY-MM-DD), published_at (ISO-8601 with a zone), duration (ISO-8601, e.g. PT12M30S), is_short, poster_id (existing image attachment) or poster_path (local image file), terms ({"xrv_series":[],"xrv_audience":[],"xrv_topic":[]} by name).
+		 *
+		 * [--status=<status>]
+		 * : Status for CREATED videos; updates never change status. Default: draft.
+		 * ---
+		 * options:
+		 *   - draft
+		 *   - publish
+		 * ---
+		 *
+		 * [--on-existing=<action>]
+		 * : A video that already exists (same provider + ID, any status, trash included). Default: skip.
+		 * ---
+		 * options:
+		 *   - skip
+		 *   - update
+		 * ---
+		 *
+		 * [--limit=<n>]
+		 * : Process at most n records in this invocation, then stop and print the resume command.
+		 *
+		 * [--resume=<log>]
+		 * : Continue an earlier run (same run id) from its run log; records already done are skipped.
+		 *
+		 * [--max-seconds=<n>]
+		 * : Stop cleanly between records after n seconds; 0 = no limit. Default: 420.
+		 *
+		 * [--log=<path>]
+		 * : Run-log file or directory. Default: wp-content/xrv-runs/.
+		 *
+		 * [--dry-run]
+		 * : Validate and print per-field diffs (field, before, after); write nothing but a run log marked dry_run.
+		 *
+		 * ## EXAMPLES
+		 *
+		 *     wp xrv import videos.json --dry-run --user=admin
+		 *     wp xrv import videos.json --status=draft --limit=20 --user=admin
+		 *     wp xrv import videos.json --resume=wp-content/xrv-runs/xrv-import-20261001-120000-0123456789abcdef.json --user=admin
+		 *
+		 * @when after_wp_load
+		 */
+		public function import( $args, $assoc ) {
+			xrv_cli_require_admin();
+			$t0     = microtime( true );
+			$dry    = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', false );
+			$resume = isset( $assoc['resume'] ) ? (string) $assoc['resume'] : '';
+			$limit  = isset( $assoc['limit'] ) ? max( 0, (int) $assoc['limit'] ) : 0;
+			$max_s  = isset( $assoc['max-seconds'] ) ? max( 0, (int) $assoc['max-seconds'] ) : 420;
+			$file   = realpath( $args[0] );
+			if ( false === $file ) {
+				WP_CLI::error( 'Import file not found: ' . $args[0] );
+			}
+			$data    = xrv_cli_read_json( $file, 'Import file' );
+			$records = ( isset( $data['videos'] ) && is_array( $data['videos'] ) ) ? $data['videos'] : $data;
+			if ( ! wp_is_numeric_array( $records ) ) {
+				WP_CLI::error( 'Expected a JSON array of records or {"videos":[...]}.' );
+			}
+			$records = array_values( $records );
+			$sha     = sha1_file( $file );
+
+			if ( '' !== $resume ) {
+				if ( $dry ) {
+					WP_CLI::error( '--resume cannot be combined with --dry-run.' );
+				}
+				$log = XRV_CLI_Log::open( $resume );
+				$d   = $log->data;
+				if ( 'import' !== $d['kind'] || ! empty( $d['dry_run'] ) ) {
+					WP_CLI::error( 'That run log is not a (non-dry-run) import log.' );
+				}
+				if ( isset( $d['home_url'] ) && home_url() !== $d['home_url'] ) {
+					WP_CLI::error( sprintf( 'That run log belongs to %s, not %s.', $d['home_url'], home_url() ) );
+				}
+				if ( isset( $d['source']['sha1'] ) && $sha !== $d['source']['sha1'] ) {
+					WP_CLI::error( 'The import file changed since this run started (sha1 differs). Resume with the original file.' );
+				}
+				$status      = isset( $d['options']['status'] ) ? $d['options']['status'] : 'draft';
+				$on_existing = isset( $d['options']['on_existing'] ) ? $d['options']['on_existing'] : 'skip';
+				foreach ( array( 'status' => $status, 'on-existing' => $on_existing ) as $k => $was ) {
+					if ( isset( $assoc[ $k ] ) && $assoc[ $k ] !== $was ) {
+						WP_CLI::warning( sprintf( '--%s=%s ignored: a resumed run keeps its original --%s=%s.', $k, $assoc[ $k ], $k, $was ) );
+					}
+				}
+				xrv_cli_lock( $d['run_id'], 'import' );
+				$log->data['state']     = 'running';
+				$log->data['finished']  = null;
+				$log->data['resumes'][] = array( 'at' => xrv_cli_now(), 'assoc' => $assoc );
+				$log->save();
+				WP_CLI::log( sprintf( 'Resuming run %s. Run log: %s', $d['run_id'], $log->path ) );
+			} else {
+				$status      = isset( $assoc['status'] ) ? $assoc['status'] : 'draft';
+				$on_existing = isset( $assoc['on-existing'] ) ? $assoc['on-existing'] : 'skip';
+				$run_id      = XRV_CLI_Log::new_id();
+				if ( ! $dry ) {
+					xrv_cli_lock( $run_id, 'import' );
+				}
+				$log = XRV_CLI_Log::start( 'import', 'import', array( $file ), $assoc, $dry, isset( $assoc['log'] ) ? $assoc['log'] : '', $run_id );
+				$log->data['source']  = array( 'file' => $file, 'sha1' => $sha, 'records' => count( $records ) );
+				$log->data['options'] = array( 'status' => $status, 'on_existing' => $on_existing );
+				$log->save();
+			}
+			list( $dupes, $slugs ) = xrv_cli_import_prepass( $records );
+			$ctx = array( 'dry_run' => $dry, 'status' => $status, 'on_existing' => $on_existing, 'run_id' => $log->data['run_id'], 'base_dir' => dirname( $file ), 'dupes' => $dupes, 'file_slugs' => $slugs );
+			$o   = array( 'records' => $records, 'total' => count( $records ), 'limit' => $limit, 'max_seconds' => $max_s, 't0' => $t0, 'dry_run' => $dry );
+			list( $processed, $failed, $stopped, $changed ) = xrv_cli_import_loop( $log, $ctx, $o );
+
+			$log->finish( $stopped ? 'stopped' : 'complete', array( 'summary' => xrv_cli_log_counts( $log ) ) );
+			if ( ! $dry && $changed ) {
+				do_action( 'xrv_library_changed', array_values( array_unique( $changed ) ) );
+			}
+			if ( ! $dry ) {
+				xrv_lock_release( $log->data['run_id'] );
+			}
+			$sum = array();
+			foreach ( $log->data['summary'] as $s => $c ) {
+				$sum[] = $s . ' ' . $c;
+			}
+			WP_CLI::log( sprintf( 'This invocation: %d record(s) processed. Whole run: %s.', $processed, $sum ? implode( ', ', $sum ) : 'nothing yet' ) );
+			WP_CLI::log( 'Run log: ' . $log->path );
+			if ( 'lock' === $stopped ) {
+				WP_CLI::error( 'Lost the library lock (another writer took it over); stopped between records. Resume with: ' . xrv_cli_resume_cmd( $file, $log, $assoc ) );
+			}
+			if ( $stopped && ! $dry ) {
+				WP_CLI::log( sprintf( 'Stopped (%s) between records. Resume with:', 'time' === $stopped ? 'time budget reached' : '--limit reached' ) );
+				WP_CLI::log( '  ' . xrv_cli_resume_cmd( $file, $log, $assoc ) );
+			}
+			if ( $failed ) {
+				WP_CLI::error( sprintf( '%d record(s) failed validation or writing; details above and in the run log.', $failed ) );
+			}
+			WP_CLI::success( $dry ? 'Dry run finished; nothing was written.' : ( $stopped ? 'Chunk finished.' : 'Import finished.' ) );
+		}
+
+		/**
+		 * Roll back a run from its log: an import or collection run log, or an apply pre-image (detected by "kind").
+		 *
+		 * Import / collection: force-deletes (never trashes) the posts the run created, with the attachments it
+		 * SIDELOADED for them (re-checked: only when no other post uses them); reused posters are never deleted.
+		 * A created post that changed status since the run is kept unless --force. Updated posts get every
+		 * changed field back from the before-image (post fields, meta, terms); terms are recounted.
+		 *
+		 * Apply: exact restore of the pre-image (raw options bypassing sanitize filters, permalinks with rewrite
+		 * rebuild, collections, video fields, the sync schedule). Refused when anything changed since the apply
+		 * (compared with the stored post-apply image) unless --force.
+		 *
+		 * Run with the global --user=<admin> flag. Takes the shared library lock and writes its own run log.
+		 *
+		 * ## OPTIONS
+		 *
+		 * <log>
+		 * : The run log (import / collection) or the apply log holding the pre-image.
+		 *
+		 * [--force]
+		 * : Delete created posts whose status changed, overwrite fields changed since the run, ignore a home_url mismatch.
+		 *
+		 * [--dry-run]
+		 * : Print what would be deleted or restored; write nothing but a run log marked dry_run.
+		 *
+		 * ## EXAMPLES
+		 *
+		 *     wp xrv rollback wp-content/xrv-runs/xrv-import-20261001-120000-0123456789abcdef.json --dry-run --user=admin
+		 *     wp xrv rollback wp-content/xrv-runs/xrv-apply-20261001-130000-fedcba9876543210.json --user=admin
+		 *
+		 * @when after_wp_load
+		 */
+		public function rollback( $args, $assoc ) {
+			xrv_cli_require_admin();
+			$dry   = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', false );
+			$force = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'force', false );
+			$src   = XRV_CLI_Log::open( $args[0] );
+			$kind  = (string) $src->data['kind'];
+			if ( ! in_array( $kind, array( 'import', 'collection', 'apply' ), true ) ) {
+				WP_CLI::error( sprintf( 'A "%s" log cannot be rolled back (import, collection and apply logs can).', $kind ) );
+			}
+			if ( ! empty( $src->data['dry_run'] ) ) {
+				WP_CLI::error( 'That is a dry-run log: it wrote nothing, so there is nothing to roll back.' );
+			}
+			if ( isset( $src->data['home_url'] ) && home_url() !== $src->data['home_url'] ) {
+				if ( ! $force ) {
+					WP_CLI::error( sprintf( 'That log belongs to %s, not %s. Use --force only if this is the same site under a new URL.', $src->data['home_url'], home_url() ) );
+				}
+				WP_CLI::warning( 'home_url differs from the log; continuing because of --force.' );
+			}
+			$run_id = XRV_CLI_Log::new_id();
+			if ( ! $dry ) {
+				xrv_cli_lock( $run_id, 'rollback' );
+			}
+			$rb = XRV_CLI_Log::start( 'rollback', 'rollback', array( $src->path ), $assoc, $dry, '', $run_id );
+			$rb->data['of'] = array( 'run_id' => $src->data['run_id'], 'kind' => $kind, 'log' => $src->path );
+			$rb->save();
+			if ( 'apply' === $kind ) {
+				list( $changed, $problems ) = xrv_cli_rollback_apply( $src, $rb, $force, $dry );
+			} else {
+				list( $changed, $problems ) = xrv_cli_rollback_run( $src, $rb, $force, $dry );
+			}
+			$rb->finish( $problems ? 'partial' : 'complete', array( 'summary' => xrv_cli_log_counts( $rb ) ) );
+			if ( ! $dry ) {
+				$src->data['rolled_back'][] = array( 'at' => xrv_cli_now(), 'by' => $rb->path, 'state' => $rb->data['state'] );
+				$src->save();
+				if ( $changed ) {
+					do_action( 'xrv_library_changed', array_values( array_unique( array_map( 'intval', $changed ) ) ) );
+				}
+				xrv_lock_release( $run_id );
+			}
+			WP_CLI::log( 'Run log: ' . $rb->path );
+			if ( $problems ) {
+				WP_CLI::warning( sprintf( '%d item(s) were kept or could not be restored; see above.', $problems ) );
+			}
+			WP_CLI::success( $dry ? 'Dry run finished; nothing was changed.' : 'Rollback finished.' );
+		}
+
+		/**
+		 * Apply a manifest (the file `wp xrv export` writes is valid input) in one process, in the order
+		 * settings, permalinks, videos, collections; then flush caches (and WP Engine's, when present).
+		 *
+		 * The pre-image (raw xrv_settings, raw xrv_permalinks or "absent", each touched collection and video,
+		 * the sync schedule) is written to the run log BEFORE any write, and the post-apply image after, so
+		 * `wp xrv rollback <log>` can restore exactly and detect later edits. Settings go through
+		 * xrv_settings_prepare(); sync_* keys are left alone unless --include-sync. Videos patch only status,
+		 * dedicated_url (null or "" deletes it), watch_page, menu_order and post_date. A URL base change must
+		 * be named in --sections AND confirmed with --confirm-urls after reading the shadow report.
+		 * Run with the global --user=<admin> flag. Takes the shared library lock.
+		 *
+		 * ## OPTIONS
+		 *
+		 * <manifest>
+		 * : Manifest JSON: {"settings":{},"permalinks":{"single":"","archive":""},"collections":[{"slug","title","layout","orderby","videos":["youtube:ID"]}],"videos":[{"provider","id","status","post_date","menu_order","meta":{"watch_page","dedicated_url"}}]}.
+		 *
+		 * [--sections=<list>]
+		 * : Comma-separated: settings, collections, permalinks, videos. Default: settings,collections.
+		 *
+		 * [--confirm-urls]
+		 * : Required to change the video URL base (permalinks section).
+		 *
+		 * [--include-sync]
+		 * : Also apply the sync_* settings (channel auto-sync).
+		 *
+		 * [--log=<path>]
+		 * : Run-log file or directory. Default: wp-content/xrv-runs/.
+		 *
+		 * [--dry-run]
+		 * : Print the per-field diffs and the URL report; write nothing but a run log marked dry_run.
+		 *
+		 * ## EXAMPLES
+		 *
+		 *     wp xrv apply manifest.json --dry-run --user=admin
+		 *     wp xrv apply manifest.json --sections=permalinks,videos --confirm-urls --user=admin
+		 *
+		 * @when after_wp_load
+		 */
+		public function apply( $args, $assoc ) {
+			xrv_cli_require_admin();
+			$dry     = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', false );
+			$confirm = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'confirm-urls', false );
+			$sync    = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'include-sync', false );
+			$path    = realpath( $args[0] );
+			if ( false === $path ) {
+				WP_CLI::error( 'Manifest not found: ' . $args[0] );
+			}
+			$m        = xrv_cli_read_json( $path, 'Manifest' );
+			$sections = array_values( array_unique( array_filter( array_map( 'trim', explode( ',', strtolower( isset( $assoc['sections'] ) ? (string) $assoc['sections'] : 'settings,collections' ) ) ) ) ) );
+			$bad      = array_diff( $sections, array( 'settings', 'collections', 'permalinks', 'videos' ) );
+			if ( $bad || ! $sections ) {
+				WP_CLI::error( 'Unknown --sections value(s): ' . implode( ', ', $bad ) . '. Use settings, collections, permalinks, videos.' );
+			}
+			list( $errors, $warnings, $plan ) = xrv_cli_apply_plan( $m, $sections, $sync );
+			foreach ( $warnings as $w ) {
+				WP_CLI::warning( $w );
+			}
+			if ( $errors ) {
+				foreach ( $errors as $e ) {
+					WP_CLI::warning( $e );
+				}
+				WP_CLI::error( sprintf( '%d error(s) in the manifest; nothing was written.', count( $errors ) ) );
+			}
+			$report = null;
+			$cur    = xrv_permalinks();
+			if ( null !== $plan['permalinks'] && ( $cur['single'] !== $plan['permalinks']['single'] || $cur['archive'] !== $plan['permalinks']['archive'] ) ) {
+				$report = xrv_cli_permalink_report( $plan['permalinks']['single'], $plan['permalinks']['archive'] );
+				WP_CLI::log( sprintf( 'URL base change report (%d shadow finding(s)):', $report['shadow'] ) );
+				foreach ( $report['lines'] as $line ) {
+					WP_CLI::log( '  ' . $line );
+				}
+				if ( ! $confirm && ! $dry ) {
+					WP_CLI::error( 'Refusing to change the video URL base without --confirm-urls. Review the report above; nothing was written.' );
+				}
+				if ( ! $confirm ) {
+					WP_CLI::warning( 'A real run would refuse this base change without --confirm-urls.' );
+				}
+			}
+			$refs = array();
+			foreach ( $plan['videos'] as $ref => $spec ) {
+				$refs[ $ref ] = $spec['post_id'];
+			}
+			$run_id = XRV_CLI_Log::new_id();
+			if ( ! $dry ) {
+				xrv_cli_lock( $run_id, 'apply' );
+			}
+			$log = XRV_CLI_Log::start( 'apply', 'apply', array( $path ), $assoc, $dry, isset( $assoc['log'] ) ? $assoc['log'] : '', $run_id );
+			$log->data['sections']   = $sections;
+			$log->data['manifest']   = array( 'file' => $path, 'sha1' => sha1_file( $path ) );
+			$log->data['url_report'] = $report;
+			$log->data['targets']    = array( 'collections' => array_keys( $plan['collections'] ), 'videos' => $refs );
+			$log->data['preimage']   = xrv_cli_apply_capture( array_keys( $plan['collections'] ), $refs );
+			$log->save(); // the pre-image is on disk before the first write
+			WP_CLI::log( 'Pre-image saved.' );
+			list( $changed, $fail ) = xrv_cli_apply_run( $plan, $log, $dry, $sync );
+			if ( ! $dry ) {
+				$log->data['postimage'] = xrv_cli_apply_capture( array_keys( $plan['collections'] ), $refs );
+			}
+			$log->finish( $fail ? 'partial' : 'complete', array( 'summary' => xrv_cli_log_counts( $log ) ) );
+			if ( ! $dry ) {
+				if ( $changed ) {
+					do_action( 'xrv_library_changed', array_values( array_unique( $changed ) ) );
+				}
+				xrv_lock_release( $run_id );
+			}
+			WP_CLI::log( 'Run log (holds the pre-image for `wp xrv rollback`): ' . $log->path );
+			if ( $fail ) {
+				WP_CLI::error( sprintf( '%d step(s) failed; see above.', $fail ) );
+			}
+			WP_CLI::success( $dry ? 'Dry run finished; nothing was written.' : 'Manifest applied.' );
+		}
+
+		/**
+		 * Export settings (never the API key), permalinks, collections and videos as a manifest that
+		 * `wp xrv apply` accepts. Collections list their videos as ordered "provider:id"; on-site dedicated
+		 * URLs are written site-relative. Read-only: no lock; the run log only records the export.
+		 *
+		 * ## OPTIONS
+		 *
+		 * --file=<file>
+		 * : Where to write the manifest JSON (written atomically).
+		 *
+		 * [--dry-run]
+		 * : Print the counts; write no manifest.
+		 *
+		 * ## EXAMPLES
+		 *
+		 *     wp xrv export --file=xrv-manifest.json --user=admin
+		 *
+		 * @when after_wp_load
+		 */
+		public function export( $args, $assoc ) {
+			$dry  = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', false );
+			$file = (string) $assoc['file'];
+			$m    = xrv_cli_export_manifest();
+			$log  = XRV_CLI_Log::start( 'export', 'export', $args, $assoc, $dry );
+			$sum  = sprintf( '%d setting(s), permalinks single "%s" archive "%s", %d collection(s), %d video(s)', count( $m['settings'] ), $m['permalinks']['single'], $m['permalinks']['archive'], count( $m['collections'] ), count( $m['videos'] ) );
+			if ( ! $dry ) {
+				$json = wp_json_encode( xrv_cli_scrub( $m ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE );
+				$tmp  = $file . '.tmp' . getmypid();
+				if ( false === $json || false === file_put_contents( $tmp, $json . "\n" ) || ! rename( $tmp, $file ) ) {
+					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					WP_CLI::error( 'Could not write ' . $file );
+				}
+			}
+			$log->finish( 'complete', array( 'summary' => array( 'file' => $dry ? null : realpath( $file ), 'contents' => $sum ) ) );
+			WP_CLI::log( 'Run log: ' . $log->path );
+			WP_CLI::success( ( $dry ? 'Would export ' : 'Exported ' ) . $sum . ( $dry ? '.' : ' to ' . $file ) );
+		}
+
+		// XRV-CLI-CLASS-END
+	}
+
+	/**
+	 * Manage XRV collections (named, placeable galleries).
+	 */
+	class XRV_CLI_Collection_Command extends WP_CLI_Command {
+
+		/**
+		 * Create or update a collection by slug (idempotent: an identical second run writes nothing and says so).
+		 *
+		 * The collection is published (the type is non-public) with an explicit post_name, and afterwards
+		 * get_page_by_path( <slug>, OBJECT, 'xrv_collection' ) must resolve to it. Numeric slugs are rejected
+		 * (the shortcode would read them as a post ID). Unknown video IDs are errors and nothing is written.
+		 * Run with the global --user=<admin> flag. Takes the shared library lock and writes a run log
+		 * (kind "collection") that `wp xrv rollback` can undo.
+		 *
+		 * ## OPTIONS
+		 *
+		 * <slug>
+		 * : The collection slug, as used in [xroad-videos collection="<slug>"].
+		 *
+		 * --ids=<ids>
+		 * : Ordered, comma-separated video IDs: "provider:id" or a bare YouTube ID.
+		 *
+		 * [--layout=<layout>]
+		 * : grid, carousel or library; "" = site default. Default on create: "".
+		 *
+		 * [--orderby=<orderby>]
+		 * : curated, newest, oldest or title; "" = site default. Default on create: "".
+		 *
+		 * [--title=<title>]
+		 * : Collection title. Default on create: the slug in title case.
+		 *
+		 * [--log=<path>]
+		 * : Run-log file or directory. Default: wp-content/xrv-runs/.
+		 *
+		 * [--dry-run]
+		 * : Print per-field diffs; write nothing but a run log marked dry_run.
+		 *
+		 * ## EXAMPLES
+		 *
+		 *     wp xrv collection set featured --ids=yahxL3E6azk,youtube:eEnZMJPAadY --layout=carousel --user=admin
+		 *
+		 * @when after_wp_load
+		 */
+		public function set( $args, $assoc ) {
+			xrv_cli_require_admin();
+			$dry  = (bool) \WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', false );
+			$spec = array( 'slug' => $args[0], 'videos' => (string) $assoc['ids'] );
+			foreach ( array( 'layout', 'orderby', 'title' ) as $k ) {
+				if ( isset( $assoc[ $k ] ) ) {
+					$spec[ $k ] = true === $assoc[ $k ] ? '' : $assoc[ $k ];
+				}
+			}
+			list( $errors, $warnings, $c ) = xrv_cli_collection_validate( $spec );
+			foreach ( $warnings as $w ) {
+				WP_CLI::warning( $w );
+			}
+			if ( $errors ) {
+				foreach ( $errors as $e ) {
+					WP_CLI::warning( $e );
+				}
+				WP_CLI::error( sprintf( '%d error(s); nothing was written.', count( $errors ) ) );
+			}
+			$run_id = XRV_CLI_Log::new_id();
+			if ( ! $dry ) {
+				xrv_cli_lock( $run_id, 'collection set' );
+			}
+			$log = XRV_CLI_Log::start( 'collection', 'collection set', $args, $assoc, $dry, isset( $assoc['log'] ) ? $assoc['log'] : '', $run_id );
+			$ref = 'collection:' . $c['slug'];
+			$out = xrv_cli_collection_upsert( $c, array(
+				'dry_run' => $dry,
+				'run_id'  => $run_id,
+				'intent'  => function ( $entry ) use ( $log, $ref ) {
+					$log->put( $ref, $entry );
+				},
+			) );
+			$out['warnings'] = array_merge( $warnings, $out['warnings'] );
+			$log->put( $ref, $out );
+			xrv_cli_print_entry( 1, 1, $out );
+			$log->finish( 'failed' === $out['status'] ? 'failed' : 'complete', array( 'summary' => xrv_cli_log_counts( $log ) ) );
+			if ( ! $dry && in_array( $out['status'], array( 'created', 'updated' ), true ) ) {
+				do_action( 'xrv_library_changed', array( (int) $out['post_id'] ) );
+			}
+			if ( ! $dry ) {
+				xrv_lock_release( $run_id );
+			}
+			WP_CLI::log( 'Run log: ' . $log->path );
+			if ( 'failed' === $out['status'] || ( isset( $out['resolves'] ) && ! $out['resolves'] ) ) {
+				WP_CLI::error( 'The collection was not written cleanly; see above.' );
+			}
+			WP_CLI::success( 'skipped' === $out['status'] ? 'Nothing to change: the collection already matches.' : ( $dry ? 'Dry run finished; nothing was written.' : 'Collection saved.' ) );
+		}
+	}
+
+	WP_CLI::add_command( 'xrv', 'XRV_CLI_Command' );
+	WP_CLI::add_command( 'xrv collection', 'XRV_CLI_Collection_Command' );
+
+	// XRV-CLI-END
 }

@@ -20,6 +20,7 @@ reviewer can confirm the privacy guarantee and security posture at a glance.
 The plugin's whole purpose is that nothing third-party loads before a click.
 
 - [ ] I verified in DevTools that a page with a gallery makes **zero** requests to any video host or Google domain before the visitor clicks play.
+- [ ] After hovering and tabbing onto posters, the DOM has no `link[rel=preconnect]` / `link[rel=dns-prefetch]` to a video host while **Warm-up on hover** is off (the Network tab cannot show these; `chrome://net-export` can).
 - [ ] On click, exactly one host iframe (or a native `<video>` for self-hosted) loads, the video plays, and a single `video_play` event is pushed to `dataLayer`.
 - [ ] If I touched consent logic, no host contact happens until Accept in the modes that require a prompt (Global for EU/UK/EEA/CH, Strict for everyone).
 - [ ] Not applicable (this change cannot affect pre-click network behavior).

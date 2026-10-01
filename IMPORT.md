@@ -40,6 +40,7 @@ a single file. It is detected when the input, trimmed, starts with `[`.
     "duration": "PT58M46S",        // optional — ISO 8601 duration
     "upload": "2026-04-16",        // optional — YYYY-MM-DD
     "desc": "…",                   // optional — plain-text description
+    "watch_page": false,           // optional: false / "0" / "no" / "off" = no standalone watch page; true / "1" = on; omit = leave as is
     "series":   "Lunch & Learn",                       // optional — string OR array
     "audience": ["Patients & Caregivers"],             // optional — string OR array
     "topic":    ["Rare Cancer Education", "Patient Stories"]  // optional — string OR array
@@ -51,6 +52,8 @@ a single file. It is detected when the input, trimmed, starts with `[`.
 - Taxonomy fields accept either a single string or an array; a string may be **comma / pipe / semicolon-separated** (`"Webinars, Galas"`).
 - Terms are assigned **by name** and **created if they don't exist** — so the file defines your taxonomy as a side effect. Names are matched exactly (case/spacing as written).
 - When an API key is *also* supplied, the file wins; the API only **fills gaps** (e.g. a missing duration).
+- `watch_page` controls the video's standalone watch page. Combine it with **Overwrite** to switch it for videos already in the library.
+- For a full migration (exact slugs, original dates, existing poster images, dedicated URLs, collections, resumable runs and rollback) use the WP-CLI importer in [section 8](#8-wp-cli), which reads a stricter superset of this format.
 
 ## 4. Flow
 
@@ -80,7 +83,7 @@ For each imported video:
 - `_xrv_duration_iso`, `_xrv_upload_date`, `_xrv_description` — when provided
 - **Taxonomy terms** for `xrv_series` / `xrv_audience` / `xrv_topic` — created by name as needed, then assigned
 - **Local thumbnail** sideloaded into the Media Library (maxres → hqdefault fallback) and set as the featured image — only if the post doesn't already have one (the expensive step is skipped on re-runs)
-- `menu_order` appended for new posts (preserves drag-order; existing order is left alone)
+- `menu_order` appended for new posts (after the current highest Order number; the order of existing videos is left alone)
 
 ## 6. Idempotency & safety
 
@@ -103,3 +106,118 @@ might look like:
 
 These are starting suggestions only. Terms stay editable in wp-admin afterward, and
 re-importing with an edited map (Overwrite) re-syncs them.
+
+---
+
+## 8. WP-CLI
+
+Version 2.11.0 adds `wp xrv`, a command-line importer and configuration tool for migrations: exact slugs, original dates, existing poster images, dedicated URLs, collections, settings and permalinks, all with dry runs, logs and rollback. It never contacts YouTube or any other host: no oEmbed, no API, no remote thumbnail.
+
+Run every command with the global `--user=<admin>` flag. Writes are capability-gated, and kses filtering of titles needs a real administrator.
+
+| Command | What it does |
+|---|---|
+| `wp xrv import <file.json>` | Create or update videos from a JSON file (format below). |
+| `wp xrv collection set <slug> --ids=<ids>` | Create or update one collection. Idempotent. |
+| `wp xrv export --file=<manifest.json>` | Write settings, permalinks, collections and videos to a manifest. |
+| `wp xrv apply <manifest.json>` | Apply a manifest's sections to this site. |
+| `wp xrv rollback <log.json>` | Undo an import, collection or apply run from its log. |
+
+`wp help xrv <command>` prints every option.
+
+### Shared behaviour
+
+- **`--dry-run`** on every command prints per-field diffs (field, before, after) and writes nothing except a run log marked as a dry run.
+- **Run log.** Every run writes a JSON log, rewritten after each record, to `wp-content/xrv-runs/` (or `--log=<path>`). The file name ends in 16 random hex characters. Logs hold before-images of everything a run changed, so `wp xrv rollback` can undo it. The folder gets an `index.php` and a deny-all `.htaccess`, but Nginx hosts ignore `.htaccess`: download the logs you need and delete the folder once the migration is final. The YouTube API key is never written to a log.
+- **One writer at a time.** Imports, applies, rollbacks and channel sync share one lock. A run that finds it held prints who holds it and stops. A lock with no heartbeat for 15 minutes (a killed SSH session) is taken over by the next run.
+- **Resumable.** Hosts such as WP Engine drop an idle SSH session after 10 minutes. `--max-seconds=<n>` (default 420) stops cleanly between records, writes the log and prints the exact command that resumes the run. Every record prints a progress line, so the session is never idle. `--limit=<n>` processes at most n records per invocation.
+- **Crash-safe inserts.** An intent entry is written to the log before each insert, and every created post is stamped with the run id (`_xrv_run_id`), so `--resume` and `rollback` find a post even when the process died between creating it and logging it.
+- **`xrv_library_changed`** fires with the affected post IDs after a run writes, so a cache purge can hook it.
+
+### `wp xrv import`
+
+```
+wp xrv import videos.json --dry-run --user=admin
+wp xrv import videos.json --status=draft --user=admin
+wp xrv import videos.json --resume=wp-content/xrv-runs/xrv-import-<stamp>-<hex>.json --user=admin
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `--status=draft\|publish` | `draft` | Status of the videos this run **creates**. Updates never change a status. |
+| `--on-existing=skip\|update` | `skip` | A video that already exists (same provider and ID, in any status, trash included). |
+| `--limit=<n>` | all | Stop after n records and print the resume command. |
+| `--resume=<log>` | | Continue a run from its log; finished records are skipped. |
+| `--max-seconds=<n>` | `420` | Time budget per invocation (0 = none). |
+| `--log=<path>` | `wp-content/xrv-runs/` | Run-log file or folder. |
+
+The file is a JSON array of records (or `{"videos": [...]}`). Formats are strict; a record that fails validation is rejected with the reason and nothing is written for it. Duplicate IDs in one file are rejected before anything is written.
+
+| Field | Format |
+|---|---|
+| `provider` | `youtube` (the only provider in 2.11.0). |
+| `id` | The 11-character YouTube ID. Required. |
+| `title` | Text. |
+| `slug` | The watch page slug. Must be unused by every other video, in any status. Other content at the same address (a page, a post, a category archive) is reported as a warning. |
+| `post_date` | `YYYY-MM-DD HH:MM:SS` in the site's timezone. The GMT date is set too. |
+| `menu_order` | Integer (the curated Order number). |
+| `watch_page` | `true` / `false` (also `"1"` / `"0"`, `"yes"` / `"no"`). |
+| `dedicated_url` | A site-relative path (`/old-page/`, resolved against the site address) or an absolute `http(s)` URL. The video's own address redirects there. `null` or `""` removes it. |
+| `description` (or `desc`) | Text; percent signs, backslashes and brackets are kept. |
+| `upload` | `YYYY-MM-DD`, a real calendar date. |
+| `published_at` | ISO 8601 with a zone, e.g. `2025-03-04T18:30:00Z`. Stored in UTC; it breaks ties in the newest / oldest order. |
+| `duration` | ISO 8601, e.g. `PT58M46S` (not `58:46`). |
+| `is_short` | `true` for a YouTube Short (stored with a `/shorts/` source URL); `false` on an update un-marks it. |
+| `poster_id` | An existing image in the Media Library whose file exists. Reused, never copied and never deleted by a rollback. |
+| `poster_path` | A local image file, imported into the Media Library for this video (a rollback deletes it). Never a URL. |
+| `terms` | `{"xrv_series": [...], "xrv_audience": [...], "xrv_topic": [...]}`, by name, created when missing. An empty list clears that taxonomy on an update. |
+
+### `wp xrv collection set`
+
+```
+wp xrv collection set featured --ids=youtube:yahxL3E6azk,eEnZMJPAadY --layout=carousel --user=admin
+```
+
+`--ids` is the ordered list (`provider:id` or a bare YouTube ID). Optional `--layout=grid|carousel|library`, `--orderby=curated|newest|oldest|title` and `--title`. The collection is published with exactly that slug (numeric slugs are refused, because the shortcode reads them as a post ID). Unknown IDs are errors and nothing is written. Running the same command twice changes nothing the second time.
+
+### `wp xrv export` and `wp xrv apply`
+
+```
+wp xrv export --file=manifest.json --user=admin
+wp xrv apply manifest.json --dry-run --user=admin
+wp xrv apply manifest.json --user=admin
+wp xrv apply manifest.json --sections=permalinks,videos --confirm-urls --user=admin
+```
+
+A manifest has four sections: `settings` (never the API key), `permalinks`, `collections` (slug, title, layout, order and an ordered `provider:id` list) and `videos` (provider, ID, slug, status, date, Order and meta, with site-relative URLs).
+
+- `apply` defaults to `--sections=settings,collections`. **Permalinks are applied only when named and confirmed** with `--confirm-urls`; first the command lists everything the new base would shadow (a page, post, category or rewrite rule already at that address) and every dedicated URL that will no longer match.
+- `apply` validates every section first and writes nothing if any record is invalid. Before changing anything it writes a **pre-image** to its log: the raw settings and permalinks, each collection and video it touches, and the channel-sync schedule.
+- Settings are merged onto the current ones and sanitized; `sync_*` keys are never touched unless you pass `--include-sync`.
+- The `videos` section patches only status, `dedicated_url` (including removal), `watch_page`, Order and date.
+- One run applies settings, then permalinks (the rewrite rules are rebuilt at once), then videos, then collections, then flushes the object cache (and WP Engine's caches when present). Because it is one process, there is no moment where the new address exists but the old redirect still points away.
+
+### `wp xrv rollback`
+
+```
+wp xrv rollback wp-content/xrv-runs/xrv-import-<stamp>-<hex>.json --dry-run --user=admin
+```
+
+- **Import or collection log:** force-deletes (never trashes) the posts the run created and the poster files it imported for them; reused posters are never deleted. A created video whose status has changed since the run is kept unless `--force`. Updated videos get every changed field back. Term counts are recounted.
+- **Apply log:** an exact restore of the pre-image (options written raw, permalinks restored and rewrite rules rebuilt, the sync schedule restored). It refuses when something changed after the apply, unless `--force`.
+
+## 9. Staging to production
+
+A move from another video plugin, rehearsed on staging first. Every step has its own log and rollback.
+
+1. **Rehearse on staging.** Import the library, build the collections, run every step below and its rollback, and keep the manifest (`wp xrv export`).
+2. **Apply settings with sync off, then import as drafts.** On production: `wp xrv apply manifest.json` (settings and collections only). **Never carry `permalinks` in this first apply**; the video base changes last. Then `wp xrv import videos.json --status=draft`, with each record's exact slug, original `post_date` (the GMT date is set from it), existing `poster_id`, and a temporary `dedicated_url` pointing at the page the video lives on today.
+3. **Publish.** Publish the drafts (the manifest's `videos` section, or the editor). With **Dedicated URL redirect** set to **302** in Settings, each video's own address sends visitors to the old page while the migration is in progress, and browsers do not cache that.
+4. **Build the gallery pages** with collections and `[xroad-videos orderby="newest"]`.
+5. **Cut over.** One `apply` with `--sections=permalinks,videos --confirm-urls` sets the final video base and removes the dedicated URLs in the same process, then purges caches. Read the shadow report it prints first. Switch **Dedicated URL redirect** back to 301 afterwards if any dedicated URLs remain.
+6. **Then** turn on channel sync, as draft or publish.
+
+Two traps:
+
+- **Don't use Quick Edit on imported drafts.** For a draft, Quick Edit can reset the date to the moment of the edit and the original publish date is lost. Use the full editor or `apply`.
+- **Keep `post_date_gmt`.** The importer sets it; a draft created any other way without it gets "now" as its date the next time it is updated.

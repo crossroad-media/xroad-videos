@@ -19,16 +19,18 @@ This is the ["facade" pattern](https://stackoverflow.com/questions/5242429/what-
 
 ## What it does
 
-- **Curated CPT** `xroad_video`. Editors paste a video URL from any supported host and drag to reorder; the provider is auto-detected and no API key is required.
+- **Curated CPT** `xroad_video`. Editors paste a video URL from any supported host and set the order with each video's numeric **Order** field (or a gallery sorts itself newest, oldest or by title); the provider is auto-detected and no API key is required.
 - **Built-in bulk importer** (Videos → Import). Paste a list of URLs, point at a channel or playlist (optionally with a free API key for durations and upload dates), or upload a JSON file carrying full metadata and taxonomy terms. A dry-run preview shows new vs. already-in-library before anything is written, then the import runs in batched AJAX with a progress bar.
 - **Local thumbnail sideload** on save, so the grid references `/wp-content/uploads/` and never calls the host's image CDN. YouTube uses its predictable poster URLs (maxres with hqdefault fallback, checked by HTTP status); every other host supplies its poster, and for all but YouTube its duration, from its own no-key oEmbed endpoint, which also prefills the title on first save.
 - **Layouts.** A featured carousel, a browse grid, or both in one shortcode (`layout="library"`), with lightbox or inline playback. Filtering (dropdown selects or chips for Series / Audience / Topic), keyword search, and sort (including shortest or longest by duration) are pure client-side toggles, so they run instantly with no network round-trip. Paged browse adds a Load More button and an optional Subscribe button, and the grid steps 3 to 2 to 1 columns on smaller screens.
-- **Geo-aware consent modes.** Global (recommended), Strict GDPR, or No consent integration. **Global** shows a dismissible opt-in prompt only to EU/UK/EEA/CH visitors (resolved from an edge country header) and stays frictionless for everyone else, including US / CCPA, since the facade shares no data with YouTube until a click. Whenever a prompt is required the plugin makes zero contact with any Google domain until the visitor accepts. See **Privacy, consent & GDPR** below.
+- **Geo-aware consent modes.** Global (recommended), Strict GDPR, or Facade only (no prompt). **Global** shows a dismissible opt-in prompt only to EU/UK/EEA/CH visitors (resolved from an edge country header) and stays frictionless for everyone else, including US / CCPA, since the facade shares no data with YouTube until a click. Whenever a prompt is required the plugin makes zero contact with any Google domain until the visitor accepts. See **Privacy, consent & GDPR** below.
 - **Site-wide settings page** (Videos → Settings). Set the consent mode, privacy URL, filter style, per-page counts, Subscribe URL, and YouTube Data API key once; every gallery inherits them, and any shortcode or block attribute still overrides.
 - **Self-generating VideoObject JSON-LD** inside a `CollectionPage` / `ItemList`, merging with the site's Organization node via the `xrv_org_id` filter. Single-video pages emit a standalone `VideoObject` with transcript and key-moment `Clip`s for rich-result and AI-citation eligibility.
-- **Shortcode, block, and block sidebar controls** under the collision-proof `xroad` namespace. The Gutenberg block exposes Layout, Browse, Privacy, and pre-filter panels through InspectorControls, with no build step.
+- **Shortcode, block, and block sidebar controls** under the collision-proof `xroad` namespace. The Gutenberg block exposes Collection, Layout, Browse, Card look, and pre-filter panels through InspectorControls, with no build step; every 2.11.0 control has a **Site default** choice.
 - **Three REST-exposed taxonomies** (`xrv_series`, `xrv_audience`, `xrv_topic`); sites define their own terms.
 - **Multi-source.** One `_xrv_provider` switch routes YouTube, Vimeo, Wistia, Loom, Dailymotion, and self-hosted files, auto-detected from the pasted URL. Hosted videos load on click as the host's privacy-enhanced iframe (Vimeo with `dnt=1`); self-hosted files play in a native `<video>` element with zero third-party contact ever. Vimeo unlisted and domain-private videos keep their privacy hash, and galleries can mix sources in a single grid.
+
+- **WP-CLI** (`wp xrv import | collection set | apply | export | rollback`) for scripted, resumable migrations: dry runs with per-field diffs, a JSON run log per run, and an exact rollback. See [IMPORT.md](IMPORT.md#8-wp-cli).
 
 No page builder, ACF, jQuery, or build step. The inline-asset architecture (CSS, JS, and SVG emitted once per request) survives a performance plugin's unused-CSS pass and moves between themes unchanged.
 
@@ -66,6 +68,10 @@ Hosted videos load on click as the host's privacy-enhanced player (Vimeo uses `d
 | `limit` | all | Cap how many videos render. |
 | `filter_ui` | `select` | Facet filter style: `select` (dropdowns) or `chips` (clickable rows). |
 | `controls` | `true` | `false` hides the search / sort / filter bar. |
+| `orderby` | `curated` | `curated` (each video's Order number, then date, then ID; a collection keeps its own order), `newest` / `oldest` (upload date, else the post date, then the exact publish time, then ID), or `title`. The Sort menu starts on it and Reset returns to it. |
+| `collection` | none | Render a saved Collection by slug (or ID). An unknown, trashed, draft or deleted collection renders nothing for visitors; logged-in editors see a short notice. An empty one shows "No videos found." |
+| `ids` | none | An exact, ordered list of video post IDs (what collections ride on). |
+| `shorts` | `all` | `all`, `only` (a swipe shelf), or `hide` YouTube Shorts. |
 
 **Layout**
 
@@ -75,20 +81,41 @@ Hosted videos load on click as the host's privacy-enhanced player (Vimeo uses `d
 | `columns` | responsive | Fixed column count; blank gives responsive columns (masonry for `grid`, 3 for `library`/`carousel`). |
 | `featured_limit` | `6` | How many videos feed the featured carousel. |
 | `heading` | none | Optional centered section title above a `grid` or `carousel`. |
-| `playback` | `lightbox` | `lightbox` pops the video into a centered overlay; `inline` plays it in the card. |
+| `playback` | `lightbox` | `lightbox` pops the video into a centered overlay; `inline` plays it in the card; `lightbox-desktop` / `lightbox-mobile` use the overlay on that device class only (decided in the browser, so pages stay cacheable). |
+| `lightbox_details` | `true` | Title, date and description under the player in the lightbox. |
+| `lightbox_desc` | `collapsed` | `collapsed` (four lines with **Show more** / **Show less**) or `full`. |
+| `lightbox_page_link` | `false` | `true` adds an "Open video page" link to the lightbox caption, to the same page as the card title. |
 | `per_page` | `9` | Cards shown before a **Load More** button appears. |
 | `load_more` | `3` | How many more cards each **Load More** click reveals. |
 | `subscribe_url`, `subscribe_label` | off | Show a Subscribe button under the grid when `subscribe_url` is set; `subscribe_label` sets its text. |
+
+**Card look**
+
+| Attribute | Default | What it does |
+|---|---|---|
+| `card_meta` | `full` | Text under each poster: `full` (description + tags), `compact` (description), or `title`. |
+| `card_align` | `auto` | `auto` (grids left, carousels centred), `left`, or `center`. Title, date, description and tags follow it. |
+| `card_date` | `false` | `true` shows the upload date (or the post date) under each title as `<time datetime>`; format with the `xrv_card_date_format` filter. |
+| `desc_chars` | `0` | Trim the visible card description to N characters at a word boundary with "…" (0 = no trim). The lightbox keeps the full text. Screen-reader users also hear only the trimmed text on the card. |
+| `show_duration` | `true` | `false` hides the running-time badge (the duration sort still works). |
+| `hover_style` | `zoom` | `zoom`, `dim` (darkens the poster), or `none`. Also used on keyboard focus; reduced-motion visitors get no zoom or fade. |
+| `thumb_link` | `none` | `watch` makes the poster a real link to the same page as the title: a plain click still plays, Ctrl / Cmd / middle click opens the page. |
+| `subscribe_icon` | `brand` | `brand` (red YouTube mark) or `mono` (the button's text color, triangle cut out). |
+
+Booleans accept `true` / `false` (also `1` / `0`, `yes` / `no`, `on` / `off`).
 
 **Privacy and consent**
 
 | Attribute | Default | What it does |
 |---|---|---|
-| `consent_notice` | `off` | `geo` = **Global** (opt-in prompt for EU/UK/EEA/CH; one-click + facade elsewhere, including US / CCPA), `strict` = **Strict GDPR** (opt-in prompt for everyone), `off` = no consent layer. (`light` = legacy on-video caption, still honored.) See [Privacy, consent & GDPR](#privacy-consent--gdpr). |
+| `consent_notice` | `off` | `geo` = **Global** (opt-in prompt for EU/UK/EEA/CH; one-click + facade elsewhere, including US / CCPA), `strict` = **Strict GDPR** (opt-in prompt for everyone), `off` = **Facade only** (no prompt). See [Privacy, consent & GDPR](#privacy-consent--gdpr). Watch pages and `[xroad-video]` embeds follow the site setting. |
 | `consent_text` | built-in | Body text of the consent prompt. |
 | `consent_button` | `Load video` | Accept-button label. |
 | `consent_decline` | `No thanks` | Decline-button label. |
 | `privacy_url` | WP privacy page | Privacy-policy link shown in the prompt. |
+| `preconnect` | `false` | `true` opens a DNS + TLS connection to the video host when a visitor hovers or tabs to a video (a slightly faster start, but contact with the host before the click). Never while a consent prompt is required. Off by default since 2.11.0. |
+
+Site-only settings (no attribute): **Watch page display** (text under the player, a plain or rich description, and 301 or 302 for dedicated URLs) and Auto-sync's **Only videos published since**.
 
 ## Install
 
@@ -104,6 +131,30 @@ Single-file plugin. Either upload `xroad-videos.php` to `wp-content/plugins/xroa
 | `xrv_video_schema` | Modify a single `VideoObject` node (add `transcript`, `regionsAllowed`, `about`, etc.). |
 | `xrv_list_name` | Override the `CollectionPage` / `ItemList` name. |
 | `xrv_consent_required` | Override the geo consent decision for the current request (force a region, plug in MaxMind, defer to your CMP, and so on). Return `true` to require the consent prompt, `false` to allow one-click play. |
+| `xrv_card_date_format` | The PHP date format of the card date. Default `'F j, Y'`. |
+| `xrv_inline_script_attrs` | Extra attributes for the inline `<script id="xrv-js">`, as `[ name => value ]` (`true` prints a bare attribute), e.g. `[ 'data-no-optimize' => '1', 'nowprocket' => true ]` to keep a "delay JS" optimizer away from the facade. Args: `$attrs, $id`. |
+| `xrv_dedicated_redirect_status` | The status for a video's dedicated-URL redirect. Args: `$status` (the **Dedicated URL redirect** setting, 301 by default), `$post_id`. Clamped to 301 / 302 / 307 / 308. |
+| `xrv_watch_page_off_url` | Where a video with its watch page off redirects. Args: `$url` (`home_url('/')`), `$post_id`. |
+| `xrv_watch_page_off_status` | That redirect's status. Args: `$status` (302), `$post_id`. Clamped to 301 / 302 / 307 / 308; 404 or 410 serve the theme's not-found page with that status instead. |
+| `xrv_poster_sizes` | The `sizes` attribute of card posters. Args: `$sizes` (`'(max-width: 782px) 100vw, 480px'`), `$attachment_id`. |
+| `xrv_single_chrome_css` | The small CSS that hides the theme's byline and featured image on a watch page. Arg: `$css`. |
+| `xrv_video_language` | `inLanguage` on a watch page's VideoObject. Args: `$lang` (`'en'`), `$post_id`. |
+| `xrv_lock_stale_after` | Seconds after which a write lock with no heartbeat (a killed sync or WP-CLI run) can be taken over. Default 900. |
+
+Action: `xrv_library_changed` fires with an array of post IDs after channel sync or a WP-CLI command writes videos (hook a cache purge to it).
+
+## Styling tokens
+
+Every gallery reads these CSS custom properties, so a theme can restyle XRV without overriding selectors. Set them on `.xrv` (or any ancestor).
+
+| Token | Default | Styles |
+|---|---|---|
+| `--xrv-title-size` / `--xrv-title-weight` / `--xrv-title-color` | `16px` / `700` / `--xrv-primary` | Card titles. |
+| `--xrv-date-color` | `--xrv-muted` | The card date. |
+| `--xrv-radius` | `6px` | Poster, player and consent overlay corners. |
+| `--xrv-button-weight` | `600` | Load more and Subscribe text weight. |
+| `--xrv-loadmore-bg` / `--xrv-loadmore-color` / `--xrv-loadmore-radius` / `--xrv-loadmore-hover-bg` | `--xrv-text` / `#fff` / `5px` / `--xrv-primary` | The Load more button. |
+| `--xrv-primary`, `--xrv-action`, `--xrv-accent`, `--xrv-link`, `--xrv-text`, `--xrv-muted`, `--xrv-border`, `--xrv-subscribe`, `--xrv-font` | brand defaults | Colors and font across the gallery (as before). |
 
 Example, merging schema with Yoast/Rank Math's Organization node:
 
@@ -113,27 +164,31 @@ add_filter( 'xrv_org_id', fn() => 'https://example.com/#organization' );
 
 ## Verify the privacy guarantee
 
-Open a page using the gallery in DevTools (Network tab, cache disabled) and confirm **zero** requests to `youtube.com` / `youtube-nocookie.com` / `google.com` / `i.ytimg.com` before any click, and zero YouTube cookies / `localStorage`. Repeat with your consent manager active and confirm no banner, overlay, or black screen. If any Google-domain request fires pre-click, that's a bug; open an issue.
+1. Open a page using the gallery in DevTools (Network tab, cache disabled) and confirm **zero** requests to `youtube.com` / `youtube-nocookie.com` / `google.com` / `i.ytimg.com` before any click, and zero YouTube cookies / `localStorage`.
+2. **Check for connection hints too.** A `preconnect` or `dns-prefetch` never shows in the Network tab, because it is a connection, not a request. Hover a poster, press Tab onto one, then in the Console run `document.querySelectorAll('link[rel=preconnect],link[rel=dns-prefetch]')`: with the default settings the list has no video host in it. To see the sockets themselves, record a `chrome://net-export` log while you hover and tab, and look for the host in it.
+3. Repeat with your consent manager active and confirm no banner, overlay, or black screen.
+
+If any video-host request or connection happens pre-click with **Warm-up on hover** off, that's a bug; open an issue.
 
 ## Privacy, consent & GDPR
 
-The gallery is a **click-to-load facade**: every card is a local first-party poster + a play button. Nothing (no request, cookie, connection, or `localStorage`) reaches the video host until a visitor deliberately clicks. On click it injects the host's privacy-enhanced player (a `youtube-nocookie.com` iframe for YouTube, `player.vimeo.com` with `dnt=1` for Vimeo, the equivalent for Wistia / Loom / Dailymotion, or a native `<video>` for self-hosted files); **that click is the consent** that loads the embed.
+The gallery is a **click-to-load facade**: every card is a local first-party poster + a play button. With the default settings nothing (no request, cookie, connection, or `localStorage`) reaches the video host until a visitor deliberately clicks. The one opt-in exception is **Warm-up on hover** (`preconnect`), which opens a cookie-free connection when a visitor hovers or tabs to a video; it is off by default since 2.11.0 and never runs while a prompt is required. On click it injects the host's privacy-enhanced player (a `youtube-nocookie.com` iframe for YouTube, `player.vimeo.com` with `dnt=1` for Vimeo, the equivalent for Wistia / Loom / Dailymotion, or a native `<video>` for self-hosted files); **that click is the consent** that loads the embed.
 
 On top of that baseline, the **Consent mode** (Settings → Videos → Settings, or `consent_notice=`) sets how consent is obtained:
 
 | Mode | `consent_notice` | What the visitor gets | Pre-click contact with the host |
 |---|---|---|---|
-| **Global** *(recommended)* | `geo` | EU/UK/EEA/CH visitors get the opt-in "Load video" prompt; everyone else (including US / CCPA) plays in one click | **none** for prompted visitors; preconnect for others |
+| **Global** *(recommended)* | `geo` | EU/UK/EEA/CH visitors get the opt-in "Load video" prompt; everyone else (including US / CCPA) plays in one click | **none** (with Warm-up on hover turned on: none for prompted visitors, a hover connection for others) |
 | **Strict GDPR** | `strict` | opt-in prompt for **every** visitor, worldwide | **none** for anyone |
-| **No consent integration** | `off` | no prompt or notice | preconnect on hover (connection only, no data/cookies) |
+| **Facade only** | `off` | no prompt or notice | **none** (with Warm-up on hover turned on: a hover connection, no data or cookies) |
 
-The opt-in prompt is declinable (× / "No thanks"), so refusing is as easy as accepting. **Global** satisfies GDPR where it applies (a prior-consent gate for EU/UK/EEA/CH) and the US notice-and-opt-out model elsewhere, because the facade shares no data with YouTube until the click. The legacy `light` value (an on-video caption) is still honored if set via shortcode. *(Informational only, not legal advice.)*
+The opt-in prompt is declinable (× / "No thanks"), so refusing is as easy as accepting. **Global** satisfies GDPR where it applies (a prior-consent gate for EU/UK/EEA/CH) and the US notice-and-opt-out model elsewhere, because the facade shares no data with YouTube until the click. Galleries, watch pages and `[xroad-video]` embeds all follow the same mode. *(Informational only, not legal advice.)*
 
 Key points:
 
 - **The plugin sets no cookies of its own.** The only client-side storage it writes is a first-party `sessionStorage` flag caching the geo decision. That is not a cookie, not an identifier, and it clears on tab close.
 - **Dismissible consent.** The prompt has an `×` and a **"No thanks"** button; declining closes it and loads nothing, so refusing is as easy as accepting.
-- **Zero pre-click contact when gated.** Whenever a prompt is required (Strict for everyone; Compliance for EU/UK/EEA/CH), the hover `preconnect` is suppressed too, so the visitor's browser makes no DNS/TLS/HTTP contact with any Google domain until they accept.
+- **Zero pre-click contact when gated.** Whenever a prompt is required (Strict for everyone; Global for EU/UK/EEA/CH), the opt-in hover `preconnect` is suppressed too, so the visitor's browser makes no DNS/TLS/HTTP contact with any Google domain until they accept.
 - **Geo detection** reads an edge country header (`CF-IPCountry` / WP Engine / CloudFront) via a cache-safe REST call (`/wp-json/xrv/v1/region`); the page itself stays fully cacheable. With no header present it **fails safe** to showing the prompt to everyone. Override the logic with the `xrv_consent_required` filter.
 - **Scope.** This governs the *video player* only. Other site trackers (analytics, ad tags, consent managers) are independent; gate those at your CMP / Google Consent Mode. The facade also doesn't forward video-viewing data anywhere (relevant to the US VPPA): the `video_play` dataLayer event is first-party; don't wire it to a third party with an identifier.
 - **Not legal advice.** The click-to-load facade with an informed, dismissible prompt is the widely-recognized compliant pattern, but your DPO/counsel makes the final determination for your jurisdiction and content.
@@ -151,6 +206,68 @@ On play, the plugin pushes to `window.dataLayer`:
 Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag reading those data-layer variables. Because the facade never refreshes the page, it avoids the attribution corruption that page-refresh consent workarounds cause.
 
 ## Changelog
+
+### 2.11.0
+
+Front-end, admin and WP-CLI. Built for moving a library off a YouTube feed plugin onto XRV without losing URLs, dates or posters: a scripted, resumable WP-CLI importer with rollback, sort orders, and a round of display options. Every new option defaults to 2.10.0 behaviour except one.
+
+**DEFAULT CHANGE**
+
+- **Warm-up on hover is now off.** In 2.10.0 every gallery opened a DNS + TLS connection to the video host (for example `youtube-nocookie.com`) when a visitor hovered or tabbed to a card: no cookies, but contact with the host before any click. It is now an opt-in setting: Settings → Privacy & consent → **Warm-up on hover**, or `preconnect="true"`. When on, it is still never made while a consent prompt is required, and it adds one `<link>` per host per page instead of one per card.
+
+**Behaviour fixes you may notice**
+
+- **Watch pages and `[xroad-video]` embeds honour the consent mode.** Their markup carried only the playback mode, so Strict and Global never prompted there and hover always warmed up. They now share the gallery's consent, warm-up and display settings.
+- **Carousel titles are centred.** A left-align rule beat the centred caption. The "No videos match" heading is centred too.
+- **The lightbox fits the screen.** The player is sized from the viewport height (`vh`, then `dvh`) as well as its width, so at 1366×657 the title and the close button stay on screen (the caption used to shrink to 38 px). Landscape phones get the caption in a column beside the player, and long links in a description wrap. The description toggle reads **Show more** / **Show less**, and the close button's label is set on every open.
+- **Shortcodes typed into a description no longer run.** The watch page's content filter ran before `do_shortcode`, so a `[video src=…]` in a description executed, could load a third party before the click, and broke the JSON-LD. It now runs after, and brackets in card text, data attributes and JSON-LD strings are encoded.
+- **Auto-sync skips unlisted videos** (and private ones), skips failed, rejected and deleted uploads, and waits for processing, live and upcoming videos. When YouTube's details call fails, nothing is added (2.10.0 created posts titled with the raw video ID). New videos are dated from their YouTube publish time.
+- **Curated order is stable.** Videos with the same Order number fall back to their date, then post ID, instead of the database's whim; client-side sorts break ties on the curated position.
+- **Redirects** from a dedicated URL send `X-Redirect-By: XRV`, never point a page at itself, and skip editor previews and oEmbed views.
+- **Deactivating the plugin removes its rewrite rules** (the post type is now unregistered before the flush), and changing or clearing the collection base no longer leaves the old archive rules behind.
+- **Block themes no longer break the inline script.** Block themes run `wptexturize()` over the whole page, which turned `&&` in the facade script into `&#038;&#038;`. The script body now sits in an HTML comment, which `wptexturize()` skips.
+- **Cards past "Show before Load more" are printed hidden**, so a delayed or failed script no longer flashes the whole library; with JavaScript off every card shows.
+- **JSON-LD names** no longer print `Doctor&#8217;s` or `&amp;`, and `uploadDate` falls back to the post date.
+
+**New options** (Settings, plus a matching `[xroad-videos]` attribute and block control with a "Site default" choice)
+
+- **Default order** (`orderby`): curated, newest, oldest or title. Newest means the upload date, then the exact publish time, then the post ID. Sorted on the server before facets are counted and `limit` is applied; the Sort menu starts on it and Reset returns to it. Collections get their own **Order** select.
+- **Hover effect** (`hover_style`): zoom (as before), dim, or none, on hover and on keyboard focus, with a reduced-motion fallback.
+- **Card text alignment** (`card_align`): automatic (grids left, carousels centred), left, or centred.
+- **Upload date on cards** (`card_date`): a `<time>` under the title; format via the new `xrv_card_date_format` filter.
+- **Trim card descriptions** (`desc_chars`): a word-safe trim with "…"; the lightbox keeps the full text.
+- **Duration badge** (`show_duration`) can be hidden; duration sorting still works.
+- **Subscribe button icon** (`subscribe_icon`): YouTube red (unchanged pixels) or the button's text color with the triangle cut out.
+- **Lightbox description** (`lightbox_desc`): four lines with Show more, or in full; **Open video page** link (`lightbox_page_link`).
+- **Poster click** (`thumb_link`): the poster can also be a real link to the watch page. A plain click still plays; Ctrl / Cmd / middle click opens the page; Space plays.
+- **Watch page display**: text under the player (full, compact, title only) and a **rich** description with line breaks and clickable links (`rel="nofollow noopener"` on external ones). The watch page poster now loads eagerly.
+- **Dedicated URL redirect**: 301 (as before) or 302 while a migration is in progress (with no-cache headers). The `xrv_dedicated_redirect_status` filter now receives the post ID and is clamped to 301 / 302 / 307 / 308.
+- **Auto-sync "Only videos published since"** date.
+- **Styling tokens**: `--xrv-title-size`, `--xrv-title-weight`, `--xrv-title-color`, `--xrv-date-color`, `--xrv-radius`, `--xrv-button-weight` (600, as before), `--xrv-loadmore-bg`, `--xrv-loadmore-color`, `--xrv-loadmore-radius`, `--xrv-loadmore-hover-bg`.
+- **`xrv_inline_script_attrs`** filter and stable `xrv-css` / `xrv-js` ids, so a "delay JS" optimizer can be told to leave the facade alone.
+- **WP-CLI**: `wp xrv import`, `collection set`, `export`, `apply` and `rollback`, with dry runs, JSON run logs, a shared write lock (also used by sync), crash-safe resume, and exact rollback. See [IMPORT.md](IMPORT.md#8-wp-cli).
+
+**Fixes**
+
+- The settings sanitizer is idempotent and safe on partial input: a second pass no longer wipes the play-button colors or turns consent off, and array input no longer throws a PHP 8 TypeError. `xrv_settings_prepare()` merges a partial array onto the stored settings.
+- A PHP 8 fatal in the gallery renderer when a video had terms (a loop variable overwrote the settings array).
+- The block's "0 = site default" on **Show before Load more** rendered one card per page.
+- An unknown or trashed collection slug, or `collection="0"`, rendered the whole library. Those, and draft collections (which rendered their videos), now render nothing for visitors, with a short notice for editors. An empty collection shows "No videos found." without querying.
+- Percent signs (`50%`, `%20` in links) in descriptions, transcripts and chapters survive a save, an import and a sync.
+- **Rebuild local posters** and uninstall never delete an image that another post uses or that belongs to another post.
+- Imported and synced Shorts keep a `/shorts/` source URL, so saving the video in the editor no longer turns them back into 16:9 cards.
+- Upload dates are stored as a real site-local day; the editor's date picker no longer allows tomorrow in UTC-behind time zones.
+- The Video URLs card shows full addresses including the permalink front (`/blog/videos/…` on a site whose posts live under `/blog/`), and a base that repeats the front is refused instead of becoming `blogvideos`. Saving unchanged URLs rebuilds the rewrite rules.
+- The video editor shows a read-only notice when a dedicated URL is set.
+- The keyboard focus ring on posters is drawn inside the poster, where `content-visibility` can no longer clip it.
+- Watch pages between 561 and 880 px wide rendered at half width.
+- On phones the search box stretched to 320 px tall under the stacked filter bar, and the filter menus started at different points; both are fixed.
+- Documentation no longer claims drag-to-reorder: the order is the numeric Order field (Post Attributes), and collections use up / down buttons. Privacy docs now say how to check for connection hints, which the Network tab cannot show.
+
+**Upgrading and rollback**
+
+- No migration step: new settings read their defaults until Settings is saved. Review **Warm-up on hover** if you relied on it.
+- Downgrading to 2.10.0 is safe, but 2.10.0 drops the new settings keys the first time Settings is saved there. **Delete dedicated URLs before downgrading mid-migration**: 2.10.0 sends every dedicated-URL redirect as a 301, which browsers cache.
 
 ### 2.10.0
 

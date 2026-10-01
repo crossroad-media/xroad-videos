@@ -87,7 +87,7 @@ body:
     id: privacy-regression
     attributes:
       label: Did any third-party request fire BEFORE you clicked play?
-      description: The core guarantee is zero contact with any video host until a click. Check DevTools to Network, hard-reload, and look before clicking. A "yes" is the highest-priority class of bug.
+      description: The core guarantee is zero contact with any video host until a click. Check DevTools to Network, hard-reload, and look before clicking. Then hover and Tab onto a poster and check the DOM for link[rel=preconnect] or link[rel=dns-prefetch] to a video host (connection hints never show in the Network tab). A "yes" is the highest-priority class of bug.
       options:
         - "No: the pre-click network was clean"
         - "Yes: a request fired before any click (privacy regression)"
