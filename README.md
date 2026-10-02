@@ -208,6 +208,14 @@ Wire it in GTM with a Custom Event trigger on `video_play` and a GA4 event tag r
 
 ## Changelog
 
+### 2.11.2
+
+Front-end routing and WP-CLI fixes. Sites whose old video plugin did not use XRV's exact URL base see no front-end change.
+
+- **Old pages keep their addresses when the old plugin used the same base.** When another post type's URL base is exactly XRV's (for example an old video plugin at `/blog/videos/<slug>/` and XRV's base moved to `videos` under the same prefix), the two generate rewrite rules with identical keys and XRV's replaced the old plugin's. 2.11.1 then found nothing to step aside to, so XRV served every address at once, before any handover, and old pages with no XRV video returned a 404. XRV now rebuilds the rules it overwrote and checks them first, so each old page keeps serving until its video is handed over.
+- **`wp xrv rollback` no longer reports a correct restore as incomplete.** Its final check compared a fingerprint of the whole rewrite table, which also changes when other plugins' rules are rebuilt in another context (a plugin update, a flush from a web request). It now compares XRV's own rules only. Logs written by earlier versions keep the old check.
+- **The rule check follows a base change inside one command**, so an `apply` that moves the base and a handover check in the same process see the new rules.
+
 ### 2.11.1
 
 Front-end routing and WP-CLI. A migration can now hand video addresses from the old pages to XRV **in batches or all at once**, at the same URLs. Sites whose video base doesn't share addresses with other content see no change.

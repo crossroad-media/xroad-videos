@@ -13,7 +13,7 @@
  *                     generates VideoObject JSON-LD inside a CollectionPage/ItemList that merges with the
  *                     site's Organization node. Shortcode [xroad-videos] and block (xroad/videos).
  *                     By Crossroad Media.
- * Version:           2.11.1
+ * Version:           2.11.2
  * Author:            Crossroad Media
  * Author URI:        https://crossroad.us
  * License:           GPL-2.0-or-later
@@ -61,7 +61,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // Single source of truth for the version (header above stays literal for WordPress to read).
 if ( ! defined( 'XRV_VERSION' ) ) {
-	define( 'XRV_VERSION', '2.11.1' );
+	define( 'XRV_VERSION', '2.11.2' );
 }
 
 /* =================================================================================================
@@ -2939,6 +2939,59 @@ function xrv_video_defers( $pid ) {
 }
 
 /**
+ * The rules an extra permastruct generates, built the way WP_Rewrite::rewrite_rules() builds them. That
+ * method sets $matches = 'matches' first; without it the queries carry "$1" instead of "$matches[1]".
+ */
+function xrv_permastruct_rules( $ps ) {
+	global $wp_rewrite;
+	if ( ! is_array( $ps ) || ( ! isset( $ps['struct'] ) && ! ( 2 === count( $ps ) && isset( $ps[0] ) ) ) ) {
+		return array();
+	}
+	$saved               = $wp_rewrite->matches;
+	$wp_rewrite->matches = 'matches';
+	if ( isset( $ps['struct'] ) ) {
+		$rules = $wp_rewrite->generate_rewrite_rules( $ps['struct'], $ps['ep_mask'], $ps['paged'], $ps['feed'], $ps['forcomments'], $ps['walk_dirs'], $ps['endpoints'] );
+	} else {
+		$rules = $wp_rewrite->generate_rewrite_rules( $ps[0], $ps[1] );
+	}
+	$wp_rewrite->matches = $saved;
+	return (array) $rules;
+}
+
+/**
+ * 2.11.2: rules XRV's own rules overwrote. Rewrite rules are keyed by their regex, so when another post type
+ * uses the same base as XRV (an old video plugin at /blog/videos/%its_slug%/), the two generate identical
+ * keys and XRV's query replaces the other's in the stored rules: the old page's rule no longer exists to fall
+ * back to. Regenerate every other permastruct and keep the rules whose key XRV also generates.
+ */
+function xrv_shadowed_rules() {
+	global $wp_rewrite;
+	static $memo = array();
+	if ( ! ( $wp_rewrite instanceof WP_Rewrite ) || empty( $wp_rewrite->extra_permastructs['xroad_video'] ) ) {
+		return array();
+	}
+	// Keyed by the permastructs, so a base change inside one process (an apply, then a handover) recomputes.
+	$key = md5( wp_json_encode( $wp_rewrite->extra_permastructs ) );
+	if ( isset( $memo[ $key ] ) ) {
+		return $memo[ $key ];
+	}
+	$cache = array();
+	$mine = xrv_permastruct_rules( $wp_rewrite->extra_permastructs['xroad_video'] );
+	foreach ( $wp_rewrite->extra_permastructs as $name => $ps ) {
+		if ( 'xroad_video' === $name ) {
+			continue;
+		}
+		foreach ( xrv_permastruct_rules( $ps ) as $match => $query ) {
+			if ( isset( $mine[ $match ] ) && ! isset( $cache[ $match ] ) && ! preg_match( '/(^|[?&])xroad_video=/', (string) $query ) ) {
+				$cache[ $match ] = $query;
+			}
+		}
+	}
+	$memo[ $key ] = $cache;
+	return $cache;
+}
+
+/**
  * The query vars WordPress would have produced for this request if XRV's own rewrite rules did not exist,
  * or null when no other rule matches. A careful mirror of WP::parse_request(): the same rule list in the
  * same order, the same verbose page-rule check, the same public query vars with $_POST / $_GET precedence,
@@ -2962,9 +3015,18 @@ function xrv_fallback_query_vars( $wp ) {
 		$cut    = strpos( $struct, '%xroad_video%' );
 		$prefix = ( false === $cut ) ? '' : substr( $struct, 0, $cut );
 	}
-	$perma = null;
+	// Rules XRV overwrote come first: they held these addresses before XRV's identical rules replaced them.
+	$cands = array();
+	foreach ( xrv_shadowed_rules() as $match => $query ) {
+		$cands[] = array( $match, $query, true );
+	}
 	foreach ( (array) $rules as $match => $query ) {
-		if ( '' !== $prefix && 0 === strpos( (string) $match, $prefix ) ) {
+		$cands[] = array( $match, $query, false );
+	}
+	$perma = null;
+	foreach ( $cands as $cand ) {
+		list( $match, $query, $shadowed ) = $cand;
+		if ( ! $shadowed && '' !== $prefix && 0 === strpos( (string) $match, $prefix ) ) {
 			continue;
 		}
 		if ( ! preg_match( "#^$match#", $path, $m ) && ! preg_match( "#^$match#", urldecode( $path ), $m ) ) {
@@ -7450,6 +7512,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			'collections' => array(),
 			'videos'      => array(),
 			'rewrite'     => md5( maybe_serialize( get_option( 'rewrite_rules' ) ) ),
+			'rewrite_xrv' => xrv_cli_rewrite_fingerprint(),
 		);
 		foreach ( (array) $slugs as $slug ) {
 			$cid = xrv_cli_collection_id( $slug );
@@ -7485,10 +7548,25 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		if ( wp_json_encode( $a['cron'] ) !== wp_json_encode( $b['cron'] ) ) {
 			$out[] = 'cron.xrv_sync_event';
 		}
-		if ( ! $skip_rewrite && (string) $a['rewrite'] !== (string) $b['rewrite'] ) {
+		// 2.11.2: compare XRV's own rules. The whole table also changes when other plugins' rules are rebuilt in
+		// another context (a plugin update, a web-request flush), which made a correct restore report a difference.
+		// Logs written before 2.11.2 have no rewrite_xrv and keep the whole-table comparison.
+		$ka = isset( $a['rewrite_xrv'], $b['rewrite_xrv'] ) ? 'rewrite_xrv' : 'rewrite';
+		if ( ! $skip_rewrite && (string) $a[ $ka ] !== (string) $b[ $ka ] ) {
 			$out[] = 'rewrite_rules';
 		}
 		return $out;
+	}
+
+	/** Fingerprint of the stored rewrite rules that route to XRV (videos and collections): key, query and order. */
+	function xrv_cli_rewrite_fingerprint() {
+		$mine = array();
+		foreach ( (array) get_option( 'rewrite_rules' ) as $match => $query ) {
+			if ( preg_match( '/(^|[?&])(xroad_video|xrv_collection|xrv_series|xrv_audience|xrv_topic)=|post_type=(xroad_video|xrv_collection)\b/', (string) $query ) ) {
+				$mine[] = $match . ' => ' . $query;
+			}
+		}
+		return md5( implode( "\n", $mine ) );
 	}
 
 	/** Flush the object cache and, on WP Engine, its page / CDN caches (each method guarded). */
